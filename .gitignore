@@ -1,0 +1,17 @@
+# Local-only working area (not for public exposure)
+_local/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# Temp
+*.tmp
+*.bak

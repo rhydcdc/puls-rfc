@@ -1,0 +1,127 @@
+# PULS — PIM-Unified LLM Serving
+
+**Scheduler-aware co-design of HBM-PIM and production LLM serving stack.**
+
+> **Disclosure** — 학부생 단일 저자의 개인 연구 프로젝트. 소속 기관·vendor 연계 없음.
+>
+> 혼자 공부하며 배우는 과정이며, 피드백 · 지적 · 가르침을 적극 환영합니다 (GitHub Issues / Discussions).
+
+본 repo 는 진행 중인 prototype 의 공개 RFC (Request for Comments). Architecture + design rationale + scheduler 정책 의 entry point 만 제공하며, 정량 평가 산출은 simulator 기반 시뮬레이션 영역에서 측정 예정.
+
+상세 본문 — [`ARCHITECTURE.md`](ARCHITECTURE.md) (substrate, instance disaggregation, scheduler integration, adaptive admission, layer flow, prior art 비교 통합).
+
+> **Note:** `ARCHITECTURE.md` will be added later today (English translation in progress).
+
+## Processing-in-Memory 아키텍처의 특징
+
+*본 § 는 모든 PIM 아키텍처가 공유하는 구조적 제약을 정리.* PIM 이 기존 GPU 처리와 병렬로 MAC 연산을 수행하려면 MAC 유닛을 **HBM 의 logic die 또는 DRAM die** 에 설치해야 한다. 이 substrate 선택이 다음 구조적 제약을 야기:
+
+- **Logic die 설치 시 — 면적 제한** — Logic die 의 가용 면적이 제한적이라 의미 있는 양의 연산기 (general-purpose GEMV / GEMM scale) 를 설치할 수 없음.
+- **DRAM die 설치 시 — 메모리 용량 감소** — DRAM die 에 MAC 을 추가하면 메모리 셀 영역이 잠식되어 가용 KV cache 용량 감소.
+- **Thermal envelope 제약** — DRAM 은 열에 민감하여 대량의 MAC 연산을 sustain 못 함. PIM 활성화 구간에서 throttling 이 필연적으로 동반.
+- **범용 연산 지원 비현실** — 위 3 제약의 결합으로 모든 범용 연산을 PIM 으로 흡수하는 것은 비현실. PIM scope 의 신중한 한정이 필수.
+- **메모리 path 공유 — GPU ↔ PIM 동시 점유 불가** — 메모리 데이터는 GPU 와 PIM 코어가 동시 점유 불가. 양 측이 반드시 겹치는 통로 (TSV 또는 bank 간 path) 를 지나야 하며, 이는 GPU 측 데이터 load 의 지연 요인.
+
+## 문제 의식
+
+기존 HBM-PIM 연구들의 한계:
+
+- **일부 오퍼레이션 커널 가속에 그침** — attention 등 일부 op 커널 가속에 머물러 서빙 시스템 전체의 throughput / SLO 개선으로 연결되지 못함.
+- **메모리 die 침범** — PIM logic 이 메모리 die 영역을 잠식하여 KV cache 가용 용량 감소.
+- **발열 / thermal envelope 제약** — PIM 활성화 구간에서 thermal throttling 으로 PIM 동작 중단.
+- **복잡한 부가 스케줄링 로직 + 추가 하드웨어 모듈** — bespoke 제어기 · DMA 엔진 등 substrate 외 추가 영역 요구.
+- **모던 서빙 기능과 비호환** — GQA, speculative decoding 등 production serving 의 표준 기능 지원 부재.
+- **배치 크기별 성능 우위 불안정성** — batch size sweep 에서 PIM 우위 영역이 좁고 transition 이 비연속.
+- **PIM attention 자체의 산출량 한계** — attention 을 PIM 에 탑재해도 op-level token throughput 이 제한적.
+- **Logic die ↔ DRAM die 왕복 트래픽** — attention 중간 결과 (softmax accumulator, row max 등) 가 logic die 와 DRAM die 사이를 왕복하여 internal bus 점유.
+
+## PULS 의 제안
+
+- **HBM-PIM 아키텍처** — 위 한계를 회피하는 substrate 설계:
+  - **Memory die 비침범 (P1)** — KV cache 가용 용량 잠식 회피
+  - **Row-wise pipelined FSM (결정론적 cycle)** — thermal envelope 예측성 확보, dispatch 시점에 PIM 종료 시각 사전 계산
+  - **Per-channel PIM / GPU 토글** — 별도 DMA 엔진 · bespoke 제어기 불요
+  - **SP-PIM cross-GPU 2048 channel cooperation** — 단일 op-level 산출량 한계 분산 (8 GPU lock-step 협력)
+  - **GQA / speculative attention 정합** — 모던 서빙 기능 호환
+  - **Logic die SFU 내부 row-wise 누적** — logic die ↔ DRAM die 왕복 트래픽 회피
+  - **Compute-bound timing 정합 (P5)** — TSV 경합 회피, PIM 활성화 구간을 GPU compute-bound op 실행 중에 한정
+- **자체 스케줄러** — chunked-prefill + 혼합 배치 mixed batch primitive 와 호환 ([`ARCHITECTURE.md`](ARCHITECTURE.md) §8):
+  - **Event-driven dispatch + dependency DAG** — invariant (data dependency + resource) 을 그래프로 코드화, ready-node 선택 문제로 환원
+  - **2-μ-batch lookahead** — 다음 μ-batch 작업을 미리 시작 + idle 자원을 다른 μ-batch 의 작업으로 채움 (자연 산출)
+  - **Adaptive admission with hysteresis deadband** — GPU / PIM idle fraction 측정 기반 동적 admission, 배치 크기별 우위 안정화
+
+## 접근 요약
+
+![PULS Instance Disaggregation](figures/instance_disaggregation.png)
+
+- **Instance disaggregation** — 트랜스포머 레이어를 Instance A (attention block, 8 GPU, TP=8 + SP-PIM 2048 channel) 와 Instance B (post-attention block / FFN, 8 GPU, TP=8) 로 분리. 두 인스턴스는 inter-instance pipeline 으로 직렬 연결. KV cache 는 Instance A HBM 영구 보존 (인스턴스 간 KV 전송 없음). 본 분리가 산출하는 추가 효과:
+  - **Instance B substrate cost 절감 가능성** — Instance B 는 FFN compute-bound 한정으로 HBM 의 full 대역폭이 B_cycle 에 기여하지 않음. **GDDR (또는 적은 stack 수 HBM)** 대체 시 unit cost 절감 가능 ([`ARCHITECTURE.md`](ARCHITECTURE.md) §4.4 "Instance B Memory Substrate").
+  - **고정 shape 텐서 handoff → straggler bubble 제거** — KV 길이 분산으로 decode batch 내 가변 shape 텐서가 발생하나, PIM 이 attention 단계에서 길이 의존성을 흡수하고 Instance B 에는 항상 고정 shape `[B × hidden]` 텐서만 전달. Instance B 는 ragged batching 없이 균일 GEMM 만 수행하여 decode batch 내 straggler bubble 제거 ([`ARCHITECTURE.md`](ARCHITECTURE.md) §6.3).
+  - **KV cache 이동 bus transaction 감소** — PIM 이 attention 을 in-place 처리하므로 GPU ↔ HBM 간 KV streaming traffic 자체가 제거됨. Long-ctx 영역에서 KV bytes read 가 attention 시간의 결정 요인이므로 효과 큼. **부수적 발열 감소 예상** (bus transaction energy ≫ compute energy) ([`ARCHITECTURE.md`](ARCHITECTURE.md) §6.8 보조 항목).
+  - **FFN 가중치 bus transaction 감소** — PIM 이 attention 길이 의존성을 흡수하여 mixed batching 이 복원되면, prefill chunks 와 decode tokens 가 동일 FFN 가중치를 공유. Weight HBM traffic 의 token 분모가 확대되어 per-token FFN 가중치 bus transaction 감소 + arithmetic intensity 상승. **부수적 발열 감소 예상** ([`ARCHITECTURE.md`](ARCHITECTURE.md) §7).
+- **HBM4 logic die SP-PIM**:
+  - **Compute substrate** — row-wise pipelined attention SFU, 32-row tile FSM @ 1.3 GHz, FP16 MAC + FP8 (E4M3) KV cache (production FP8 KV 영역 정합)
+  - **Channel-level PIM / GPU 토글** — HBM4 1 stack 당 32 channel 각자 PIM / 일반 모드 독립 토글
+  - **SP-PIM cross-GPU 협력 (Q-replicate 병렬화)** — Instance A 8 GPU × 256 channel = 2048 channel 전체에서 단일 attention 을 lock-step 협력 처리. 동일 Q 벡터를 2048 channel 전체에 broadcast 하고 KV row 를 channel 에 sharding 하므로, 각 채널이 자기 KV slice 를 독립적으로 sweep → 단일 attention 연산이 2048 channel 단위로 병렬 실행
+  - **Logic die SFU 내부 row-wise 누적** — attention 중간 결과 (softmax accumulator, row max) 가 SFU 내부에서 누적되어 logic die ↔ DRAM die 왕복 트래픽 회피
+- **Interceptor host↔PIM 인터페이스** — decode-attention 단일 연산의 직접적 귀결. 기존 JEDEC HBM4 RD/WR 명령의 **RFU (Reserved For Future use) bit 1개를 PIM_toggle 로 점유**하여 host↔PIM 인터페이스를 표준 DRAM 명령에 흡수. 별도 interrupt 불요. FSM 결정론적 cycle 기반 **computed wait** 로 GPU 가 결과 read 시점 사전 계산. PIM ↔ GPU 의 유일 채널은 HBM (PIM write → GPU read, GPU 내부 kernel 간 global memory 전달과 동일 패턴) ([`ARCHITECTURE.md`](ARCHITECTURE.md) §4.5).
+
+상세 — [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
+## 타겟 워크로드
+
+본 RFC 는 **long-context + large-batch production serving** 환경을 1 차 타겟으로 한다 — multi-turn agentic conversation, 1M-class long-context inference, high-throughput chunked-prefill + mixed batching 시나리오 영역. 이 영역에서 PIM 의 KV cache 흡수 + systems-level F3·F5 효과 (inter-instance pipeline, channel-independent scheduling) 가 baseline 대비 의미 있게 발현.
+
+- **유리한 영역** — long context (≥ 32k), high batch (B ≥ 128), KV 길이 분산이 큰 production trace (agentic workflow, multi-turn chat 등).
+
+## 가속 Source 요약
+
+| ID | Source | 영역 |
+|---|---|---|
+| F1 | SP-PIM attention (2048 channel Q-replicate, 8 GPU lock-step) | Op-level |
+| F2 | Projection ‖ PIM attention double-buffering (intra-instance) | Op-level |
+| F3 | Instance A–B inter-instance pipeline (steady-state) | Systems-level |
+| F4 | μ-batch staggering (F2·F3 steady-state 전제) | Systems-level |
+| F5 | Channel-independent PIM scheduling (KV 길이 분산 흡수) | Systems-level |
+
+F1·F2 = op-level (기존 op-level PIM 연구 접근 영역). **F3·F5 = systems-level (서빙 스케줄러 통합 없이 실현·측정 불가)** — 본 PULS 의 systems-level contribution 핵심. F4 (μ-batch staggering) = 독립 가속 source 가 아닌 F2·F3 의 steady-state 성립을 위한 *enabling condition*.
+
+## Mixed Batching 의 역할
+
+- **1 차 목적: PIM TSV 점유 가능 시간 (compute-bound 헤드룸) 확보** — Pure decode 만으론 projection 이 memory-bound 로 전환되어 PIM 헤드룸 부족 가능. Prefill chunk 토큰을 mixed batch 에 추가 admit 하여 effective N 을 GEMM saturating 영역으로 유도, projection 을 compute-bound regime 에 유지.
+- **부수 효과 (가중치 공유에서 파생)**:
+  - prefill chunks 와 decode tokens 가 동일 가중치 공유 → arithmetic intensity 상승
+  - per-token FFN 가중치 bus transaction 감소
+  - inter-instance KV transfer 제거 (단일 instance 내 공존)
+
+상세 — [`ARCHITECTURE.md`](ARCHITECTURE.md) §7.
+
+## Current Status (2026-05-22)
+
+| Phase | 영역 | Status |
+|---|---|---|
+| Phase 0 — Discovery | η_HBM, NVLink 실측, ctx 외삽 식, KV 분산, FFN saturating, ramulator tile 시간, **FlashAttention 알고리즘 (online softmax + row-wise streaming) 활용 RTL substrate 설계 완료 (Yosys + ASAP7 + OpenSTA pre-CTS flow)** | ✓ Closed |
+| Phase 1 — Simulator Extension | open-source LLM serving simulator (Vidur) fork 위 PIM dispatch + FP8 KV 정합 + Instance A/B scheduler + PB3 보정 | 진행 중 |
+| Phase 2 — Time Model 및 Workload | PIM 정밀 시간 모델, trace replay, handoff 정밀화 | Pending |
+| Phase 3 — Calibration 및 Sensitivity | Sensitivity sweep, 정량 수치 확정 | Pending |
+
+본 RFC 의 정량 수치 (가속 배수, throughput / latency 절대값) 는 **Phase 3 calibration 영역에서 측정 예정**.
+
+## Limitations / Disclosure
+
+- **Hardware 미보유** — 실제 H100 / HBM4 silicon 없음. 평가는 open-source LLM serving simulator (Vidur) 기반.
+- **HBM4 추정** — JEDEC JESD270-4A spec 기반 + 자체 Ramulator2 기반 cycle-accurate 측정 (FP8 tile load / FP16 tile load / PIM compute 영역) 인용.
+- **RTL substrate** — open-source flow (Yosys + ASAP7 + OpenSTA pre-CTS) 한정. Commercial signoff 영역 외.
+- **단일 vendor production trace** — 공개 long-ctx agentic production trace 가 사실상 1 종 한정. 한계 disclosure 와 함께 1M-class benchmark dataset + mid-ctx production chat trace 를 보강 axis 로 사용.
+- **Main claim 정량 = projection** — Phase 3 종료 전 정량 수치는 *추정*.
+- **Workload-segmented deployment** — Short context + low batch + pure decode 영역에선 projection 이 memory-bound 로 전환되어 PIM TSV 점유 헤드룸이 부족할 수 있음. 짧은 컨텍스트 (챗봇 영역) 는 기존 GPU-only 서빙 스택, 장기 컨텍스트 + 대형 배치 (agentic conversation, multi-turn) 는 PULS 를 활용하는 **분리형 서버 구성 가능성 염두**. 정량 영역 경계는 Phase 3 calibration 측정 후 결정.
+
+## Repository
+
+- [`README.md`](README.md) — 본 문서 (entry point)
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — 아키텍처 본문 (motivation, design principles, substrate, instance disaggregation, scheduler integration, adaptive admission, layer flow, prior art 비교)
+- [`LICENSE`](LICENSE) — Apache 2.0
+
+## License
+
+Apache License 2.0. 상세 = [`LICENSE`](LICENSE).
