@@ -10,7 +10,7 @@ This repo is the public RFC (Request for Comments) of an in-progress prototype. 
 
 Full body — [`ARCHITECTURE.md`](ARCHITECTURE.md) (substrate, instance disaggregation, scheduler integration, adaptive admission, layer flow, prior art comparison, all integrated).
 
-> **Note:** `ARCHITECTURE.md` will be added later today (English translation in progress).
+> **Note:** `ARCHITECTURE.md` will be added in a follow-up commit (English translation in progress).
 
 ## Characteristics of Processing-in-Memory Architecture
 

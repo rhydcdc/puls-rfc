@@ -10,7 +10,7 @@
 
 상세 본문 — [`ARCHITECTURE.md`](ARCHITECTURE.md) (substrate, instance disaggregation, scheduler integration, adaptive admission, layer flow, prior art 비교 통합).
 
-> **Note:** `ARCHITECTURE.md` will be added later today (English translation in progress).
+> **Note:** `ARCHITECTURE.md` will be added in a follow-up commit (English translation in progress).
 
 ## Processing-in-Memory 아키텍처의 특징
 
