@@ -12,11 +12,29 @@
 
 > **Note:** `ARCHITECTURE.md` will be added in a follow-up commit (English translation in progress).
 
+## 목차
+
+**Background**
+- [Processing-in-Memory 아키텍처의 특징](#processing-in-memory-아키텍처의-특징)
+- [문제 의식](#문제-의식)
+
+**The Proposal**
+- [PULS 의 제안](#puls-의-제안)
+- [접근 요약](#접근-요약)
+- [타겟 워크로드](#타겟-워크로드)
+- [가속 Source 요약](#가속-source-요약)
+- [Mixed Batching 의 역할](#mixed-batching-의-역할)
+
+**Project Status**
+- [Current Status](#current-status-2026-05-22)
+- [Limitations / Disclosure](#limitations--disclosure)
+- [Forward-looking: HBF-class 분리 Substrate](#forward-looking-hbf-class-분리-substrate)
+
 ## Processing-in-Memory 아키텍처의 특징
 
-*본 § 는 모든 PIM 아키텍처가 공유하는 구조적 제약을 정리.* PIM 이 기존 GPU 처리와 병렬로 MAC 연산을 수행하려면 MAC 유닛을 **HBM 의 logic die 또는 DRAM die** 에 설치해야 한다. 이 substrate 선택이 다음 구조적 제약을 야기:
+*본 § 는 모든 PIM 아키텍처가 공유하는 구조적 제약을 정리.* HBM4E 부터 custom logic die 공정이 시작된다. PIM 이 기존 GPU 처리와 병렬로 MAC 연산을 수행하려면 MAC 유닛을 **HBM 의 logic die (PHY) 또는 DRAM die** 에 설치해야 한다. 이 substrate 선택이 다음 구조적 제약을 야기:
 
-- **Logic die 설치 시 — 면적 제한** — Logic die 의 가용 면적이 제한적이라 의미 있는 양의 연산기 (general-purpose GEMV / GEMM scale) 를 설치할 수 없음.
+- **Logic die (PHY) 설치 시 — 면적 제한** — Logic die 의 가용 면적이 제한적이라 의미 있는 양의 연산기 (general-purpose GEMV / GEMM scale) 를 설치할 수 없음.
 - **DRAM die 설치 시 — 메모리 용량 감소** — DRAM die 에 MAC 을 추가하면 메모리 셀 영역이 잠식되어 가용 KV cache 용량 감소.
 - **Thermal envelope 제약** — DRAM 은 열에 민감하여 대량의 MAC 연산을 sustain 못 함. PIM 활성화 구간에서 throttling 이 필연적으로 동반.
 - **범용 연산 지원 비현실** — 위 3 제약의 결합으로 모든 범용 연산을 PIM 으로 흡수하는 것은 비현실. PIM scope 의 신중한 한정이 필수.
@@ -115,6 +133,15 @@ F1·F2 = op-level (기존 op-level PIM 연구 접근 영역). **F3·F5 = systems
 - **단일 vendor production trace** — 공개 long-ctx agentic production trace 가 사실상 1 종 한정. 한계 disclosure 와 함께 1M-class benchmark dataset + mid-ctx production chat trace 를 보강 axis 로 사용.
 - **Main claim 정량 = projection** — Phase 3 종료 전 정량 수치는 *추정*.
 - **Workload-segmented deployment** — Short context + low batch + pure decode 영역에선 projection 이 memory-bound 로 전환되어 PIM TSV 점유 헤드룸이 부족할 수 있음. 짧은 컨텍스트 (챗봇 영역) 는 기존 GPU-only 서빙 스택, 장기 컨텍스트 + 대형 배치 (agentic conversation, multi-turn) 는 PULS 를 활용하는 **분리형 서버 구성 가능성 염두**. 정량 영역 경계는 Phase 3 calibration 측정 후 결정.
+
+## Forward-looking: HBF-class 분리 Substrate
+
+본 RFC main claim 영역 (HBM4 SP-PIM) 의 정합성 검증 이후, 별도 substrate 인 **HBF (High Bandwidth Flash)** 같은 분리 메모리 계층에 PIM 코어를 탑재하는 방향이 추가 검토 가치를 가진다. 구조적 효과:
+
+- **PIM 가동률 ceiling 상승** — GPU 의 HBM 점유 phase 와 독립적으로 PIM 가동 가능 → *compute-bound timing 정합 제약* (P5, TSV 경합 회피를 위해 PIM 활성화 구간을 GPU compute-bound op 실행 중에 한정해야 한다는 원칙) 이 substrate-level 분리로 자동 해소되는 방향.
+- **메모리 path 공유 해소** — GPU ↔ PIM 의 TSV / inter-bank path 경합이 substrate-level 분리로 구조적으로 회피되는 방향 (GPU 는 HBM 버스, PIM 은 HBF 버스 각자 점유).
+
+단, **HBF spec 이 현 시점 미공개** 이므로 데이터 로드 latency, KV cache 의 핫·콜드 tier 분할 정책, write endurance 제약은 정량 특정 불가능. 본 항목은 *방향성 한정* 이며 spec disclosure 이후 정량 follow-up 영역.
 
 ## Repository
 

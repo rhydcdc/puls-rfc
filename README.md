@@ -12,11 +12,29 @@ Full body — [`ARCHITECTURE.md`](ARCHITECTURE.md) (substrate, instance disaggre
 
 > **Note:** `ARCHITECTURE.md` will be added in a follow-up commit (English translation in progress).
 
+## Table of Contents
+
+**Background**
+- [Characteristics of Processing-in-Memory Architecture](#characteristics-of-processing-in-memory-architecture)
+- [Problem Statement](#problem-statement)
+
+**The Proposal**
+- [The PULS Proposal](#the-puls-proposal)
+- [Approach Summary](#approach-summary)
+- [Target Workload](#target-workload)
+- [Acceleration Sources Summary](#acceleration-sources-summary)
+- [Role of Mixed Batching](#role-of-mixed-batching)
+
+**Project Status**
+- [Current Status](#current-status-2026-05-22)
+- [Limitations / Disclosure](#limitations--disclosure)
+- [Forward-looking: HBF-class Disaggregated Substrate](#forward-looking-hbf-class-disaggregated-substrate)
+
 ## Characteristics of Processing-in-Memory Architecture
 
-*This Section summarizes the structural constraints shared by every PIM architecture.* To execute MAC operations in parallel with ongoing GPU processing, PIM must place MAC units on either **the logic die or the DRAM die of HBM**. This substrate choice imposes the following structural constraints:
+*This Section summarizes the structural constraints shared by every PIM architecture.* From HBM4E onward, custom logic-die fabrication begins. To execute MAC operations in parallel with ongoing GPU processing, PIM must place MAC units on either **the logic die (PHY) or the DRAM die of HBM**. This substrate choice imposes the following structural constraints:
 
-- **Logic die placement — area constraint** — Logic die area is limited; a meaningful quantity of compute units (general-purpose GEMV / GEMM scale) cannot be installed.
+- **Logic die (PHY) placement — area constraint** — Logic die area is limited; a meaningful quantity of compute units (general-purpose GEMV / GEMM scale) cannot be installed.
 - **DRAM die placement — memory capacity reduction** — Adding MAC units to the DRAM die encroaches on memory cell area, reducing available KV cache capacity.
 - **Thermal envelope constraint** — DRAM is heat-sensitive and cannot sustain large MAC workloads. Throttling necessarily accompanies PIM activation.
 - **General-purpose computation unrealistic** — The combination of the three constraints above makes it unrealistic to absorb all general-purpose computation into PIM. Careful scoping of the PIM workload is mandatory.
@@ -115,6 +133,15 @@ The quantitative figures of this RFC (acceleration multiples, throughput / laten
 - **Single-vendor production trace** — Publicly available long-context agentic production traces are effectively limited to one. Disclosed as a limitation; augmented with a 1M-class benchmark dataset + a mid-context production chat trace as supplementary axes.
 - **Main claim quantitatives = projection** — Pre-Phase-3 numbers are *estimates*.
 - **Workload-segmented deployment** — In the short-context + low-batch + pure-decode regime, projection switches to memory-bound and the PIM TSV-occupancy headroom may be insufficient. A **separated-server configuration is kept in mind**, in which short contexts (the chatbot regime) use the existing GPU-only serving stack and long contexts + large batches (agentic conversation, multi-turn) use PULS. The quantitative boundary between regimes will be decided after Phase 3 calibration.
+
+## Forward-looking: HBF-class Disaggregated Substrate
+
+Beyond the HBM4 SP-PIM main claim of this RFC, mounting PIM cores on a **separate memory tier such as HBF (High Bandwidth Flash)** is a direction worth further examination. Structural effects:
+
+- **PIM duty-cycle ceiling lift** — PIM can run independently of the GPU's HBM occupancy phase, so the *compute-bound timing alignment* constraint (P5, the requirement that PIM activate only inside compute-bound windows to avoid TSV contention) is dissolved at the substrate-topology level.
+- **Memory path sharing resolved** — The GPU ↔ PIM contention on the shared TSV / inter-bank path is structurally avoided through substrate-level separation: GPU keeps its HBM bus, PIM operates on the HBF bus.
+
+That said, **HBF specifications remain unreleased at this time**, so data load latency, hot/cold KV cache tier partitioning policy, and write endurance constraints cannot be quantitatively specified. This item is *directional only*; the quantitative follow-up belongs to the period after spec disclosure.
 
 ## Repository
 
