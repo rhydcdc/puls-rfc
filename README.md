@@ -48,9 +48,9 @@ Limitations of existing HBM-PIM research:
 - **Heat / thermal envelope constraint** — Thermal throttling during PIM activation halts PIM operation.
 - **Complex auxiliary scheduling logic + extra hardware modules** — Bespoke controllers, DMA engines, and similar non-substrate components are required.
 - **Incompatibility with modern serving features** — Lacks support for standard production-serving features such as GQA and speculative decoding.
-- **Unstable performance advantage across batch sizes** — Across a batch-size sweep, the PIM-advantageous regime is narrow and the transition is discontinuous.
+- **Unstable performance advantage across batch sizes (in many existing designs)** — Across a batch-size sweep, the PIM-advantageous regime is narrow and the transition is discontinuous.
 - **Inherent throughput limit of PIM attention** — Even when attention is offloaded to PIM, op-level token throughput remains limited.
-- **Logic die ↔ DRAM die round-trip traffic** — Intermediate attention results (softmax accumulator, row max, etc.) shuttle between the logic die and DRAM die, occupying the internal bus.
+- **Logic die ↔ DRAM die / HBM ↔ host round-trip traffic** — Intermediate attention results (softmax accumulator, row max, etc.) shuttle between the logic die and DRAM die, and between HBM and the host (GPU / NPU), occupying the internal bus and the host ↔ HBM path.
 
 ## The PULS Proposal
 

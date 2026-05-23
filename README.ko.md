@@ -48,9 +48,9 @@
 - **발열 / thermal envelope 제약** — PIM 활성화 구간에서 thermal throttling 으로 PIM 동작 중단.
 - **복잡한 부가 스케줄링 로직 + 추가 하드웨어 모듈** — bespoke 제어기 · DMA 엔진 등 substrate 외 추가 영역 요구.
 - **모던 서빙 기능과 비호환** — GQA, speculative decoding 등 production serving 의 표준 기능 지원 부재.
-- **배치 크기별 성능 우위 불안정성** — batch size sweep 에서 PIM 우위 영역이 좁고 transition 이 비연속.
+- **배치 크기별 성능 우위 불안정성 (다수의 기존 설계에서)** — batch size sweep 에서 PIM 우위 영역이 좁고 transition 이 비연속.
 - **PIM attention 자체의 산출량 한계** — attention 을 PIM 에 탑재해도 op-level token throughput 이 제한적.
-- **Logic die ↔ DRAM die 왕복 트래픽** — attention 중간 결과 (softmax accumulator, row max 등) 가 logic die 와 DRAM die 사이를 왕복하여 internal bus 점유.
+- **Logic die ↔ DRAM die / HBM ↔ host 왕복 트래픽** — attention 중간 결과 (softmax accumulator, row max 등) 가 logic die 와 DRAM die 사이, 그리고 HBM 과 host (GPU / NPU) 사이를 왕복하여 internal bus 와 host ↔ HBM 경로를 점유.
 
 ## PULS 의 제안
 
