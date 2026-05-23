@@ -44,7 +44,6 @@ Full body — [`ARCHITECTURE.md`](ARCHITECTURE.md) (substrate, instance disaggre
 
 Limitations of existing HBM-PIM research:
 
-- **Limited to acceleration of a few operator kernels** — Stays at kernel-level acceleration of operators such as attention; does not translate into throughput / SLO improvement at the serving-system level.
 - **Memory-die intrusion** — PIM logic encroaches on the memory die, reducing available KV cache capacity.
 - **Heat / thermal envelope constraint** — Thermal throttling during PIM activation halts PIM operation.
 - **Complex auxiliary scheduling logic + extra hardware modules** — Bespoke controllers, DMA engines, and similar non-substrate components are required.
@@ -54,6 +53,8 @@ Limitations of existing HBM-PIM research:
 - **Logic die ↔ DRAM die round-trip traffic** — Intermediate attention results (softmax accumulator, row max, etc.) shuttle between the logic die and DRAM die, occupying the internal bus.
 
 ## The PULS Proposal
+
+*Why attention specifically?* Attention is universal across transformer-based models and admits online streaming compute — a natural fit for the PIM substrate.
 
 - **HBM-PIM architecture** — substrate design that avoids the above limitations:
   - **Memory-die non-intrusion (P1)** — avoids encroachment on KV cache capacity

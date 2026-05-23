@@ -44,7 +44,6 @@
 
 기존 HBM-PIM 연구들의 한계:
 
-- **일부 오퍼레이션 커널 가속에 그침** — attention 등 일부 op 커널 가속에 머물러 서빙 시스템 전체의 throughput / SLO 개선으로 연결되지 못함.
 - **메모리 die 침범** — PIM logic 이 메모리 die 영역을 잠식하여 KV cache 가용 용량 감소.
 - **발열 / thermal envelope 제약** — PIM 활성화 구간에서 thermal throttling 으로 PIM 동작 중단.
 - **복잡한 부가 스케줄링 로직 + 추가 하드웨어 모듈** — bespoke 제어기 · DMA 엔진 등 substrate 외 추가 영역 요구.
@@ -54,6 +53,8 @@
 - **Logic die ↔ DRAM die 왕복 트래픽** — attention 중간 결과 (softmax accumulator, row max 등) 가 logic die 와 DRAM die 사이를 왕복하여 internal bus 점유.
 
 ## PULS 의 제안
+
+*왜 attention 인가?* Attention 은 transformer 계열 모델에서 범용적으로 수행되는 연산이며 online streaming 으로 처리 가능 — PIM substrate 와의 자연스러운 정합.
 
 - **HBM-PIM 아키텍처** — 위 한계를 회피하는 substrate 설계:
   - **Memory die 비침범 (P1)** — KV cache 가용 용량 잠식 회피
