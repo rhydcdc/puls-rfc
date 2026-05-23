@@ -42,15 +42,26 @@ Full body — [`ARCHITECTURE.md`](ARCHITECTURE.md) (substrate, instance disaggre
 
 ## Problem Statement
 
-Limitations of existing HBM-PIM research:
+Limitations of existing HBM-PIM research, grouped by axis:
 
+**Substrate-level (cell · bank · die)**
 - **Memory-die intrusion** — PIM logic encroaches on the memory die, reducing available KV cache capacity.
 - **Heat / thermal envelope constraint** — Thermal throttling during PIM activation halts PIM operation.
+- **Non-standard DRAM circuit modifications required** — Dual row buffers, bank-level compute logic, and similar cell- / bank-level circuit changes deviate from standard DRAM fabrication, raising fab risk and yield concerns beyond ordinary logic ASIC integration.
+
+**System-level (interconnect · resources · auxiliary HW)**
 - **Complex auxiliary scheduling logic + extra hardware modules** — Bespoke controllers, DMA engines, and similar non-substrate components are required.
+- **Logic die ↔ DRAM die / HBM ↔ host round-trip traffic** — Intermediate attention results (softmax accumulator, row max, etc.) shuttle between the logic die and DRAM die, and between HBM and the host (GPU / NPU), occupying the internal bus and the host ↔ HBM path.
+- **Structural requirement of dedicated large-scale HBM resource beyond the GPU (in some designs)** — Designs that physically separate PIM-enabled HBM from the GPU's HBM impose an additional, dedicated HBM provision on top of the host GPU memory.
+
+**Serving lifecycle (KV cache continuity · session state)**
+- **Multi-turn / continuation prefill not supported (in many existing designs)** — Existing designs commonly assume a single Sum → repeated Gen flow per request; continuation prefill that must attend to existing KV (multi-turn chat, chunked prefill, RAG with growing context) is not architecturally accommodated.
+- **Bulk KV cache transfer between GPU and dedicated PIM resource (in some designs)** — When PIM-side HBM is physically separated from the GPU, the KV cache must traverse the host ↔ PIM interconnect (PCIe / NVLink / CXL), making the interconnect a bottleneck that partly nullifies the internal-bandwidth advantage of PIM.
+
+**Workload coverage (model variants · batch regime)**
 - **Incompatibility with modern serving features** — Lacks support for standard production-serving features such as GQA and speculative decoding.
 - **Unstable performance advantage across batch sizes (in many existing designs)** — Across a batch-size sweep, the PIM-advantageous regime is narrow and the transition is discontinuous.
 - **Inherent throughput limit of PIM attention** — Even when attention is offloaded to PIM, op-level token throughput remains limited.
-- **Logic die ↔ DRAM die / HBM ↔ host round-trip traffic** — Intermediate attention results (softmax accumulator, row max, etc.) shuttle between the logic die and DRAM die, and between HBM and the host (GPU / NPU), occupying the internal bus and the host ↔ HBM path.
 
 ## The PULS Proposal
 
