@@ -15,3 +15,7 @@ desktop.ini
 # Temp
 *.tmp
 *.bak
+
+# Figures: keep only the PNG embedded in README; ignore source/alternative formats
+figures/*
+!figures/instance_disaggregation.png
