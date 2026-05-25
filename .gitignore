@@ -19,3 +19,6 @@ desktop.ini
 # Figures: keep only the PNG embedded in README; ignore source/alternative formats
 figures/*
 !figures/instance_disaggregation.png
+
+# Local LLM behavior guide (not for public exposure)
+CLAUDE.md

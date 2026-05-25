@@ -54,6 +54,10 @@
 - **Logic die ↔ DRAM die / HBM ↔ host 왕복 트래픽** — attention 중간 결과 (softmax accumulator, row max 등) 가 logic die 와 DRAM die 사이, 그리고 HBM 과 host (GPU / NPU) 사이를 왕복하여 internal bus 와 host ↔ HBM 경로를 점유.
 - **GPU 외 별도 대용량 HBM 자원의 구조적 요구 (일부 설계에서)** — PIM 측 HBM 을 GPU HBM 과 물리적으로 분리하는 설계는 호스트 GPU 메모리에 더해 별도 대용량 HBM 자원을 추가로 요구.
 
+**GPU ↔ PIM concurrency (stall · path contention)**
+- **PIM 실행 중 GPU stall (일부 설계에서)** — 일부 설계는 PIM 이 동작을 완료할 때까지 GPU 를 명시적으로 block 하여, 병렬 자원이어야 할 두 영역을 직렬화. 이 구간의 GPU idle 시간은 다른 작업으로 채울 수 없음.
+- **공유 메모리 path 경합** — PIM 과 GPU 는 동일 물리 경로 (TSV / C/A bus / inter-bank path / row buffer) 를 공유. PIM 활성화는 GPU 의 동시 HBM read (weight streaming, KV 트랜잭션) 와 경합하여 GPU 측을 지연.
+
 **Serving lifecycle (KV cache continuity · session state)**
 - **멀티턴 / continuation prefill 미지원 (다수의 기존 설계에서)** — 기존 설계는 통상 request 당 single Sum → repeated Gen 흐름 가정. 기존 KV 를 다시 attend 해야 하는 continuation prefill (멀티턴 채팅, chunked prefill, context 가 누적되는 RAG 등) 은 구조적으로 수용 불가.
 - **GPU ↔ 별도 PIM 자원 간 KV 대량 이동 (일부 설계에서)** — PIM 측 HBM 이 GPU 와 물리적으로 분리된 경우, KV cache 가 host ↔ PIM interconnect (PCIe / NVLink / CXL) 를 통과해야 하며, 이 interconnect 가 새 병목이 되어 PIM 의 internal-bandwidth 이점을 부분적으로 무효화.
@@ -75,7 +79,7 @@
   - **GQA / speculative attention 정합** — 모던 서빙 기능 호환
   - **Logic die SFU 내부 row-wise 누적** — logic die ↔ DRAM die 왕복 트래픽 회피
   - **Compute-bound timing 정합 (P5)** — TSV 경합 회피, PIM 활성화 구간을 GPU compute-bound op 실행 중에 한정
-- **자체 스케줄러** — chunked-prefill + 혼합 배치 mixed batch primitive 와 호환 ([`ARCHITECTURE.md`](ARCHITECTURE.md) §8):
+- **자체 스케줄러** — chunked-prefill + 혼합 배치 mixed batch primitive 와 호환 ([`ARCHITECTURE.md`](ARCHITECTURE.md) §6):
   - **Event-driven dispatch + dependency DAG** — invariant (data dependency + resource) 을 그래프로 코드화, ready-node 선택 문제로 환원
   - **2-μ-batch lookahead** — 다음 μ-batch 작업을 미리 시작 + idle 자원을 다른 μ-batch 의 작업으로 채움 (자연 산출)
   - **Adaptive admission with hysteresis deadband** — GPU / PIM idle fraction 측정 기반 동적 admission, 배치 크기별 우위 안정화
@@ -85,16 +89,16 @@
 ![PULS Instance Disaggregation](figures/instance_disaggregation.png)
 
 - **Instance disaggregation** — 트랜스포머 레이어를 Instance A (attention block, 8 GPU, TP=8 + SP-PIM 2048 channel) 와 Instance B (post-attention block / FFN, 8 GPU, TP=8) 로 분리. 두 인스턴스는 inter-instance pipeline 으로 직렬 연결. KV cache 는 Instance A HBM 영구 보존 (인스턴스 간 KV 전송 없음). 본 분리가 산출하는 추가 효과:
-  - **Instance B substrate cost 절감 가능성** — Instance B 는 FFN compute-bound 한정으로 HBM 의 full 대역폭이 B_cycle 에 기여하지 않음. **GDDR (또는 적은 stack 수 HBM)** 대체 시 unit cost 절감 가능 ([`ARCHITECTURE.md`](ARCHITECTURE.md) §4.4 "Instance B Memory Substrate").
-  - **고정 shape 텐서 handoff → straggler bubble 제거** — KV 길이 분산으로 decode batch 내 가변 shape 텐서가 발생하나, PIM 이 attention 단계에서 길이 의존성을 흡수하고 Instance B 에는 항상 고정 shape `[B × hidden]` 텐서만 전달. Instance B 는 ragged batching 없이 균일 GEMM 만 수행하여 decode batch 내 straggler bubble 제거 ([`ARCHITECTURE.md`](ARCHITECTURE.md) §6.3).
-  - **KV cache 이동 bus transaction 감소** — PIM 이 attention 을 in-place 처리하므로 GPU ↔ HBM 간 KV streaming traffic 자체가 제거됨. Long-ctx 영역에서 KV bytes read 가 attention 시간의 결정 요인이므로 효과 큼. **부수적 발열 감소 예상** (bus transaction energy ≫ compute energy) ([`ARCHITECTURE.md`](ARCHITECTURE.md) §6.8 보조 항목).
-  - **FFN 가중치 bus transaction 감소** — PIM 이 attention 길이 의존성을 흡수하여 mixed batching 이 복원되면, prefill chunks 와 decode tokens 가 동일 FFN 가중치를 공유. Weight HBM traffic 의 token 분모가 확대되어 per-token FFN 가중치 bus transaction 감소 + arithmetic intensity 상승. **부수적 발열 감소 예상** ([`ARCHITECTURE.md`](ARCHITECTURE.md) §7).
+  - **Instance B substrate cost 절감 가능성** — Instance B 는 FFN compute-bound 한정으로 HBM 의 full 대역폭이 B_cycle 에 기여하지 않음. **GDDR (또는 적은 stack 수 HBM)** 대체 시 unit cost 절감 가능 ([`ARCHITECTURE.md`](ARCHITECTURE.md) §3.4 "Instance B Memory Substrate").
+  - **고정 shape 텐서 handoff → straggler bubble 제거** — KV 길이 분산으로 decode batch 내 가변 shape 텐서가 발생하나, PIM 이 attention 단계에서 길이 의존성을 흡수하고 Instance B 에는 항상 고정 shape `[B × hidden]` 텐서만 전달. Instance B 는 ragged batching 없이 균일 GEMM 만 수행하여 decode batch 내 straggler bubble 제거 ([`ARCHITECTURE.md`](ARCHITECTURE.md) §5.2).
+  - **KV cache 이동 bus transaction 감소** — PIM 이 attention 을 in-place 처리하므로 GPU ↔ HBM 간 KV streaming traffic 자체가 제거됨. Long-ctx 영역에서 KV bytes read 가 attention 시간의 결정 요인이므로 효과 큼. **부수적 발열 감소 예상** (bus transaction energy ≫ compute energy) ([`ARCHITECTURE.md`](ARCHITECTURE.md) §5.7 보조 항목).
+  - **FFN 가중치 bus transaction 감소** — PIM 이 attention 길이 의존성을 흡수하여 mixed batching 이 복원되면, prefill chunks 와 decode tokens 가 동일 FFN 가중치를 공유. Weight HBM traffic 의 token 분모가 확대되어 per-token FFN 가중치 bus transaction 감소 + arithmetic intensity 상승. **부수적 발열 감소 예상** ([`ARCHITECTURE.md`](ARCHITECTURE.md) §5.7 보조 항목).
 - **HBM4 logic die SP-PIM**:
   - **Compute substrate** — row-wise pipelined attention SFU, 32-row tile FSM @ 1.3 GHz, FP16 MAC + FP8 (E4M3) KV cache (production FP8 KV 영역 정합)
   - **Channel-level PIM / GPU 토글** — HBM4 1 stack 당 32 channel 각자 PIM / 일반 모드 독립 토글
   - **SP-PIM cross-GPU 협력 (Q-replicate 병렬화)** — Instance A 8 GPU × 256 channel = 2048 channel 전체에서 단일 attention 을 lock-step 협력 처리. 동일 Q 벡터를 2048 channel 전체에 broadcast 하고 KV row 를 channel 에 sharding 하므로, 각 채널이 자기 KV slice 를 독립적으로 sweep → 단일 attention 연산이 2048 channel 단위로 병렬 실행
   - **Logic die SFU 내부 row-wise 누적** — attention 중간 결과 (softmax accumulator, row max) 가 SFU 내부에서 누적되어 logic die ↔ DRAM die 왕복 트래픽 회피
-- **Interceptor host↔PIM 인터페이스** — decode-attention 단일 연산의 직접적 귀결. 기존 JEDEC HBM4 RD/WR 명령의 **RFU (Reserved For Future use) bit 1개를 PIM_toggle 로 점유**하여 host↔PIM 인터페이스를 표준 DRAM 명령에 흡수. 별도 interrupt 불요. FSM 결정론적 cycle 기반 **computed wait** 로 GPU 가 결과 read 시점 사전 계산. PIM ↔ GPU 의 유일 채널은 HBM (PIM write → GPU read, GPU 내부 kernel 간 global memory 전달과 동일 패턴) ([`ARCHITECTURE.md`](ARCHITECTURE.md) §4.5).
+- **Interceptor host↔PIM 인터페이스** — decode-attention 단일 연산의 직접적 귀결. 기존 JEDEC HBM4 RD/WR 명령의 **RFU (Reserved For Future use) bit 1개를 PIM_toggle 로 점유**하여 host↔PIM 인터페이스를 표준 DRAM 명령에 흡수. 별도 interrupt 불요. FSM 결정론적 cycle 기반 **computed wait** 로 GPU 가 결과 read 시점 사전 계산. PIM ↔ GPU 의 유일 채널은 HBM (PIM write → GPU read, GPU 내부 kernel 간 global memory 전달과 동일 패턴) ([`ARCHITECTURE.md`](ARCHITECTURE.md) §3.5).
 
 상세 — [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
@@ -113,8 +117,8 @@
 | F3 | Instance A–B inter-instance pipeline (steady-state) | Systems-level |
 | F4 | μ-batch staggering (F2·F3 steady-state 전제) | Systems-level |
 | F5 | Channel-independent PIM scheduling (KV 길이 분산 흡수) | Systems-level |
-
-F1·F2 = op-level (기존 op-level PIM 연구 접근 영역). **F3·F5 = systems-level (서빙 스케줄러 통합 없이 실현·측정 불가)** — 본 PULS 의 systems-level contribution 핵심. F4 (μ-batch staggering) = 독립 가속 source 가 아닌 F2·F3 의 steady-state 성립을 위한 *enabling condition*.
+| (보조) | Mixed batching 복원 (가중치 공유 → arithmetic intensity ↑) | TTFT / throughput trade-off |
+| (보조) | Bus traffic 절감 (PIM in-place attention → HBM-GPU bus transaction ↓) | Energy / cost |
 
 ## Mixed Batching 의 역할
 
@@ -123,8 +127,6 @@ F1·F2 = op-level (기존 op-level PIM 연구 접근 영역). **F3·F5 = systems
   - prefill chunks 와 decode tokens 가 동일 가중치 공유 → arithmetic intensity 상승
   - per-token FFN 가중치 bus transaction 감소
   - inter-instance KV transfer 제거 (단일 instance 내 공존)
-
-상세 — [`ARCHITECTURE.md`](ARCHITECTURE.md) §7.
 
 ## Current Status (2026-05-22)
 
