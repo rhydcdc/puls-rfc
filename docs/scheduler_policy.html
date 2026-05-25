@@ -1,0 +1,1346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PULS Scheduler Policy — Reading Guide</title>
+<style>
+/* ============================================================
+   PULS Scheduler Policy — Reading Guide
+   Companion to ARCHITECTURE.md §6.
+   Canonical text lives in ARCHITECTURE.md; this is a reading aid.
+   ============================================================ */
+
+:root {
+  --color-bg: #ffffff;
+  --color-text: #1f2937;
+  --color-subtle: #6b7280;
+  --color-muted: #4b5563;
+  --color-border: #d1d5db;
+  --color-grid: #e5e7eb;
+  --color-soft: #f3f4f6;
+  --color-softer: #f9fafb;
+
+  /* μ-batch palette (shared with scheduler_dispatch_timeline.html) */
+  --color-p: #6b7280;
+  --color-p-bg: #f1f5f9;
+  --color-m: #d97706;
+  --color-m-bg: #fef3c7;
+  --color-n: #2563eb;
+  --color-n-bg: #dbeafe;
+  --color-next: #94a3b8;
+  --color-next-bg: #f8fafc;
+
+  /* Instance palette (shared with instance_disaggregation.html) */
+  --color-a-bg: #fffaf0;
+  --color-a-border: #e5b876;
+  --color-b-bg: #f0f4ff;
+  --color-b-border: #94a3d8;
+  --color-pim: #d97706;
+  --color-pim-bg: #fef3c7;
+  --color-kv: #16a34a;
+  --color-kv-bg: #dcfce7;
+  --color-ar: #b91c1c;
+  --color-arrow: #1f2937;
+
+  /* lane backgrounds for dispatch trace */
+  --gpu-lane-bg: #f9fafb;
+  --pim-lane-bg: #fffbf3;
+
+  /* Sidebar */
+  --sidebar-width: 260px;
+  --sidebar-bg: #f8fafc;
+  --sidebar-border: #e2e8f0;
+  --nav-active: #1f2937;
+  --nav-active-bg: #ffffff;
+  --nav-hover-bg: #eef2f6;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.55;
+  min-height: 100vh;
+}
+
+/* ============================ Layout ============================ */
+
+.layout {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) 1fr;
+  min-height: 100vh;
+}
+
+.sidebar {
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--sidebar-border);
+  padding: 28px 0 28px 0;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+
+.sidebar-header {
+  padding: 0 22px 18px 22px;
+  border-bottom: 1px solid var(--sidebar-border);
+  margin-bottom: 14px;
+}
+
+.sidebar-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--color-text);
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.sidebar-subtitle {
+  font-size: 11px;
+  color: var(--color-subtle);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+.nav {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.nav li {
+  margin: 0;
+}
+
+.nav a {
+  display: block;
+  padding: 9px 22px;
+  color: var(--color-muted);
+  text-decoration: none;
+  font-size: 12.5px;
+  font-weight: 500;
+  border-left: 3px solid transparent;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  cursor: pointer;
+}
+
+.nav a:hover {
+  background: var(--nav-hover-bg);
+  color: var(--color-text);
+}
+
+.nav a.active {
+  background: var(--nav-active-bg);
+  color: var(--nav-active);
+  border-left-color: var(--color-pim);
+  font-weight: 600;
+}
+
+.nav-num {
+  display: inline-block;
+  width: 18px;
+  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  font-size: 11px;
+  color: var(--color-subtle);
+  margin-right: 6px;
+}
+
+.nav a.active .nav-num {
+  color: var(--color-pim);
+}
+
+.sidebar-footer {
+  padding: 16px 22px;
+  margin-top: 18px;
+  border-top: 1px solid var(--sidebar-border);
+  font-size: 10.5px;
+  color: var(--color-subtle);
+  line-height: 1.5;
+}
+
+.sidebar-footer a {
+  color: var(--color-muted);
+  text-decoration: none;
+  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+}
+
+.sidebar-footer a:hover {
+  color: var(--color-text);
+  text-decoration: underline;
+}
+
+/* ============================ Content ============================ */
+
+.content {
+  padding: 40px 56px 80px 56px;
+  max-width: 980px;
+}
+
+section.doc-section {
+  display: none;
+}
+
+section.doc-section.active {
+  display: block;
+}
+
+.section-header {
+  margin-bottom: 24px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--color-grid);
+}
+
+.section-eyebrow {
+  font-size: 11px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  color: var(--color-pim);
+  letter-spacing: 0.04em;
+  margin-bottom: 6px;
+}
+
+.section-title {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: #111827;
+  margin: 0;
+}
+
+.section-lede {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--color-muted);
+  line-height: 1.6;
+}
+
+/* prose blocks */
+.prose p {
+  margin: 12px 0;
+  font-size: 13.5px;
+  color: var(--color-text);
+}
+
+.prose b, .prose strong {
+  color: #111827;
+  font-weight: 600;
+}
+
+.prose code, code.inline {
+  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  font-size: 12px;
+  background: var(--color-soft);
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: #1f2937;
+}
+
+.prose ul {
+  margin: 10px 0;
+  padding-left: 22px;
+  font-size: 13.5px;
+}
+
+.prose ul li {
+  margin: 6px 0;
+  line-height: 1.55;
+}
+
+.h-sub {
+  font-size: 15px;
+  font-weight: 700;
+  margin: 24px 0 8px 0;
+  color: #111827;
+  letter-spacing: -0.01em;
+}
+
+/* tables */
+table.doc-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 14px 0 18px 0;
+  font-size: 12.5px;
+}
+
+table.doc-table th,
+table.doc-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border: 1px solid var(--color-grid);
+  vertical-align: top;
+}
+
+table.doc-table th {
+  background: var(--color-soft);
+  font-weight: 600;
+  color: #111827;
+  font-size: 12px;
+}
+
+table.doc-table td code, table.doc-table td .mono {
+  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  font-size: 11.5px;
+  color: #1f2937;
+}
+
+.table-id {
+  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  font-weight: 700;
+  color: var(--color-pim);
+}
+
+.kind-correctness { color: #166534; font-weight: 600; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+.kind-efficiency { color: #b45309; font-weight: 600; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+.kind-resource { color: #1e40af; font-weight: 600; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+
+/* code blocks (pseudo-code) */
+pre.code-block {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 16px 20px;
+  border-radius: 5px;
+  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-x: auto;
+  margin: 14px 0;
+}
+
+pre.code-block .kw { color: #c4b5fd; }
+pre.code-block .fn { color: #93c5fd; }
+pre.code-block .str { color: #fcd34d; }
+pre.code-block .cmt { color: #64748b; font-style: italic; }
+pre.code-block .var { color: #f9a8d4; }
+
+/* callout boxes */
+.callout {
+  border-left: 3px solid var(--color-pim);
+  background: #fffaf0;
+  padding: 10px 14px;
+  margin: 12px 0;
+  font-size: 12.5px;
+  border-radius: 0 3px 3px 0;
+  line-height: 1.55;
+}
+
+.callout.info { border-left-color: var(--color-n); background: #f0f7ff; }
+.callout.note { border-left-color: var(--color-subtle); background: var(--color-softer); }
+
+.callout-title {
+  font-weight: 700;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', monospace;
+  letter-spacing: 0.04em;
+  color: var(--color-pim);
+  margin-right: 6px;
+}
+
+.callout.info .callout-title { color: var(--color-n); }
+.callout.note .callout-title { color: var(--color-muted); }
+
+/* ============================ Instance Disaggregation figure ============================ */
+/* Inline copy from figures/instance_disaggregation.html — scoped within #sec-1 */
+
+#sec-1 .figure-container {
+  width: 760px;
+  max-width: 100%;
+  margin-top: 6px;
+}
+
+#sec-1 .title {
+  font-size: 17px;
+  font-weight: 700;
+  margin: 0 0 4px 0;
+  letter-spacing: -0.015em;
+  color: #111827;
+}
+
+#sec-1 .subtitle {
+  font-size: 12px;
+  color: var(--color-subtle);
+  margin: 0 0 22px 0;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+#sec-1 .diagram {
+  display: grid;
+  grid-template-columns: 1fr 100px 1fr;
+  gap: 0;
+  align-items: stretch;
+}
+
+#sec-1 .instance {
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: white;
+}
+#sec-1 .instance-a { background: var(--color-a-bg); border-color: var(--color-a-border); }
+#sec-1 .instance-b { background: var(--color-b-bg); border-color: var(--color-b-border); }
+
+#sec-1 .instance-header {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(0,0,0,0.08);
+  background: rgba(255,255,255,0.55);
+  text-align: center;
+}
+#sec-1 .instance-name {
+  font-size: 13px;
+  font-weight: 700;
+  margin: 0;
+  letter-spacing: -0.01em;
+  color: #111827;
+}
+#sec-1 .instance-substrate {
+  font-size: 10.5px;
+  color: var(--color-subtle);
+  margin-top: 3px;
+  font-family: 'JetBrains Mono', 'SF Mono', 'Consolas', monospace;
+}
+
+#sec-1 .steps {
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+#sec-1 .step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: white;
+  border: 1px solid var(--color-border);
+  border-radius: 3px;
+  font-size: 11.5px;
+  line-height: 1.2;
+}
+#sec-1 .step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #374151;
+  color: white;
+  font-size: 10px;
+  font-weight: 600;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+#sec-1 .step-name { flex: 1; font-weight: 500; color: #1f2937; }
+#sec-1 .step-tag {
+  font-size: 9.5px;
+  font-family: 'JetBrains Mono', 'SF Mono', 'Consolas', monospace;
+  color: var(--color-subtle);
+  padding: 1px 5px;
+  background: var(--color-soft);
+  border-radius: 2px;
+  white-space: nowrap;
+}
+#sec-1 .step.pim { background: var(--color-pim-bg); border-color: var(--color-pim); border-width: 1.5px; }
+#sec-1 .step.pim .step-num { background: var(--color-pim); }
+#sec-1 .step.pim .step-tag { background: rgba(217, 119, 6, 0.12); color: #92400e; }
+#sec-1 .step.ar { border-color: var(--color-ar); border-style: dashed; }
+#sec-1 .step.ar .step-num { background: var(--color-ar); }
+#sec-1 .step.ar .step-tag { background: rgba(185, 28, 28, 0.08); color: #991b1b; }
+
+#sec-1 .kv-cache {
+  margin-top: 8px;
+  padding: 7px 10px;
+  background: var(--color-kv-bg);
+  border: 1px solid var(--color-kv);
+  border-radius: 3px;
+  font-size: 10.5px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #14532d;
+  line-height: 1.3;
+}
+#sec-1 .kv-cache b { color: #166534; }
+#sec-1 .note {
+  margin-top: 8px;
+  padding: 7px 10px;
+  background: #f5f6fa;
+  border: 1px solid #cbd5e1;
+  border-radius: 3px;
+  font-size: 10.5px;
+  color: #475569;
+  line-height: 1.3;
+}
+#sec-1 .note b { color: #334155; font-weight: 600; }
+
+#sec-1 .connector {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 40px 0;
+  gap: 40px;
+  position: relative;
+}
+#sec-1 .arrow-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+#sec-1 .arrow-label {
+  font-size: 9.5px;
+  font-family: 'JetBrains Mono', 'SF Mono', 'Consolas', monospace;
+  color: var(--color-subtle);
+  white-space: nowrap;
+  letter-spacing: -0.01em;
+}
+#sec-1 .arrow-label.primary { color: #1f2937; font-weight: 600; }
+#sec-1 .arrow-line {
+  width: 80px;
+  height: 1.5px;
+  background: var(--color-arrow);
+  position: relative;
+}
+#sec-1 .arrow-line.dashed { height: 0; background: none; border-top: 1.5px dashed var(--color-arrow); }
+#sec-1 .arrow-line::after {
+  content: '';
+  position: absolute;
+  right: -1px;
+  top: -4px;
+  width: 0; height: 0;
+  border-left: 7px solid var(--color-arrow);
+  border-top: 4.5px solid transparent;
+  border-bottom: 4.5px solid transparent;
+}
+#sec-1 .arrow-line.back::after {
+  left: -1px; right: auto; top: -5px;
+  border-left: none;
+  border-right: 7px solid var(--color-arrow);
+}
+#sec-1 .arrow-line.dashed::after { top: -5px; }
+
+#sec-1 .legend {
+  margin-top: 20px;
+  padding-top: 12px;
+  border-top: 1px solid #e5e7eb;
+  display: flex;
+  gap: 18px;
+  font-size: 10.5px;
+  color: var(--color-muted);
+  flex-wrap: wrap;
+}
+#sec-1 .legend-item { display: flex; align-items: center; gap: 6px; }
+#sec-1 .legend-color {
+  width: 11px; height: 11px;
+  border-radius: 2px;
+  border: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+#sec-1 .legend-color.pim { background: var(--color-pim-bg); border-color: var(--color-pim); }
+#sec-1 .legend-color.gpu { background: white; }
+#sec-1 .legend-color.kv { background: var(--color-kv-bg); border-color: var(--color-kv); }
+#sec-1 .legend-color.ar { background: white; border-color: var(--color-ar); border-style: dashed; }
+
+#sec-1 .caption {
+  margin-top: 16px;
+  font-size: 10.5px;
+  color: var(--color-subtle);
+  line-height: 1.5;
+}
+#sec-1 .caption b { color: #1f2937; font-weight: 600; }
+#sec-1 .caption code {
+  font-family: 'JetBrains Mono', 'SF Mono', 'Consolas', monospace;
+  font-size: 9.5px;
+  background: var(--color-soft);
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
+/* ============================ §6.3 DAG diagram (new) ============================ */
+.dag-figure {
+  margin: 16px 0;
+  padding: 24px 20px;
+  background: var(--color-softer);
+  border: 1px solid var(--color-grid);
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.dag-svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.dag-caption {
+  margin-top: 12px;
+  font-size: 11px;
+  color: var(--color-subtle);
+  text-align: center;
+  font-style: italic;
+}
+
+/* ============================ Dispatch Trace figure (Section 5) ============================ */
+/* Inline copy from figures/scheduler_dispatch_timeline.html — scoped within #sec-5 */
+
+#sec-5 .figure-container {
+  width: 880px;
+  max-width: 100%;
+  margin-top: 6px;
+}
+
+#sec-5 .title {
+  font-size: 17px;
+  font-weight: 700;
+  margin: 0 0 4px 0;
+  letter-spacing: -0.015em;
+  color: #111827;
+}
+
+#sec-5 .subtitle {
+  font-size: 12px;
+  color: var(--color-subtle);
+  margin: 0 0 22px 0;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+#sec-5 .timeline {
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+#sec-5 .timeline-row {
+  display: grid;
+  grid-template-columns: 70px repeat(6, 1fr);
+  border-bottom: 1px solid var(--color-grid);
+}
+#sec-5 .timeline-row:last-child { border-bottom: none; }
+
+#sec-5 .span-3 { grid-column: span 3; }
+#sec-5 .span-2 { grid-column: span 2; }
+
+#sec-5 .lane-label {
+  background: var(--color-soft);
+  padding: 10px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #374151;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-right: 1px solid var(--color-border);
+  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+}
+
+#sec-5 .event-label {
+  padding: 7px 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #475569;
+  text-align: center;
+  border-right: 1px solid var(--color-grid);
+  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  background: #fafbfc;
+}
+#sec-5 .event-label:last-child { border-right: none; }
+#sec-5 .event-label.init { background: var(--color-soft); color: #1f2937; }
+
+#sec-5 .lane-cell {
+  padding: 8px 6px;
+  border-right: 1px solid var(--color-grid);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: stretch;
+  justify-content: center;
+  min-height: 48px;
+}
+#sec-5 .lane-cell:last-child { border-right: none; }
+
+#sec-5 .gpu-row .lane-cell { background: var(--gpu-lane-bg); }
+#sec-5 .pim-row .lane-cell { background: var(--pim-lane-bg); }
+
+#sec-5 .op {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 6px;
+  border-radius: 3px;
+  font-size: 10.5px;
+  font-weight: 500;
+  text-align: center;
+  line-height: 1.2;
+  border: 1px solid;
+  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+}
+
+#sec-5 .mb-p { background: var(--color-p-bg); border-color: var(--color-p); color: #475569; }
+#sec-5 .mb-m { background: var(--color-m-bg); border-color: var(--color-m); color: #92400e; }
+#sec-5 .mb-n { background: var(--color-n-bg); border-color: var(--color-n); color: #1e40af; }
+
+#sec-5 .composition {
+  margin: 0 0 18px 0;
+  padding: 10px 14px;
+  background: var(--color-softer);
+  border: 1px solid var(--color-grid);
+  border-radius: 4px;
+  font-size: 11px;
+  display: flex;
+  gap: 22px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+#sec-5 .composition .item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  color: #475569;
+}
+#sec-5 .composition .item .swatch {
+  width: 10px; height: 10px;
+  border-radius: 2px;
+  border: 1px solid;
+}
+#sec-5 .composition .item.mb-p .swatch { background: var(--color-p-bg); border-color: var(--color-p); }
+#sec-5 .composition .item.mb-m .swatch { background: var(--color-m-bg); border-color: var(--color-m); }
+#sec-5 .composition .item.mb-n .swatch { background: var(--color-n-bg); border-color: var(--color-n); }
+#sec-5 .composition .item b { color: #1f2937; font-weight: 700; }
+
+#sec-5 .annotations {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+#sec-5 .annotation {
+  border-left: 3px solid;
+  padding: 8px 12px;
+  background: var(--color-softer);
+  border-radius: 0 3px 3px 0;
+  font-size: 11px;
+  line-height: 1.5;
+}
+#sec-5 .annotation.lookahead { border-left-color: var(--color-n); }
+#sec-5 .annotation.backfill { border-left-color: var(--color-p); }
+#sec-5 .annotation b { color: #1f2937; font-weight: 700; font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace; }
+#sec-5 .annotation .label {
+  display: inline-block;
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 2px;
+  margin-right: 6px;
+  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  vertical-align: 1px;
+}
+#sec-5 .annotation.lookahead .label { background: var(--color-n); color: white; }
+#sec-5 .annotation.backfill .label { background: var(--color-p); color: white; }
+
+#sec-5 .legend {
+  margin-top: 22px;
+  padding-top: 14px;
+  border-top: 1px solid #e5e7eb;
+  display: flex;
+  gap: 22px;
+  font-size: 10.5px;
+  color: var(--color-muted);
+  flex-wrap: wrap;
+}
+#sec-5 .legend-item { display: flex; align-items: center; gap: 6px; }
+#sec-5 .legend-color {
+  width: 13px; height: 13px;
+  border-radius: 2px;
+  border: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+#sec-5 .legend-color.mb-p { background: var(--color-p-bg); border-color: var(--color-p); }
+#sec-5 .legend-color.mb-m { background: var(--color-m-bg); border-color: var(--color-m); }
+#sec-5 .legend-color.mb-n { background: var(--color-n-bg); border-color: var(--color-n); }
+
+#sec-5 .caption {
+  margin-top: 16px;
+  font-size: 10.5px;
+  color: var(--color-subtle);
+  line-height: 1.5;
+}
+#sec-5 .caption b { color: #1f2937; font-weight: 600; }
+#sec-5 .caption code {
+  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  font-size: 9.5px;
+  background: var(--color-soft);
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
+#sec-5 .caption-list {
+  list-style: none;
+  padding: 0;
+  margin: 14px 0 0 0;
+  font-size: 10.5px;
+  color: var(--color-subtle);
+  line-height: 1.55;
+}
+#sec-5 .caption-list li {
+  margin: 8px 0;
+  padding-left: 10px;
+  border-left: 2px solid var(--color-grid);
+}
+#sec-5 .caption-list li.assumption { border-left-color: var(--color-pim); }
+#sec-5 .caption-list .item-label {
+  font-weight: 700;
+  color: #1f2937;
+  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  margin-right: 6px;
+  text-transform: uppercase;
+}
+#sec-5 .caption-list li.assumption .item-label { color: var(--color-pim); }
+#sec-5 .caption-list .sub { color: #6b7280; font-weight: 500; text-transform: none; letter-spacing: 0; }
+
+/* ============================ Responsive (basic) ============================ */
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+  .sidebar { position: relative; height: auto; }
+  .content { padding: 28px 24px 60px 24px; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+
+  <!-- ============================ Sidebar ============================ -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="sidebar-title">PULS Scheduler Policy</div>
+      <div class="sidebar-subtitle">Reading guide — companion to ARCHITECTURE.md §6</div>
+    </div>
+    <ul class="nav">
+      <li><a data-target="sec-1" class="active"><span class="nav-num">1</span>Instance Disaggregation</a></li>
+      <li><a data-target="sec-2"><span class="nav-num">2</span>Invariants &amp; Dispatch DAG</a></li>
+      <li><a data-target="sec-3"><span class="nav-num">3</span>Scheduler Usage</a></li>
+      <li><a data-target="sec-4"><span class="nav-num">4</span>Adaptive Admission</a></li>
+      <li><a data-target="sec-5"><span class="nav-num">5</span>Example Dispatch Trace</a></li>
+    </ul>
+    <div class="sidebar-footer">
+      Canonical text:
+      <a href="../ARCHITECTURE.md">ARCHITECTURE.md</a><br>
+      Repo: <a href="../README.md">README.md</a>
+    </div>
+  </aside>
+
+  <!-- ============================ Content ============================ -->
+  <main class="content">
+
+    <!-- ======== Section 1: Instance Disaggregation ======== -->
+    <section id="sec-1" class="doc-section active">
+      <div class="section-header">
+        <div class="section-eyebrow">§ 3.4 — ARCHITECTURAL BACKDROP</div>
+        <h1 class="section-title">Instance Disaggregation</h1>
+        <div class="section-lede">The transformer layer is split at the attention/FFN boundary into two instances connected by an NVLink pipeline. This split is the prerequisite for everything in the scheduler policy that follows — KV cache permanence, fixed-shape handoff, and the Instance A internal joint GPU·PIM scheduling.</div>
+      </div>
+
+      <div class="figure-container">
+        <div class="title">PULS Instance Disaggregation</div>
+        <div class="subtitle">14-step transformer layer flow split across <b>Instance A (Attention)</b> and <b>Instance B (FFN)</b>, connected by an inter-instance NVLink pipeline.</div>
+
+        <div class="diagram">
+          <!-- Instance A -->
+          <div class="instance instance-a">
+            <div class="instance-header">
+              <div class="instance-name">Instance A &mdash; Attention Block</div>
+              <div class="instance-substrate">8 GPU &middot; TP=8 &middot; SP-PIM (2048 ch) &middot; HBM4</div>
+            </div>
+            <div class="steps">
+              <div class="step"><span class="step-num">1</span><span class="step-name">input_layernorm</span></div>
+              <div class="step"><span class="step-num">2</span><span class="step-name">QKV projection</span></div>
+              <div class="step"><span class="step-num">3</span><span class="step-name">RoPE</span></div>
+              <div class="step"><span class="step-num">4</span><span class="step-name">KV cache save</span></div>
+              <div class="step pim"><span class="step-num">5</span><span class="step-name">attention</span><span class="step-tag">decode: SP-PIM / prefill: GPU</span></div>
+              <div class="step"><span class="step-num">6</span><span class="step-name">O projection</span></div>
+              <div class="step ar"><span class="step-num">7</span><span class="step-name">all_reduce #1</span><span class="step-tag">intra-A TP</span></div>
+              <div class="kv-cache">
+                <span><b>KV cache</b> &mdash; permanent in Instance A HBM (no inter-instance transfer)</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Connector -->
+          <div class="connector">
+            <div class="arrow-block">
+              <div class="arrow-label primary">NVLink</div>
+              <div class="arrow-label">[B &times; hidden]</div>
+              <div class="arrow-line"></div>
+            </div>
+            <div class="arrow-block">
+              <div class="arrow-line back dashed"></div>
+              <div class="arrow-label primary">next layer</div>
+              <div class="arrow-label">NVLink</div>
+            </div>
+          </div>
+
+          <!-- Instance B -->
+          <div class="instance instance-b">
+            <div class="instance-header">
+              <div class="instance-name">Instance B &mdash; FFN Block</div>
+              <div class="instance-substrate">8 GPU &middot; TP=8 &middot; GDDR (or low-stack HBM)</div>
+            </div>
+            <div class="steps">
+              <div class="step"><span class="step-num">8</span><span class="step-name">residual add</span></div>
+              <div class="step"><span class="step-num">9</span><span class="step-name">post_attention_layernorm</span></div>
+              <div class="step"><span class="step-num">10</span><span class="step-name">FFN up_proj</span></div>
+              <div class="step"><span class="step-num">11</span><span class="step-name">activation</span></div>
+              <div class="step"><span class="step-num">12</span><span class="step-name">FFN down_proj</span></div>
+              <div class="step ar"><span class="step-num">13</span><span class="step-name">all_reduce #2</span><span class="step-tag">intra-B TP</span></div>
+              <div class="step"><span class="step-num">14</span><span class="step-name">residual add</span></div>
+              <div class="note">
+                <span><b>Substrate note</b> &mdash; FFN is compute-bound; full HBM bandwidth not required, so GDDR (or low-stack HBM) suffices.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="legend">
+          <div class="legend-item"><span class="legend-color pim"></span>PIM (SP-PIM decode attention)</div>
+          <div class="legend-item"><span class="legend-color gpu"></span>GPU op (LN / GEMM / activation)</div>
+          <div class="legend-item"><span class="legend-color ar"></span>All-reduce (intra-instance TP)</div>
+          <div class="legend-item"><span class="legend-color kv"></span>KV cache (permanent in Instance A)</div>
+        </div>
+
+        <div class="caption">
+          <b>Figure.</b> Per-layer 14-step flow is partitioned at the attention/FFN boundary. <b>Instance A</b> (steps 1&ndash;7) holds the KV cache permanently in HBM and executes attention; decode attention is offloaded to SP-PIM across 2048 channels (8 GPU &times; 256 ch), while prefill attention stays on the GPU. <b>Instance B</b> (steps 8&ndash;14) executes the FFN block; since FFN is compute-bound, GDDR (or low-stack HBM) substrate suffices. The two instances exchange a fixed-shape <code>[B &times; hidden]</code> tensor over intra-node NVLink and process different micro-batches concurrently (steady-state pipeline).
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== Section 2: Invariants &amp; Dispatch DAG ======== -->
+    <section id="sec-2" class="doc-section">
+      <div class="section-header">
+        <div class="section-eyebrow">§ 6.2 · § 6.3 — STATIC RULES</div>
+        <h1 class="section-title">Invariants &amp; Dispatch DAG</h1>
+        <div class="section-lede">The scheduler's policy reduces to a graph problem. <b>Invariants</b> (correctness + efficiency + resource) become <b>edges</b> in a per-μ-batch dependency DAG, and the dispatch decision collapses to picking a ready node.</div>
+      </div>
+
+      <div class="prose">
+
+        <h2 class="h-sub">Invariants (I1 — I5)</h2>
+        <p>Whichever policy the scheduler adopts, these five rules cannot be violated. <b>I1·I2</b> are <i>correctness</i> invariants (data dependency); <b>I3</b> is an <i>efficiency</i> invariant (split O-proj is mathematically equivalent, but is strictly never split due to weight reuse · MFU · kernel launch penalties); <b>I4·I5</b> are <i>hardware resource constraints</i>.</p>
+
+        <table class="doc-table">
+          <thead>
+            <tr><th style="width: 60px;">ID</th><th style="width: 110px;">Kind</th><th>Rule</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span class="table-id">I1</span></td>
+              <td><span class="kind-correctness">correctness</span></td>
+              <td><code>prefill-attn(X)</code> &rarr; dispatch only after <code>QKV(X)</code> completes (Q, K, V dependency)</td>
+            </tr>
+            <tr>
+              <td><span class="table-id">I2</span></td>
+              <td><span class="kind-correctness">correctness</span></td>
+              <td><code>decode-attn(X)</code> &rarr; dispatch only after <code>QKV(X)</code> completes (PIM FSM start condition)</td>
+            </tr>
+            <tr>
+              <td><span class="table-id">I3</span></td>
+              <td><span class="kind-efficiency">efficiency</span></td>
+              <td><code>O-proj(X)</code> &rarr; dispatch only after <i>both</i> <code>prefill-attn(X)</code> &and; <code>decode-attn(X)</code> complete. Although row-wise independence permits splitting, the penalties of <code>W_O</code> 2&times; streaming + MFU drop + 2&times; kernel launch keep it always a single GEMM. Aligned with the production mixed-batch standard pattern.</td>
+            </tr>
+            <tr>
+              <td><span class="table-id">I4</span></td>
+              <td><span class="kind-resource">resource</span></td>
+              <td>At time t, the GPU resource runs only one GEMM / attention op (tensor core saturates; kernel concurrency ineffective).</td>
+            </tr>
+            <tr>
+              <td><span class="table-id">I5</span></td>
+              <td><span class="kind-resource">resource</span></td>
+              <td>At time t, the PIM resource runs <b>only one</b> decode-attn op (SP-PIM occupies all 2048 channels). Not a head- or request-level constraint &mdash; within a single decode-attn op, multi-head · multi-request batching is free.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2 class="h-sub">Dispatch DAG</h2>
+
+        <div class="callout info">
+          <span class="callout-title">DEFINITION</span>
+          <b>Directed Acyclic Graph.</b> Nodes are work units; an edge <code>A &rarr; B</code> denotes the precedence relation <i>&ldquo;B can be dispatched once A completes.&rdquo;</i> Acyclicity precludes deadlock and guarantees topological order. PULS encodes the §6.2 invariants as DAG edges, reducing the dispatch decision to a <i>ready-node selection problem over a data structure</i>.
+        </div>
+
+        <p><b>Nodes.</b> For each μ-batch <code>X</code>, four work nodes: <code>QKV(X)</code>, <code>prefill-attn(X)</code>, <code>decode-attn(X)</code>, <code>O-proj(X)</code>.</p>
+
+        <p><b>Edges.</b> I1·I2·I3 become precedence edges directly:</p>
+
+        <table class="doc-table">
+          <thead>
+            <tr><th style="width: 280px;">Edge</th><th>Source invariant</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>QKV(X) &rarr; prefill-attn(X)</code></td><td><span class="table-id">I1</span></td></tr>
+            <tr><td><code>QKV(X) &rarr; decode-attn(X)</code></td><td><span class="table-id">I2</span></td></tr>
+            <tr><td><code>prefill-attn(X) &rarr; O-proj(X)</code></td><td><span class="table-id">I3</span></td></tr>
+            <tr><td><code>decode-attn(X) &rarr; O-proj(X)</code></td><td><span class="table-id">I3</span></td></tr>
+          </tbody>
+        </table>
+
+        <h2 class="h-sub">Single μ-batch graph</h2>
+
+        <div class="dag-figure">
+          <svg class="dag-svg" viewBox="0 0 640 240" xmlns="http://www.w3.org/2000/svg" width="640" height="240">
+            <defs>
+              <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#1f2937"/>
+              </marker>
+            </defs>
+
+            <!-- Edges (drawn first, so nodes overlay) -->
+            <!-- QKV -> prefill-attn -->
+            <path d="M 150 100 Q 240 65 320 50" stroke="#1f2937" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+            <!-- QKV -> decode-attn -->
+            <path d="M 150 140 Q 240 175 320 190" stroke="#1f2937" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+            <!-- prefill-attn -> O-proj -->
+            <path d="M 440 50 Q 510 65 545 100" stroke="#1f2937" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+            <!-- decode-attn -> O-proj -->
+            <path d="M 440 190 Q 510 175 545 140" stroke="#1f2937" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+
+            <!-- Edge labels (with white outline for readability over edge paths) -->
+            <text x="215" y="62" fill="#6b7280" font-family="JetBrains Mono, Consolas, monospace" font-size="11" font-weight="600" text-anchor="middle" stroke="white" stroke-width="3.5" paint-order="stroke">I1</text>
+            <text x="215" y="186" fill="#6b7280" font-family="JetBrains Mono, Consolas, monospace" font-size="11" font-weight="600" text-anchor="middle" stroke="white" stroke-width="3.5" paint-order="stroke">I2</text>
+            <text x="510" y="62" fill="#6b7280" font-family="JetBrains Mono, Consolas, monospace" font-size="11" font-weight="600" text-anchor="middle" stroke="white" stroke-width="3.5" paint-order="stroke">I3</text>
+            <text x="510" y="186" fill="#6b7280" font-family="JetBrains Mono, Consolas, monospace" font-size="11" font-weight="600" text-anchor="middle" stroke="white" stroke-width="3.5" paint-order="stroke">I3</text>
+
+            <!-- Node: QKV(M) -->
+            <rect x="60" y="100" width="90" height="40" rx="4" ry="4" fill="#ffffff" stroke="#1f2937" stroke-width="1.5"/>
+            <text x="105" y="125" fill="#1f2937" font-family="JetBrains Mono, Consolas, monospace" font-size="12" font-weight="600" text-anchor="middle">QKV(M)</text>
+
+            <!-- Node: prefill-attn(M) -->
+            <rect x="320" y="30" width="120" height="40" rx="4" ry="4" fill="#ffffff" stroke="#1f2937" stroke-width="1.5"/>
+            <text x="380" y="55" fill="#1f2937" font-family="JetBrains Mono, Consolas, monospace" font-size="12" font-weight="600" text-anchor="middle">prefill-attn(M)</text>
+            <text x="380" y="22" fill="#475569" font-family="JetBrains Mono, Consolas, monospace" font-size="9.5" text-anchor="middle">GPU kernel</text>
+
+            <!-- Node: decode-attn(M) -->
+            <rect x="320" y="170" width="120" height="40" rx="4" ry="4" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+            <text x="380" y="195" fill="#92400e" font-family="JetBrains Mono, Consolas, monospace" font-size="12" font-weight="600" text-anchor="middle">decode-attn(M)</text>
+            <text x="380" y="228" fill="#b45309" font-family="JetBrains Mono, Consolas, monospace" font-size="9.5" text-anchor="middle">SP-PIM</text>
+
+            <!-- Node: O-proj(M) -->
+            <rect x="540" y="100" width="90" height="40" rx="4" ry="4" fill="#ffffff" stroke="#1f2937" stroke-width="1.5"/>
+            <text x="585" y="125" fill="#1f2937" font-family="JetBrains Mono, Consolas, monospace" font-size="12" font-weight="600" text-anchor="middle">O-proj(M)</text>
+          </svg>
+          <div class="dag-caption">Single μ-batch DAG. Diamond structure: QKV fans out to two attention nodes (GPU prefill / PIM decode), which fan in to O-proj. Edge labels mark the source invariant.</div>
+        </div>
+
+        <h2 class="h-sub">No inter-μ-batch edges &mdash; the basis of emergent interleaving</h2>
+
+        <p>No explicit edges exist between distinct μ-batches. When resources (GPU·PIM) are available, arbitrary interleaving across μ-batches is possible &mdash; this is the graph-theoretic basis of <b>look-ahead</b> and <b>back-fill</b>. The scheduler does not encode a separate &ldquo;lookahead policy&rdquo;; the behavior emerges from greedy ready-set dispatch over a multi-μ-batch DAG (see §6.3 pseudo-code in <a href="#sec-3" onclick="document.querySelector('.nav a[data-target=sec-3]').click(); return false;">Section 3</a>, demonstrated in <a href="#sec-5" onclick="document.querySelector('.nav a[data-target=sec-5]').click(); return false;">Section 5</a>).</p>
+
+      </div>
+    </section>
+
+    <!-- ======== Section 3: Scheduler Usage ======== -->
+    <section id="sec-3" class="doc-section">
+      <div class="section-header">
+        <div class="section-eyebrow">§ 6.3 — RUNTIME MECHANISM</div>
+        <h1 class="section-title">Scheduler Usage</h1>
+        <div class="section-lede">How the scheduler actually runs at each kernel-completion event: maintain the DAG over a 3-μ-batch window, refresh the ready set, and let two <code class="inline">pick</code> calls (one per resource) drive dispatch. The whole policy fits in nine lines.</div>
+      </div>
+
+      <div class="prose">
+
+        <h2 class="h-sub">Pseudo-code</h2>
+        <p>The scheduler maintains a DAG over the in-flight μ-batch window <code>{M<sub>i-1</sub>, M<sub>i</sub>, M<sub>i+1</sub>}</code>, and at every kernel-completion event dispatches ready work from the two queues (GPU·PIM).</p>
+
+<pre class="code-block"><span class="kw">on</span> <span class="fn">event</span>(<span class="var">kernel K</span> of <span class="var">μ-batch X</span> completes):
+    update DAG: mark node K(X) <span class="kw">as</span> done
+    refresh ready set: all unexecuted nodes whose precedences are done
+
+    GPU_next = <span class="fn">pick</span>(ready GPU jobs,
+                    priority: O-proj &gt; prefill-attn &gt; QKV,
+                    tie-break: oldest μ-batch first)
+    PIM_next = <span class="fn">pick</span>(ready PIM jobs,
+                    tie-break: oldest μ-batch first)
+
+    <span class="kw">if</span> GPU idle: <span class="fn">dispatch</span> GPU_next
+    <span class="kw">if</span> PIM idle: <span class="fn">dispatch</span> PIM_next
+</pre>
+
+        <h2 class="h-sub"><code class="inline">pick</code> &mdash; definition</h2>
+
+        <div class="callout">
+          <span class="callout-title">PRIORITY-QUEUE DEQUEUE</span>
+          A function with arguments <code>(candidate set, priority rule, tie-break rule)</code>. Behavior: among candidates, narrow down to nodes belonging to the top-priority class of the priority rule, then pick a single node within that subset via the tie-break rule. Returns <code>null</code> if the candidate set is empty (in which case the resource sits idle).
+        </div>
+
+        <h2 class="h-sub">GPU priority rationale — <code class="inline">O-proj &gt; prefill-attn &gt; QKV</code></h2>
+
+        <p><b>Why O-proj first.</b> Delaying <code>O-proj</code> is a delay of the <i>current μ-batch's completion</i> and thus directly impacts the critical path. Once O-proj is ready (I3 satisfied), nothing else on the queue should jump ahead of it.</p>
+
+        <p><b>Why QKV last.</b> <code>QKV</code> is the <i>next μ-batch's enabling work</i>, not the current one's critical path. It is prioritized only when the higher-priority classes are empty &mdash; that is, only when there is a risk of PIM going idle (no current-μ-batch attention or projection work left to do).</p>
+
+        <p>This ordering, applied as a simple priority dequeue, is what makes <b>GPU back-fill</b> emerge: when O-proj is blocked (waiting on PIM for I3) and prefill-attn is also not ready (its μ-batch's QKV not yet done), the dequeue naturally falls through to QKV of the next μ-batch.</p>
+
+        <h2 class="h-sub">Sync guarantee</h2>
+
+        <p>Since I3 is auto-enforced as a DAG edge, there is <b>no risk of missing synchronization</b>. The DAG itself encodes the precondition; a node simply does not enter the ready set until its precedences are done.</p>
+
+        <p>Owing to PIM FSM determinism (<code class="inline">§3.1</code>), the PIM completion time is computed at the moment PIM is dispatched. The scheduler therefore knows <i>in advance</i> when O-proj will become ready, and the next GPU dispatch can be pre-scheduled to that exact moment.</p>
+
+        <h2 class="h-sub">Natural emergence of look-ahead / back-fill</h2>
+
+        <p>Since I2 is loose &mdash; <i>&ldquo;any time after QKV completes&rdquo;</i> &mdash; at moments when PIM is idle, <code>decode-attn</code> of <i>another μ-batch</i> can be started regardless of which μ-batch the GPU is currently working on. This emerges automatically from greedy dispatch <b>without any separate policy specification</b>.</p>
+
+        <p>Symmetrically, when GPU's higher-priority classes are exhausted but PIM is still busy, GPU falls through to the next μ-batch's QKV (back-fill). Both behaviors &mdash; <i>look-ahead</i> on PIM and <i>back-fill</i> on GPU &mdash; are properties of the same priority dequeue applied to a multi-μ-batch DAG. See the worked trace in <a href="#sec-5" onclick="document.querySelector('.nav a[data-target=sec-5]').click(); return false;">Section 5</a> for a concrete demonstration.</p>
+
+      </div>
+    </section>
+
+    <!-- ======== Section 4: Adaptive Admission ======== -->
+    <section id="sec-4" class="doc-section">
+      <div class="section-header">
+        <div class="section-eyebrow">§ 6.4 — RUNTIME ADAPTATION</div>
+        <h1 class="section-title">Adaptive Admission</h1>
+        <div class="section-lede">Per-iteration adjustment of the μ-batch composition based on measured GPU/PIM idle fractions. Hooked on top of the chunked-prefill primitive (§5.5) as dynamic adjustment of chunk size · decode batch.</div>
+      </div>
+
+      <div class="prose">
+
+        <p>The scheduler dynamically adjusts the per-μ-batch composition decision <b>on a per-iteration basis</b>. The GPU/PIM idle fractions of the previous iteration are measured to regulate the next μ-batch's admission.</p>
+
+        <h2 class="h-sub">Decision Rule — Two Layers</h2>
+
+        <p>The essential frame of admission control:</p>
+
+        <ul>
+          <li><b>Layer 1 &mdash; μ-batch composition</b> (on top of the chunked-prefill + mixed-batching primitive): decides the prefill-chunk vs decode token mix and N. <b>The determining factor of TTFT / TBT SLO condenses to this layer.</b></li>
+          <li><b>Layer 2 &mdash; DAG dispatch</b> (§6.3, <a href="#sec-3" onclick="document.querySelector('.nav a[data-target=sec-3]').click(); return false;">Section 3</a>): Automatic ready-node selection on top of the Layer 1 result. Since processing is serial, it cancels with admission variables &mdash; adaptive degrees of freedom concentrate in Layer 1.</li>
+        </ul>
+
+        <p><b>Primary objective</b> &mdash; balance the two instances of the inter-instance pipeline cycle <code>max(A_cycle, B_cycle)</code> so that both are fully utilized.</p>
+
+        <p><b>Secondary objective</b> &mdash; balance the GPU·PIM double-buffering inside Instance A (§5.6).</p>
+
+        <h2 class="h-sub">Admission table</h2>
+
+        <table class="doc-table">
+          <thead>
+            <tr>
+              <th style="width: 145px;">Layer</th>
+              <th style="width: 230px;">Measurement</th>
+              <th style="width: 200px;">Diagnosis</th>
+              <th>Admission adjustment</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><b>Inter-AB</b> (primary)</td>
+              <td><code>A_cycle &gt; B_cycle</code><br>(B idle)</td>
+              <td>A-bound (long-ctx)</td>
+              <td>admission &darr; effect limited (the PIM attention component of <code>A_cycle</code> depends on KV length) &mdash; B idle naturally accepted</td>
+            </tr>
+            <tr>
+              <td><b>Inter-AB</b> (primary)</td>
+              <td><code>A_cycle &lt; B_cycle</code><br>(A idle)</td>
+              <td>B-bound (short-ctx + low batch)</td>
+              <td>admit prefill chunk &rarr; <code>A_cycle</code> increases, balance restored</td>
+            </tr>
+            <tr>
+              <td><b>Intra-A</b> (secondary)</td>
+              <td>GPU idle &gt; <code>θ_high</code>,<br>PIM busy</td>
+              <td>PIM-dominant inside Instance A</td>
+              <td>admit additional decode &rarr; fill PIM window</td>
+            </tr>
+            <tr>
+              <td><b>Intra-A</b> (secondary)</td>
+              <td>PIM idle &gt; <code>θ_high</code>,<br>GPU busy</td>
+              <td>GPU-dominant inside Instance A</td>
+              <td>admit prefill chunk &rarr; fill GPU window</td>
+            </tr>
+            <tr>
+              <td>&mdash;</td>
+              <td>Both layers below <code>θ_low</code></td>
+              <td>balanced</td>
+              <td>maintain current admission</td>
+            </tr>
+            <tr>
+              <td>&mdash;</td>
+              <td>Both layers idle</td>
+              <td>underloaded</td>
+              <td>enlarge μ-batch size or accelerate wait tokens</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout note">
+          <span class="callout-title">SCOPE NOTE</span>
+          Deadband policy (hysteresis width, σ_total decomposition, ctx-tiered lookup) and the MFU floor admission lower bound are part of §6.4 but are intentionally out of scope for this reading guide. See <code class="inline">ARCHITECTURE.md §6.4</code> for the full treatment.
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ======== Section 5: Example Dispatch Trace ======== -->
+    <section id="sec-5" class="doc-section">
+      <div class="section-header">
+        <div class="section-eyebrow">§ 6.5 — WORKED EXAMPLE</div>
+        <h1 class="section-title">Example Dispatch Trace</h1>
+        <div class="section-lede">A concrete 3-μ-batch in-flight window under PULS scheduler's balanced steady state (cycle balance maintained per §6.4). Shows GPU back-fill (Init, T3) and PIM look-ahead (T1, T4) emerging from the priority dequeue defined in <a href="#sec-3" onclick="document.querySelector('.nav a[data-target=sec-3]').click(); return false;">Section 3</a>. The trace shape is the <b>ctx-independent attractor</b> — see caption for the regime note.</div>
+      </div>
+
+      <div class="figure-container">
+        <div class="title">PULS Scheduler Dispatch Timeline</div>
+        <div class="subtitle">Event-driven dispatch + dependency DAG over a 3-μ-batch in-flight window. Greedy priority dequeue (<code>O-proj &gt; prefill-attn &gt; QKV</code>) yields cross-μ-batch back-fill and look-ahead as emergent properties &mdash; no explicit lookahead policy is encoded.</div>
+
+        <!-- μ-batch composition -->
+        <div class="composition">
+          <div class="item mb-p"><span class="swatch"></span><b>P</b> (tail-in-flight at Init): {X: prefill chunk (&check; done), G, H: decode}</div>
+          <div class="item mb-m"><span class="swatch"></span><b>M</b> (current): {A: prefill chunk, B, C: decode}</div>
+          <div class="item mb-n"><span class="swatch"></span><b>N</b> (next): {D: prefill chunk, E, F: decode}</div>
+        </div>
+
+        <!-- Timeline -->
+        <div class="timeline">
+          <!-- Event header -->
+          <div class="timeline-row">
+            <div class="lane-label"></div>
+            <div class="event-label init">Init</div>
+            <div class="event-label">T1</div>
+            <div class="event-label">T2</div>
+            <div class="event-label">T3</div>
+            <div class="event-label">T4</div>
+            <div class="event-label">T5</div>
+          </div>
+
+          <!-- GPU lane -->
+          <div class="timeline-row gpu-row">
+            <div class="lane-label">GPU</div>
+            <div class="lane-cell">
+              <div class="op mb-m">QKV(A,B,C of M)</div>
+            </div>
+            <div class="lane-cell">
+              <div class="op mb-p">O-proj(P)</div>
+            </div>
+            <div class="lane-cell">
+              <div class="op mb-m">prefill-attn(A of M)</div>
+            </div>
+            <div class="lane-cell">
+              <div class="op mb-n">QKV(D,E,F of N)</div>
+            </div>
+            <div class="lane-cell">
+              <div class="op mb-m">O-proj(M)</div>
+            </div>
+            <div class="lane-cell">
+              <div class="op mb-n">prefill-attn(D of N)</div>
+            </div>
+          </div>
+
+          <!-- PIM lane -->
+          <div class="timeline-row pim-row">
+            <div class="lane-label">PIM</div>
+            <div class="lane-cell">
+              <div class="op mb-p">decode-attn(G,H of P)</div>
+            </div>
+            <div class="lane-cell span-3">
+              <div class="op mb-m">decode-attn(B,C of M)</div>
+            </div>
+            <div class="lane-cell span-2">
+              <div class="op mb-n">decode-attn(E,F of N)</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Emergence annotations -->
+        <div class="annotations">
+          <div class="annotation backfill">
+            <span class="label">GPU BACK-FILL</span>
+            At <b>Init</b> and <b>T3</b>: while PIM is busy on a μ-batch's decode-attn (<b>P</b> at Init, <b>M</b> at T3), I3 holds the corresponding O-proj <i>not-ready</i> on GPU. GPU does not idle-wait &mdash; the priority dequeue picks the only ready node (next μ-batch's QKV) and processes it. Emergent from greedy dispatch.
+          </div>
+          <div class="annotation lookahead">
+            <span class="label">PIM LOOK-AHEAD</span>
+            At <b>T1</b> and <b>T4</b>: at the PIM-completion trigger, the next μ-batch's decode-attn is <i>already ready</i> &mdash; its QKV completed during the prior GPU back-fill window (Init / T3). PIM dispatches it instantly without waiting for the current μ-batch boundary.
+          </div>
+        </div>
+
+        <!-- Legend -->
+        <div class="legend">
+          <div class="legend-item"><span class="legend-color mb-p"></span>μ-batch P (previous, tail-in-flight)</div>
+          <div class="legend-item"><span class="legend-color mb-m"></span>μ-batch M (current)</div>
+          <div class="legend-item"><span class="legend-color mb-n"></span>μ-batch N (next)</div>
+          <div class="legend-item"><span style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #64748b;">T<sub>i</sub></span><span style="font-size: 10.5px;">&mdash; kernel-completion dispatch event</span></div>
+        </div>
+
+        <!-- Caption -->
+        <div class="caption">
+          <b>Figure.</b> Event-driven dispatch trace of PULS scheduler over a 3-μ-batch in-flight window <b>{M<sub>i&minus;1</sub>, M<sub>i</sub>, M<sub>i+1</sub>}</b> (here labeled P/M/N), maintained as a dependency DAG.
+
+          <ul class="caption-list">
+            <li>
+              <span class="item-label">Mechanism</span>
+              At each kernel-completion event T<sub>i</sub>, ready nodes (precedence satisfied per I1·I2·I3) are picked greedily &mdash; priority <code>O-proj &gt; prefill-attn &gt; QKV</code>; tie-break: oldest μ-batch first. Both emergent behaviors below arise from this single priority dequeue &mdash; no explicit lookahead policy is encoded.
+            </li>
+            <li class="backfill">
+              <span class="item-label">GPU back-fill <span class="sub">(Init, T3)</span></span>
+              While PIM is busy and the current μ-batch's O-proj is I3-blocked, GPU falls through priority to the next μ-batch's QKV.
+            </li>
+            <li class="lookahead">
+              <span class="item-label">PIM look-ahead <span class="sub">(T1, T4)</span></span>
+              The next μ-batch's decode-attn is I2-ready the moment its QKV completes during the back-fill window; PIM dispatches it at the very PIM-completion trigger.
+            </li>
+            <li>
+              <span class="item-label">P at Init = tail state</span>
+              P's prefill-attn(X) and earlier GPU stages already completed; only decode-attn(G,H) remains on PIM.
+            </li>
+            <li class="assumption">
+              <span class="item-label">Assumption</span>
+              Balanced admission steady state (cycle-balanced per §6.4: <code>t_PIM(decode-attn) ≈ sum of GPU stages</code> per μ-batch). The trace shape is the <b>ctx-independent</b> attractor under this balance &mdash; chunked prefill (§5.5) lets admission scale chunk granularity to maintain it across any ctx within TBT SLO. The figure ceases to apply only at very long ctx where balance is infeasible (§6.6 "A-bound natural transition") &mdash; a system-level limit of multi-request schedulers, not PULS-specific.
+            </li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script>
+(function() {
+  const navLinks = document.querySelectorAll('.nav a[data-target]');
+  const sections = document.querySelectorAll('section.doc-section');
+
+  function show(targetId) {
+    sections.forEach(s => s.classList.toggle('active', s.id === targetId));
+    navLinks.forEach(a => a.classList.toggle('active', a.dataset.target === targetId));
+    // scroll content area to top on switch
+    document.querySelector('.content').scrollTo({ top: 0, behavior: 'instant' });
+    // also reflect in hash so reloads stay on the same section
+    if (history.replaceState) history.replaceState(null, '', '#' + targetId);
+  }
+
+  navLinks.forEach(a => {
+    a.addEventListener('click', e => {
+      e.preventDefault();
+      show(a.dataset.target);
+    });
+  });
+
+  // honor URL hash on load
+  const initial = (location.hash || '').replace('#', '');
+  if (initial && document.getElementById(initial)) {
+    show(initial);
+  }
+})();
+</script>
+</body>
+</html>

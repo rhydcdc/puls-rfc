@@ -433,25 +433,28 @@ Quantification of `σ_total`, deadband sweep, and the online adaptive variant (a
 
 ### 6.5 Example Dispatch Trace
 
-An instance of a 3-μ-batch in-flight window (assuming mid-ctx, balanced admission). Example composition:
+An instance of a 3-μ-batch in-flight window under PULS scheduler's balanced steady state (cycle balance maintained per §6.4). Example composition:
 
 | μ-batch | Composition | Notes |
 |---|---|---|
-| P | {G, H: decode} | The μ-batch immediately preceding M. Simplified to a state where, regardless of phase composition, only decode-attn remains |
+| P | {X: prefill chunk (✓ done before Init), G, H: decode} | The μ-batch immediately preceding M. By Init time, P's GPU stages have already completed and only decode-attn(G,H) remains on PIM — a tail state independent of P's original phase composition |
 | M | {A: prefill chunk, B: decode, C: decode} | Current μ-batch |
 | N | {D: prefill chunk, E: decode, F: decode} | Next μ-batch |
 
-The table below is *one trace* of event-driven dispatch, not a fixed period. `T_i` is the time of dispatch occurrence.
+The table below is *one trace* of event-driven dispatch, not a fixed period. `T_i` is the time of a kernel-completion dispatch event; `Init` is the initial active state at the head of the trace.
 
-| event time | GPU work | PIM work | DAG state |
+| event | GPU work | PIM work | DAG state |
 |---|---|---|---|
-| T1 | O-proj(P) [immediately after PIM completion trigger] →(serial)→ QKV(A,B,C) of M [step 2 GEMM bulk] | decode-attn(G,H) of P | O-proj(P) fires at the moment P's decode-attn completes (I3) |
-| T2 | prefill-attn(A) of M [step 5 GPU attention kernel] | decode-attn(B,C) of M | M QKV complete → I1, I2 satisfied |
-| T3 | O-proj(M) [step 6, A·B·C output bulk GEMM] →(serial)→ QKV(D,E,F) of N | decode-attn(E,F) of N | M satisfies I3; PIM starts immediately after N's QKV completes |
-| T4 | prefill-attn(D) of N | decode-attn(E,F) cont. | — |
-| T5 | O-proj(N) → QKV(next μ-batch) | ... | — |
+| Init | QKV(A,B,C) of M [back-fill: emergent GPU activity while PIM is busy on P] | decode-attn(G,H) of P [in progress] | O-proj(P) not ready (I3, PIM in progress); QKV(M) is the only ready GPU node → dispatched by priority dequeue |
+| T1 | O-proj(P) [PIM(P) completion trigger] | decode-attn(B,C) of M | PIM(P) done → I3 satisfied → O-proj(P) fires; M QKV done → I2 satisfied → PIM dispatches M decode |
+| T2 | prefill-attn(A) of M | (decode-attn(B,C) of M cont.) | GPU O-proj(P) done → priority pick: prefill-attn(M) (O-proj(M) still not ready, PIM busy on M) |
+| T3 | QKV(D,E,F) of N [back-fill again] | (decode-attn(B,C) of M cont.) | GPU prefill(M) done → O-proj(M) still not ready → priority falls through to QKV(N) |
+| T4 | O-proj(M) [PIM(M) completion trigger] | decode-attn(E,F) of N | PIM(M) done → I3 satisfied → O-proj(M); N QKV done → I2 satisfied → PIM dispatches N decode |
+| T5 | prefill-attn(D) of N | (decode-attn(E,F) of N cont.) | Same pattern as T2: the M cycle's GPU pipeline repeats for N |
 
-**Handling of G,H O-proj.** O-proj(P) fires triggered by completion of P's decode-attn(G,H); immediately after the T1 PIM completion, the GPU dispatches it instantly. Notationally, the *T1 GPU cell = the serial sum of O-proj(P) → QKV(M)* (pre-planned via FSM determinism). In the long-ctx PIM-bound regime, if G, H decode-attn exceed T1, O-proj(P) naturally slips to the next dispatch event — handled automatically by the DAG.
+**Handling of G,H O-proj — GPU back-fill emergent property.** Because I3 holds O-proj(P) not-ready while PIM is still processing P's decode-attn(G,H), the GPU does not idle-wait. By the priority dequeue (`O-proj > prefill > QKV`), it picks QKV(M) — the only ready node — and processes it as back-fill. Therefore at T1 the PIM-completion trigger fires *into a GPU already holding M's QKV complete*; the freed GPU resource then dispatches O-proj(P) on the trigger. This emergent GPU back-fill is the §6.3 priority dequeue realized — no explicit lookahead policy is encoded. The same pattern recurs at T3 (QKV(N) back-fill while PIM is on M). If GPU's QKV(M) had been longer than PIM(P), T1 would shift to GPU QKV completion; under balanced admission this re-equilibrates within a few iterations, and the DAG handles either ordering automatically.
+
+**Regime applicability.** The trace shape above is the steady-state attractor of PULS scheduler under balanced admission and is therefore **ctx-independent**: chunked prefill (§5.5) lets admission scale chunk granularity to maintain `t_PIM(decode-attn) ≈ sum of GPU stages` across any ctx within TBT SLO, so the same Init/T1–T5 dispatch ordering recovers regardless of chunk size. The trace ceases to apply only at very long ctx where balance is infeasible (§6.6 "A-bound natural transition") — a system-level property of multi-request schedulers under growing ctx, not a PULS-specific limitation.
 
 ### 6.6 Bound Analysis
 

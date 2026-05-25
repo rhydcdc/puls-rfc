@@ -433,25 +433,28 @@ Adaptive admission 의 1차 objective = inter-instance pipeline cycle `max(A_cyc
 
 ### 6.5 Example Dispatch Trace
 
-3 μ-batch in-flight window 의 한 instance (mid-ctx, balanced admission 가정). 예시 구성:
+PULS 스케줄러의 balanced steady state 에서 3 μ-batch in-flight window 의 한 instance (§6.4 에 의해 cycle balance 유지). 예시 구성:
 
 | μ-batch | 구성 | 비고 |
 |---|---|---|
-| P | {G, H: decode} | M 의 직전 μ-batch. Phase 구성 무관하게 잔량이 decode-attn 뿐인 상태로 단순화 |
+| P | {X: prefill chunk (✓ Init 이전 완료), G, H: decode} | M 의 직전 μ-batch. Init 시점에 P 의 GPU stage 들은 이미 모두 끝났고 PIM 상에 decode-attn(G,H) 만 잔존 — 원래 phase 구성과 무관한 tail state |
 | M | {A: prefill chunk, B: decode, C: decode} | 현재 μ-batch |
 | N | {D: prefill chunk, E: decode, F: decode} | 다음 μ-batch |
 
-아래 표는 event-driven dispatch 의 *한 trace* 이며 고정 주기가 아니다. `T_i` 는 dispatch 발생 시각.
+아래 표는 event-driven dispatch 의 *한 trace* 이며 고정 주기가 아니다. `T_i` 는 kernel-completion dispatch event 시각, `Init` 은 trace 시작 시점의 active 상태.
 
-| event time | GPU 작업 | PIM 작업 | DAG state |
+| event | GPU 작업 | PIM 작업 | DAG state |
 |---|---|---|---|
-| T1 | O-proj(P) [PIM 완료 trigger 직후] →(직렬)→ QKV(A,B,C) of M [step 2 GEMM 일괄] | decode-attn(G,H) of P | P decode-attn 완료 시점에 O-proj(P) 발화 (I3) |
-| T2 | prefill-attn(A) of M [step 5 GPU attention kernel] | decode-attn(B,C) of M | M QKV 완료 → I1, I2 만족 |
-| T3 | O-proj(M) [step 6, A·B·C 출력 일괄 GEMM] →(직렬)→ QKV(D,E,F) of N | decode-attn(E,F) of N | M I3 만족, N QKV 완료 직후 PIM 시작 |
-| T4 | prefill-attn(D) of N | decode-attn(E,F) cont. | — |
-| T5 | O-proj(N) → QKV(다음 μ-batch) | ... | — |
+| Init | QKV(A,B,C) of M [back-fill: PIM 이 P 에서 busy 인 동안의 GPU emergent 활동] | decode-attn(G,H) of P [진행 중] | O-proj(P) not ready (I3, PIM 진행 중); QKV(M) 만이 ready GPU 노드 → priority dequeue 가 dispatch |
+| T1 | O-proj(P) [PIM(P) 완료 trigger] | decode-attn(B,C) of M | PIM(P) done → I3 만족 → O-proj(P) 발화; M QKV done → I2 만족 → PIM 이 M decode dispatch |
+| T2 | prefill-attn(A) of M | (decode-attn(B,C) of M 계속) | GPU O-proj(P) done → priority pick: prefill-attn(M) (O-proj(M) 는 PIM busy 라 아직 not ready) |
+| T3 | QKV(D,E,F) of N [back-fill 재발현] | (decode-attn(B,C) of M 계속) | GPU prefill(M) done → O-proj(M) still not ready → priority 가 QKV(N) 로 떨어짐 |
+| T4 | O-proj(M) [PIM(M) 완료 trigger] | decode-attn(E,F) of N | PIM(M) done → I3 만족 → O-proj(M); N QKV done → I2 만족 → PIM 이 N decode dispatch |
+| T5 | prefill-attn(D) of N | (decode-attn(E,F) of N 계속) | T2 와 동일 패턴 — M cycle 의 GPU 파이프라인이 N 으로 반복 |
 
-**G,H O-proj 처리.** O-proj(P) 는 P 의 decode-attn(G,H) 완료를 trigger 로 발화하며, T1 PIM 완료 직후 GPU 가 즉시 dispatch. 표기상 *T1 GPU 셀 = O-proj(P) → QKV(M)* 의 직렬 합 (FSM determinism 으로 사전 계획). Long-ctx PIM-bound regime 에서 G, H decode-attn 이 T1 을 넘기면 O-proj(P) 가 자연스럽게 다음 dispatch event 로 슬립 — DAG 가 자동 처리.
+**G,H O-proj 처리 — GPU back-fill 의 emergent 속성.** PIM 이 P 의 decode-attn(G,H) 처리 중일 때 I3 가 O-proj(P) 를 not-ready 로 묶기 때문에 GPU 는 idle-wait 하지 않는다. Priority dequeue (`O-proj > prefill > QKV`) 에 의해 GPU 는 ready 인 유일한 노드 QKV(M) 를 pick 해 back-fill 로 처리한다. 따라서 T1 의 PIM 완료 trigger 는 *이미 M QKV 를 완료한 GPU* 로 떨어지며, 해방된 GPU 자원이 그 trigger 위에서 즉시 O-proj(P) 를 dispatch 한다. 이 emergent GPU back-fill 이 곧 §6.3 priority dequeue 의 실현 — 별도의 lookahead 정책은 인코딩되지 않는다. T3 에도 같은 패턴 (PIM 이 M 에 머무는 동안 QKV(N) back-fill) 이 반복된다. 만약 GPU 의 QKV(M) 가 PIM(P) 보다 길었다면 T1 이 GPU QKV 완료 시점으로 이동했을 것이며, balanced admission 하에서 몇 iteration 내에 re-equilibrate 되고, 어느 순서든 DAG 가 자동 처리한다.
+
+**Regime applicability.** 위 trace shape 는 balanced admission 하의 PULS 스케줄러 steady-state attractor 이며 따라서 **ctx-independent** 이다. Chunked prefill (§5.5) 이 admission 으로 하여금 chunk granularity 를 조절해 `t_PIM(decode-attn) ≈ sum of GPU stages` 를 TBT SLO 안의 어떤 ctx 에서도 유지하게 하므로, chunk 크기와 무관하게 동일한 Init/T1–T5 dispatch 순서로 회귀한다. Trace 가 적용되지 않는 것은 cycle balance 자체가 불가능한 매우 긴 ctx (§6.6 "A-bound natural transition") 뿐이며 — 이는 ctx 가 길어질 때 나타나는 multi-request scheduler 의 시스템-레벨 본질적 한계이지 PULS 고유의 한계가 아니다.
 
 ### 6.6 Bound 분석
 
