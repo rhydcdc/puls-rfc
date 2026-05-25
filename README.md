@@ -30,6 +30,9 @@ Full body — [`ARCHITECTURE.md`](ARCHITECTURE.md) (substrate, instance disaggre
 - [Limitations / Disclosure](#limitations--disclosure)
 - [Forward-looking: HBF-class Disaggregated Substrate](#forward-looking-hbf-class-disaggregated-substrate)
 
+**Resources**
+- [Interactive Reading Guide](#interactive-reading-guide)
+
 ## Characteristics of Processing-in-Memory Architecture
 
 *This Section summarizes the structural constraints shared by every PIM architecture.* From HBM4E onward, custom logic-die fabrication begins. To execute MAC operations in parallel with ongoing GPU processing, PIM must place MAC units on either **the logic die (PHY) or the DRAM die of HBM**. This substrate choice imposes the following structural constraints:
@@ -157,10 +160,18 @@ Beyond the HBM4 SP-PIM main claim of this RFC, mounting PIM cores on a **separat
 
 That said, **HBF specifications remain unreleased at this time**, so data load latency, hot/cold KV cache tier partitioning policy, and write endurance constraints cannot be quantitatively specified. This item is *directional only*; the quantitative follow-up belongs to the period after spec disclosure.
 
+## Interactive Reading Guide
+
+The core scheduler policy of PULS ([`ARCHITECTURE.md`](ARCHITECTURE.md) §6) is also available as an interactive single-page companion. The guide is organized into five navigable sections — instance disaggregation, invariants & dispatch DAG, scheduler usage (pseudo-code), adaptive admission, and a worked dispatch trace example — designed to be read sequentially or jumped into by topic.
+
+- **Online (rendered HTML, hosted via GitHub Pages):** [rhydcdc.github.io/puls-rfc/scheduler_policy.html](https://rhydcdc.github.io/puls-rfc/scheduler_policy.html)
+- **Local:** clone the repo and open [`docs/scheduler_policy.html`](docs/scheduler_policy.html) in a browser
+
 ## Repository
 
 - [`README.md`](README.md) — this document (entry point)
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — architecture body (motivation, design principles, substrate, instance disaggregation, scheduler integration, adaptive admission, layer flow, prior-art comparison)
+- [`docs/scheduler_policy.html`](docs/scheduler_policy.html) — interactive reading guide (companion to ARCHITECTURE.md §6)
 - [`LICENSE`](LICENSE) — Apache 2.0
 
 ## License
