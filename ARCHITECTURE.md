@@ -337,24 +337,24 @@ Whichever policy the scheduler adopts, the following 5 rules cannot be violated.
 |---|---|---|
 | I1 | correctness | prefill-attn(X) → dispatch only after QKV(X) completes (Q, K, V dependency) |
 | I2 | correctness | decode-attn(X) → dispatch only after QKV(X) completes (PIM, FSM start condition) |
-| I3 | **efficiency** | O-proj(X) → dispatch only after both prefill-attn(X) ∧ decode-attn(X) complete. Although row-wise independence permits splitting, the penalties of $W_O$ 2× streaming + MFU drop + 2× kernel launch keep it always a single GEMM. Aligned with the production mixed-batch standard pattern |
+| I3 | **efficiency** | O-proj(X) → dispatch only after both prefill-attn(X) ∧ decode-attn(X) complete. Although row-wise independence permits splitting, the penalties of `W_O` 2× streaming + MFU drop + 2× kernel launch keep it always a single GEMM. Aligned with the production mixed-batch standard pattern |
 | I4 | resource | At time t, the GPU resource runs only one GEMM / attention op (tensor core saturates; kernel concurrency ineffective) |
 | I5 | resource | At time t, the PIM resource runs **only one** decode-attn op (SP-PIM occupies all 2048 channels). Not a head- or request-level constraint — within a single decode-attn op, multi-head · multi-request batching is free |
 
 ### 6.3 Dispatch Policy: Event-driven + Dependency DAG
 
-**Definition.** Directed Acyclic Graph. Nodes are work units; an edge $A \to B$ denotes the precedence relation *"B can be dispatched once A completes."* Acyclicity precludes deadlock and guarantees topological order. PULS encodes the §6.2 invariants as DAG edges, reducing the dispatch decision to a *ready-node selection problem over a data structure*.
+**Definition.** Directed Acyclic Graph. Nodes are work units; an edge `A → B` denotes the precedence relation *"B can be dispatched once A completes."* Acyclicity precludes deadlock and guarantees topological order. PULS encodes the §6.2 invariants as DAG edges, reducing the dispatch decision to a *ready-node selection problem over a data structure*.
 
-**Nodes.** For each μ-batch $X$, four work nodes: $\text{QKV}(X)$, $\text{prefill-attn}(X)$, $\text{decode-attn}(X)$, $\text{O-proj}(X)$.
+**Nodes.** For each μ-batch `X`, four work nodes: `QKV(X)`, `prefill-attn(X)`, `decode-attn(X)`, `O-proj(X)`.
 
 **Edges.** I1·I2·I3 become precedence edges directly.
 
 | Edge | Source invariant |
 |---|---|
-| $\text{QKV}(X) \to \text{prefill-attn}(X)$ | I1 |
-| $\text{QKV}(X) \to \text{decode-attn}(X)$ | I2 |
-| $\text{prefill-attn}(X) \to \text{O-proj}(X)$ | I3 |
-| $\text{decode-attn}(X) \to \text{O-proj}(X)$ | I3 |
+| `QKV(X) → prefill-attn(X)` | I1 |
+| `QKV(X) → decode-attn(X)` | I2 |
+| `prefill-attn(X) → O-proj(X)` | I3 |
+| `decode-attn(X) → O-proj(X)` | I3 |
 
 **Single μ-batch graph.**
 
@@ -366,7 +366,7 @@ QKV(M) ──────┤                    ├──→ O-proj(M)
 
 No explicit edges exist between distinct μ-batches — when resources (GPU·PIM) are available, arbitrary interleaving is possible. This is the graph-theoretic basis of look-ahead / back fill.
 
-**Scheduler usage.** The scheduler maintains a DAG over the in-flight μ-batch window $\{M_{i-1}, M_i, M_{i+1}\}$, and at every kernel-completion event dispatches ready work from the two queues (GPU·PIM).
+**Scheduler usage.** The scheduler maintains a DAG over the in-flight μ-batch window `{M_{i-1}, M_i, M_{i+1}}`, and at every kernel-completion event dispatches ready work from the two queues (GPU·PIM).
 
 ```
 on event(kernel K of μ-batch X completes):
@@ -398,22 +398,22 @@ The scheduler dynamically adjusts the per-μ-batch composition decision *on a pe
 - **Layer 1 — μ-batch composition** (on top of the chunked-prefill + mixed-batching primitive): decides the prefill-chunk vs decode token mix and N. **The determining factor of TTFT / TBT SLO condenses to this layer.**
 - **Layer 2 — DAG dispatch** (§6.3): Automatic ready-node selection on top of the Layer 1 result. Since processing is serial, it cancels with admission variables — adaptive degrees of freedom concentrate in Layer 1.
 
-Adaptive admission's primary objective $=$ balancing the two instances of the inter-instance pipeline cycle $\max(\text{A\_cycle}, \text{B\_cycle})$ (both fully utilized). Secondary objective $=$ balance of GPU·PIM double-buffering inside Instance A (§5.6). A hysteresis deadband suppresses oscillation from GPU jitter · workload variance (see the Deadband Policy section).
+Adaptive admission's primary objective = balancing the two instances of the inter-instance pipeline cycle `max(A_cycle, B_cycle)` (both fully utilized). Secondary objective = balance of GPU·PIM double-buffering inside Instance A (§5.6). A hysteresis deadband suppresses oscillation from GPU jitter · workload variance (see the Deadband Policy section).
 
 | Layer | Measurement | Diagnosis | Admission adjustment |
 |---|---|---|---|
-| Inter-AB (primary) | $\text{A\_cycle} > \text{B\_cycle}$ (B idle) | A-bound (long-ctx) | admission ↓ effect limited (the PIM attention component of $\text{A\_cycle}$ depends on KV length) — B idle naturally accepted |
-| Inter-AB (primary) | $\text{A\_cycle} < \text{B\_cycle}$ (A idle) | B-bound (short-ctx + low batch) | admit prefill chunk → $\text{A\_cycle}$ increases, balance restored |
-| Intra-A (secondary) | GPU idle > $\theta_\text{high}$, PIM busy | PIM-dominant inside Instance A | admit additional decode → fill PIM window |
-| Intra-A (secondary) | PIM idle > $\theta_\text{high}$, GPU busy | GPU-dominant inside Instance A | admit prefill chunk → fill GPU window |
-| — | Both layers below $\theta_\text{low}$ | balanced | maintain current admission |
+| Inter-AB (primary) | `A_cycle > B_cycle` (B idle) | A-bound (long-ctx) | admission ↓ effect limited (the PIM attention component of `A_cycle` depends on KV length) — B idle naturally accepted |
+| Inter-AB (primary) | `A_cycle < B_cycle` (A idle) | B-bound (short-ctx + low batch) | admit prefill chunk → `A_cycle` increases, balance restored |
+| Intra-A (secondary) | GPU idle > `θ_high`, PIM busy | PIM-dominant inside Instance A | admit additional decode → fill PIM window |
+| Intra-A (secondary) | PIM idle > `θ_high`, GPU busy | GPU-dominant inside Instance A | admit prefill chunk → fill GPU window |
+| — | Both layers below `θ_low` | balanced | maintain current admission |
 | — | Both layers idle | underloaded | enlarge μ-batch size or accelerate wait tokens |
 
 **Deadband Policy: Ctx-tiered Static Lookup.**
 
-- **Width formula** — Deadband width $= 2\sigma_\text{total}$ (control-theory standard, hysteresis stability condition).
-- **$\sigma_\text{total}$ decomposition** — RSS sum of GPU jitter (L2 hit rate / warp scheduler / HBM controller queuing / kernel launch) and workload variance (KV length variance / arrival jitter).
-- **Rationale for ctx-tiered adoption** — The longer the ctx, the longer the cycle, the greater the accumulated $\sigma$, and the more dominant the KV variance influence → static per-ctx lookup.
+- **Width formula** — Deadband width = `2σ_total` (control-theory standard, hysteresis stability condition).
+- **`σ_total` decomposition** — RSS sum of GPU jitter (L2 hit rate / warp scheduler / HBM controller queuing / kernel launch) and workload variance (KV length variance / arrival jitter).
+- **Rationale for ctx-tiered adoption** — The longer the ctx, the longer the cycle, the greater the accumulated `σ`, and the more dominant the KV variance influence → static per-ctx lookup.
 
 | ctx | σ_total estimate (qualitative) | deadband width |
 |---|---|---|
@@ -421,9 +421,9 @@ Adaptive admission's primary objective $=$ balancing the two instances of the in
 | Mid-ctx (~32k) | medium | medium |
 | Long-ctx (128k–1M) | high (KV-variance dominated) | wide (enters clamp 0% region) |
 
-Quantification of $\sigma_\text{total}$, deadband sweep, and the online adaptive variant (a per-iteration $\sigma$ estimator that auto-updates the width) are all future work outside the scope of this study — since the scheduler simulator lacks a real-hardware jitter model, the very definition of σ measurement is absent. This evaluation measures only the qualitative behavior of the dispatch policy in the regime where the GPU·PIM cycle is balanced (balanced regime).
+Quantification of `σ_total`, deadband sweep, and the online adaptive variant (a per-iteration `σ` estimator that auto-updates the width) are all future work outside the scope of this study — since the scheduler simulator lacks a real-hardware jitter model, the very definition of σ measurement is absent. This evaluation measures only the qualitative behavior of the dispatch policy in the regime where the GPU·PIM cycle is balanced (balanced regime).
 
-**Admission Lower Bound: MFU Floor.** $N \geq N_\text{sat}$ (FFN GEMM saturating knee) — below this, GEMM MFU is sub-saturating and kernel-launch overhead dominates. The upper bound belongs to the TPOT SLO model domain (future work). Per-ctx binding:
+**Admission Lower Bound: MFU Floor.** `N ≥ N_sat` (FFN GEMM saturating knee) — below this, GEMM MFU is sub-saturating and kernel-launch overhead dominates. The upper bound belongs to the TPOT SLO model domain (future work). Per-ctx binding:
 
 | ctx regime | Binding |
 |---|---|
@@ -441,7 +441,7 @@ An instance of a 3-μ-batch in-flight window (assuming mid-ctx, balanced admissi
 | M | {A: prefill chunk, B: decode, C: decode} | Current μ-batch |
 | N | {D: prefill chunk, E: decode, F: decode} | Next μ-batch |
 
-The table below is *one trace* of event-driven dispatch, not a fixed period. $T_i$ is the time of dispatch occurrence.
+The table below is *one trace* of event-driven dispatch, not a fixed period. `T_i` is the time of dispatch occurrence.
 
 | event time | GPU work | PIM work | DAG state |
 |---|---|---|---|

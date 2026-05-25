@@ -337,24 +337,24 @@ Instance A 내부 GPU·PIM 공동 스케줄링 정책.
 |---|---|---|
 | I1 | correctness | prefill-attn(X) → QKV(X) 완료 후에만 dispatch (Q, K, V 의존) |
 | I2 | correctness | decode-attn(X) → QKV(X) 완료 후에만 dispatch (PIM, FSM 시작 조건) |
-| I3 | **efficiency** | O-proj(X) → prefill-attn(X) ∧ decode-attn(X) 모두 완료 후 dispatch. Row-wise 독립이라 분할 가능하나 $W_O$ 2× streaming + MFU 하락 + 2× kernel launch 손해로 항상 단일 GEMM. Production mixed batch 표준 패턴 정합 |
+| I3 | **efficiency** | O-proj(X) → prefill-attn(X) ∧ decode-attn(X) 모두 완료 후 dispatch. Row-wise 독립이라 분할 가능하나 `W_O` 2× streaming + MFU 하락 + 2× kernel launch 손해로 항상 단일 GEMM. Production mixed batch 표준 패턴 정합 |
 | I4 | resource | GPU resource 는 시점 t 에 GEMM / attention op 하나만 실행 (tensor core saturate, kernel concurrency 무효) |
 | I5 | resource | PIM resource 는 시점 t 에 decode-attn **op 하나만** 실행 (SP-PIM 이 2048 channel 전체 점유). Head · 요청 단위 제약 아님 — 단일 decode-attn op 내부에서 multi-head · multi-request batching 은 자유 |
 
 ### 6.3 Dispatch Policy: Event-driven + Dependency DAG
 
-**정의.** Directed Acyclic Graph (방향성 비순환 그래프). 노드는 작업 단위, 엣지 $A \to B$ 는 *"A 완료 후 B dispatch 가능"* 의 precedence 관계를 의미. 비순환성으로 deadlock 불가, topological order 보장. PULS 는 §6.2 invariants 를 DAG 엣지로 코드화해 dispatch 결정을 *자료구조 위의 ready-node 선택 문제* 로 환원한다.
+**정의.** Directed Acyclic Graph (방향성 비순환 그래프). 노드는 작업 단위, 엣지 `A → B` 는 *"A 완료 후 B dispatch 가능"* 의 precedence 관계를 의미. 비순환성으로 deadlock 불가, topological order 보장. PULS 는 §6.2 invariants 를 DAG 엣지로 코드화해 dispatch 결정을 *자료구조 위의 ready-node 선택 문제* 로 환원한다.
 
-**노드.** 각 μ-batch $X$ 에 대해 4 개 작업 노드: $\text{QKV}(X)$, $\text{prefill-attn}(X)$, $\text{decode-attn}(X)$, $\text{O-proj}(X)$.
+**노드.** 각 μ-batch `X` 에 대해 4 개 작업 노드: `QKV(X)`, `prefill-attn(X)`, `decode-attn(X)`, `O-proj(X)`.
 
 **엣지.** I1·I2·I3 가 그대로 precedence 엣지가 됨.
 
 | 엣지 | 출처 invariant |
 |---|---|
-| $\text{QKV}(X) \to \text{prefill-attn}(X)$ | I1 |
-| $\text{QKV}(X) \to \text{decode-attn}(X)$ | I2 |
-| $\text{prefill-attn}(X) \to \text{O-proj}(X)$ | I3 |
-| $\text{decode-attn}(X) \to \text{O-proj}(X)$ | I3 |
+| `QKV(X) → prefill-attn(X)` | I1 |
+| `QKV(X) → decode-attn(X)` | I2 |
+| `prefill-attn(X) → O-proj(X)` | I3 |
+| `decode-attn(X) → O-proj(X)` | I3 |
 
 **μ-batch 한 개 그래프.**
 
@@ -366,7 +366,7 @@ QKV(M) ──────┤                    ├──→ O-proj(M)
 
 서로 다른 μ-batch 간 명시적 엣지 없음 — 자원 (GPU·PIM) 가용 시 임의 인터리브 가능. 이것이 look-ahead / back fill 의 그래프-이론적 근거.
 
-**Scheduler 사용법.** 스케줄러는 in-flight μ-batch window $\{M_{i-1}, M_i, M_{i+1}\}$ 의 DAG 를 유지하고, 매 kernel 종료 이벤트마다 두 큐 (GPU·PIM) 에서 ready 작업을 dispatch.
+**Scheduler 사용법.** 스케줄러는 in-flight μ-batch window `{M_{i-1}, M_i, M_{i+1}}` 의 DAG 를 유지하고, 매 kernel 종료 이벤트마다 두 큐 (GPU·PIM) 에서 ready 작업을 dispatch.
 
 ```
 on event(kernel K of μ-batch X completes):
@@ -398,22 +398,22 @@ Per-μ-batch 구성 결정을 *iteration 단위로* 스케줄러가 동적으로
 - **Layer 1 — μ-batch 구성** (chunked-prefill + mixed batching primitive 위): prefill chunk vs decode 토큰 mix 및 N 결정. **TTFT / TBT SLO 의 결정 요인은 이 layer 에 응축**.
 - **Layer 2 — DAG dispatch** (§6.3): Layer 1 결과 위에서 ready-node 자동 선택. 순차 처리이므로 admission 변수에 cancel — adaptive 자유도는 Layer 1 에 집중.
 
-Adaptive admission 의 1차 objective $=$ inter-instance pipeline cycle $\max(\text{A\_cycle}, \text{B\_cycle})$ 의 두 instance 균형 (둘 다 fully utilized). 2차 objective $=$ Instance A 내부 GPU·PIM double-buffering (§5.6) 의 균형. Hysteresis deadband 로 GPU jitter · workload variance oscillation 억제 (Deadband Policy 절 참조).
+Adaptive admission 의 1차 objective = inter-instance pipeline cycle `max(A_cycle, B_cycle)` 의 두 instance 균형 (둘 다 fully utilized). 2차 objective = Instance A 내부 GPU·PIM double-buffering (§5.6) 의 균형. Hysteresis deadband 로 GPU jitter · workload variance oscillation 억제 (Deadband Policy 절 참조).
 
 | Layer | 측정 | 진단 | Admission 조정 |
 |---|---|---|---|
-| Inter-AB (1차) | $\text{A\_cycle} > \text{B\_cycle}$ (B idle) | A-bound (long-ctx) | admission ↓ 효과 제한적 ($\text{A\_cycle}$ 의 PIM attention 부분이 KV 길이 의존) — B idle 자연 수용 |
-| Inter-AB (1차) | $\text{A\_cycle} < \text{B\_cycle}$ (A idle) | B-bound (short-ctx + low batch) | prefill chunk admit → $\text{A\_cycle}$ 증가, 균형 회복 |
-| Intra-A (2차) | GPU idle > $\theta_\text{high}$, PIM busy | Instance A 내부 PIM 우세 | decode 추가 admit → PIM 윈도우 채움 |
-| Intra-A (2차) | PIM idle > $\theta_\text{high}$, GPU busy | Instance A 내부 GPU 우세 | prefill chunk admit → GPU 윈도우 채움 |
-| — | 양 layer 모두 $\theta_\text{low}$ 이하 | balanced | 현재 admission 유지 |
+| Inter-AB (1차) | `A_cycle > B_cycle` (B idle) | A-bound (long-ctx) | admission ↓ 효과 제한적 (`A_cycle` 의 PIM attention 부분이 KV 길이 의존) — B idle 자연 수용 |
+| Inter-AB (1차) | `A_cycle < B_cycle` (A idle) | B-bound (short-ctx + low batch) | prefill chunk admit → `A_cycle` 증가, 균형 회복 |
+| Intra-A (2차) | GPU idle > `θ_high`, PIM busy | Instance A 내부 PIM 우세 | decode 추가 admit → PIM 윈도우 채움 |
+| Intra-A (2차) | PIM idle > `θ_high`, GPU busy | Instance A 내부 GPU 우세 | prefill chunk admit → GPU 윈도우 채움 |
+| — | 양 layer 모두 `θ_low` 이하 | balanced | 현재 admission 유지 |
 | — | 양 layer 모두 idle | underloaded | μ-batch 크기 확대 또는 wait 토큰 가속 |
 
 **Deadband Policy: Ctx-tiered Static Lookup.**
 
-- **Width 산식** — Deadband width $= 2\sigma_\text{total}$ (control theory 표준, hysteresis 안정 조건).
-- **$\sigma_\text{total}$ 분해** — GPU jitter (L2 hit rate / warp scheduler / HBM controller queuing / kernel launch) 와 workload variance (KV 길이 분산 / arrival jitter) 의 RSS 합.
-- **Ctx-tiered 채택 근거** — Long-ctx 일수록 cycle 길어 $\sigma$ 누적이 커지고 KV variance 영향이 압도적 → ctx 별 정적 lookup.
+- **Width 산식** — Deadband width = `2σ_total` (control theory 표준, hysteresis 안정 조건).
+- **`σ_total` 분해** — GPU jitter (L2 hit rate / warp scheduler / HBM controller queuing / kernel launch) 와 workload variance (KV 길이 분산 / arrival jitter) 의 RSS 합.
+- **Ctx-tiered 채택 근거** — Long-ctx 일수록 cycle 길어 `σ` 누적이 커지고 KV variance 영향이 압도적 → ctx 별 정적 lookup.
 
 | ctx | σ_total 추정 (정성) | deadband width |
 |---|---|---|
@@ -421,9 +421,9 @@ Adaptive admission 의 1차 objective $=$ inter-instance pipeline cycle $\max(\t
 | Mid-ctx (~32k) | 중간 | 중간 |
 | Long-ctx (128k–1M) | 높음 (KV variance 지배) | 넓음 (clamp 0% 영역 진입) |
 
-$\sigma_\text{total}$ 정량화 및 deadband sweep, online adaptive variant (per-iteration $\sigma$ estimator 로 width 자동 갱신) 모두 본 연구 범위 밖 future work — scheduler simulator 에 실 hardware jitter 모델 부재로 σ 측정 자체가 정의되지 않음. 본 평가는 GPU·PIM cycle 이 균형 영역 (balanced regime) 에서 dispatch policy 의 정성적 거동만 측정.
+`σ_total` 정량화 및 deadband sweep, online adaptive variant (per-iteration `σ` estimator 로 width 자동 갱신) 모두 본 연구 범위 밖 future work — scheduler simulator 에 실 hardware jitter 모델 부재로 σ 측정 자체가 정의되지 않음. 본 평가는 GPU·PIM cycle 이 균형 영역 (balanced regime) 에서 dispatch policy 의 정성적 거동만 측정.
 
-**Admission Lower Bound: MFU Floor.** $N \geq N_\text{sat}$ (FFN GEMM saturating knee) — 이 이하론 GEMM MFU sub-saturating, kernel launch overhead 지배. Upper bound 는 TPOT SLO model 영역 (future work). Ctx 별 binding:
+**Admission Lower Bound: MFU Floor.** `N ≥ N_sat` (FFN GEMM saturating knee) — 이 이하론 GEMM MFU sub-saturating, kernel launch overhead 지배. Upper bound 는 TPOT SLO model 영역 (future work). Ctx 별 binding:
 
 | ctx 영역 | Binding |
 |---|---|
@@ -441,7 +441,7 @@ $\sigma_\text{total}$ 정량화 및 deadband sweep, online adaptive variant (per
 | M | {A: prefill chunk, B: decode, C: decode} | 현재 μ-batch |
 | N | {D: prefill chunk, E: decode, F: decode} | 다음 μ-batch |
 
-아래 표는 event-driven dispatch 의 *한 trace* 이며 고정 주기가 아니다. $T_i$ 는 dispatch 발생 시각.
+아래 표는 event-driven dispatch 의 *한 trace* 이며 고정 주기가 아니다. `T_i` 는 dispatch 발생 시각.
 
 | event time | GPU 작업 | PIM 작업 | DAG state |
 |---|---|---|---|
