@@ -26,6 +26,9 @@ CLAUDE.md
 # Implementation plan documents (local working notes, code-only commits)
 implementation/plans/
 
+# Claude Code per-user permission overrides (env-specific paths)
+.claude/settings.local.json
+
 # Python
 __pycache__/
 *.py[cod]

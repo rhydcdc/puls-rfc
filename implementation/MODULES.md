@@ -1,0 +1,16 @@
+# PULS Scheduler Modules
+
+`implementation/src/puls_sched/` 의 각 모듈 한 줄 역할 설명 (학습용). 각 Impl 완료 직전 (commit 직전 Self-review 동시 영역) 에 신설 / 변경 모듈 반영.
+
+## Impl-1 — Core Data Structures + Event Loop Skeleton (commit `943eca5`)
+
+- `config.py` — 시뮬레이션 전체에서 쓸 파라미터 (모델 구조 · 하드웨어 · 시간 · SLO · seed) 를 한 곳에 보관합니다.
+- `clock.py` — 시뮬레이션의 현재 시각을 들고 있습니다. 시간을 앞으로만 흐르게 강제합니다.
+- `request.py` — 요청 하나의 정보 (id · 입력 토큰 · 출력 토큰 · KV 길이 · 도착 시각) 와 그 요청이 지금 어느 단계 (대기 → prefill → decode → 완료) 에 있는지를 추적합니다.
+- `micro_batch.py` — 같이 처리될 여러 요청을 하나의 μ-batch 로 묶고, 그 안에서 prefill chunk 와 decode token 을 분리해 들고 있습니다.
+- `node.py` — DAG 한 노드의 정보 (작업 종류 · 어느 μ-batch 의 작업인지 · 지금 어떤 상태인지) 를 표현합니다.
+- `dag.py` — μ-batch 가 들어오면 그 안의 작업 4 개 (QKV · prefill-attn · decode-attn · O-proj) 와 그들 사이의 선후 관계 (I1·I2·I3) 를 자동으로 만들어 줍니다.
+- `event.py` — 미래 시점에 일어날 일 (커널 완료 · 요청 도착 · admission tick) 한 건을 표현합니다.
+- `event_queue.py` — 일어날 일들을 시각 순서대로 줄 세워 두고, 다음에 일어날 일을 꺼낼 때마다 시계를 그 시각으로 맞춥니다.
+- `window.py` — 현재 처리 중인 μ-batch 3 개만 들고 있다가, 새 μ-batch 가 들어오면 가장 오래된 것을 자동으로 내보냅니다.
+- `main_loop.py` — 큐에서 다음 이벤트를 꺼내 처리하는 메인 루프. 어떻게 처리할지의 *내용물* 은 Impl-2 부터 채워집니다.

@@ -86,6 +86,10 @@ Production scheduler (vLLM · Sarathi-Serve) 에 reference 없음. PIM tile time
 
 각 Impl 의 plan 문서 (`implementation/plans/impl_N.md`, local-only) 에서 위 reminder 를 출발점으로 구체 test 항목 확장. Self-review (commit 직전 mechanical 검증 — naming grep · import 순환 · LOC ceiling · plan diff · CLAUDE.md §2 sanity) 는 모든 Impl 공통.
 
+### MODULES.md 갱신 (Impl-N 별 공통 reminder)
+
+각 Impl 의 commit 직전 (Self-review 동시 영역) 에 `implementation/MODULES.md` 의 해당 Impl 섹션을 갱신 — 그 Impl 에서 신설 또는 변경된 모듈의 한 줄 역할 설명 추가/수정. 신설 모듈이 없는 Impl (skeleton 에 logic 만 채우는 경우) 도 기존 모듈의 한 줄 설명 갱신 필수 (예: Impl-2 의 `main_loop.py` 는 skeleton → 실 dispatcher 로 의미 변경, `dispatcher.py` 신설 — MODULES.md 에 반영).
+
 ---
 
 ## 1. Scope
@@ -162,34 +166,34 @@ Production scheduler (vLLM · Sarathi-Serve) 에 reference 없음. PIM tile time
 
 각 phase 는 *Implementation* + *Unit Tests* + *Acceptance* 의 3 단 구성. **Impl-9 가 end-to-end runnable 의 검증 phase** — §0 완전성 정의의 실체.
 
-### Impl-1 — Core Data Structures + Event Loop + Foundations
+### Impl-1 — Core Data Structures + Event Loop + Foundations ✓ (commit `943eca5`)
 
 **Implementation:**
-- [ ] `Config` — model params · HW params · SLO targets · workload params · seed (dataclass / 단일 dict)
-- [ ] `Clock` — virtual simulation time; current_time getter + advance(dt); EventQueue 의 source-of-truth
-- [ ] `Request` — id · prompt tokens · decoded tokens · KV length · arrival time · SLO target · **state field (pending / prefill / decode / completed)**
-- [ ] `RequestState` — state transition (pending → prefill → decode → completed) + invalid transition reject
-- [ ] `MicroBatch` — request set · prefill chunk allocation · decode token list · layer index
-- [ ] `Node` — node type (QKV / prefill-attn / decode-attn / O-proj) · μ-batch ref · state (pending → ready → running → done)
-- [ ] `DAG` — 4 노드/μ-batch 자동 생성 + I1·I2·I3 precedence edge 자동 생성
-- [ ] `Event` — event type (kernel-completion / request-arrival / admission-tick) · timestamp · payload
-- [ ] `EventQueue` — time-ordered priority queue, Clock 과 동기
-- [ ] `InFlightWindow` — 3 μ-batch sliding window; μ-batch 추가/제거 시 DAG 동기 갱신
-- [ ] Main loop skeleton — event pop → invariant check → dispatch → state update
+- [x] `Config` — model params · HW params · SLO targets · workload params · seed (dataclass / 단일 dict)
+- [x] `Clock` — virtual simulation time; current_time getter + advance(dt); EventQueue 의 source-of-truth
+- [x] `Request` — id · prompt tokens · decoded tokens · KV length · arrival time · SLO target · **state field (pending / prefill / decode / completed)**
+- [x] `RequestState` — state transition (pending → prefill → decode → completed) + invalid transition reject
+- [x] `MicroBatch` — request set · prefill chunk allocation · decode token list · layer index
+- [x] `Node` — node type (QKV / prefill-attn / decode-attn / O-proj) · μ-batch ref · state (pending → ready → running → done)
+- [x] `DAG` — 4 노드/μ-batch 자동 생성 + I1·I2·I3 precedence edge 자동 생성
+- [x] `Event` — event type (kernel-completion / request-arrival / admission-tick) · timestamp · payload
+- [x] `EventQueue` — time-ordered priority queue, Clock 과 동기
+- [x] `InFlightWindow` — 3 μ-batch sliding window; μ-batch 추가/제거 시 DAG 동기 갱신
+- [x] Main loop skeleton — event pop → invariant check → dispatch → state update (skeleton; `_handle` body 는 Impl-2 영역)
 
-**Unit Tests:**
-- [ ] `Config` — required field 누락 시 fail-fast; seed 변경 시 RNG 영향 검증
-- [ ] `Clock` — current_time monotonic non-decreasing; advance(dt) 후 정확 시간 갱신
-- [ ] `Request` 생성 + field round-trip 검증
-- [ ] `RequestState` — pending → prefill → decode → completed 정상 진행; 역방향 transition reject
-- [ ] `MicroBatch` — prefill chunk + decode token split 정확성 (token mix invariant)
-- [ ] `Node` — state transition 단방향성 (역방향 transition 거부)
-- [ ] `DAG` — 단일 μ-batch 위 4 node + 4 precedence edge (I1·I2·I3) 자동 생성
-- [ ] `EventQueue` — timestamp 오름차순 pop, tie-break by insertion order; Clock 과 동기
-- [ ] `InFlightWindow` — 3 μ-batch 회전; 4 번째 μ-batch admit 시 oldest 자동 eviction
-- [ ] End-to-end smoke — synthetic 1 μ-batch event 가 dispatch 까지 도달
+**Unit Tests:** (총 60 passed; PLAN §0.5 보강 9 항목 포함 — `implementation/plans/impl_1.md` 참조)
+- [x] `Config` — required field 누락 시 fail-fast; seed 변경 시 RNG 영향 검증
+- [x] `Clock` — current_time monotonic non-decreasing; advance(dt) 후 정확 시간 갱신
+- [x] `Request` 생성 + field round-trip 검증
+- [x] `RequestState` — pending → prefill → decode → completed 정상 진행; 역방향 transition reject
+- [x] `MicroBatch` — prefill chunk + decode token split 정확성 (token mix invariant)
+- [x] `Node` — state transition 단방향성 (역방향 transition 거부)
+- [x] `DAG` — 단일 μ-batch 위 4 node + 4 precedence edge (I1·I2·I3) 자동 생성
+- [x] `EventQueue` — timestamp 오름차순 pop, tie-break by insertion order; Clock 과 동기
+- [x] `InFlightWindow` — 3 μ-batch 회전; 4 번째 μ-batch admit 시 oldest 자동 eviction
+- [x] End-to-end smoke — synthetic 1 μ-batch event 가 dispatch 까지 도달
 
-**Acceptance:** Synthetic 10 μ-batch trace 위에서 event queue 가 시간순 dequeue, DAG 자동 생성, sliding window 가 무한 메모리 누적 없이 회전.
+**Acceptance:** ✓ Synthetic 10 μ-batch trace 위에서 event queue 가 시간순 dequeue, DAG 자동 생성, sliding window 가 무한 메모리 누적 없이 회전.
 
 ---
 
