@@ -22,3 +22,19 @@ figures/*
 
 # Local LLM behavior guide (not for public exposure)
 CLAUDE.md
+
+# Implementation plan documents (local working notes, code-only commits)
+implementation/plans/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
