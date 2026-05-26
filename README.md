@@ -6,7 +6,7 @@
 >
 > Self-study work in progress. Feedback, critique, and mentorship are warmly welcomed (GitHub Issues / Discussions).
 
-This repo is the public RFC (Request for Comments) of an in-progress prototype. It provides only the entry point of the architecture + design rationale + scheduler policy; quantitative evaluation will be measured in the simulator-based simulation track.
+This repo is the public RFC (Request for Comments) of an in-progress prototype. It provides only the entry point of the architecture + design rationale + scheduler policy; quantitative evaluation will be measured in the Phase 3 calibration track.
 
 Full body — [`ARCHITECTURE.md`](ARCHITECTURE.md) (substrate, instance disaggregation, scheduler integration, adaptive admission, layer flow, prior art comparison, all integrated).
 
@@ -136,7 +136,7 @@ The primary target of this RFC is the **long-context + large-batch production se
 | Phase | Scope | Status |
 |---|---|---|
 | Phase 0 — Discovery | η_HBM, NVLink measurement, ctx-extrapolation equation, KV variance, FFN saturation, ramulator tile time, **RTL substrate design completed using the FlashAttention algorithm (online softmax + row-wise streaming) (Yosys + ASAP7 + OpenSTA pre-CTS flow)** | ✓ Closed |
-| Phase 1 — Simulator Extension | PIM dispatch + FP8 KV alignment + Instance A/B scheduler + PB3 correction on top of an open-source LLM serving simulator (Vidur) fork | In progress |
+| Phase 1 — Scheduler Implementation | Self-authored scheduler framework (event-driven DAG dispatcher + adaptive admission + Instance A/B disaggregation dispatch) + PIM executor emulator | In progress |
 | Phase 2 — Time Model and Workload | Precise PIM time model, trace replay, handoff refinement | Pending |
 | Phase 3 — Calibration and Sensitivity | Sensitivity sweep, finalize quantitative figures | Pending |
 
@@ -144,7 +144,7 @@ The quantitative figures of this RFC (acceleration multiples, throughput / laten
 
 ## Limitations / Disclosure
 
-- **No hardware in hand** — No actual H100 / HBM4 silicon. Evaluation runs on top of an open-source LLM serving simulator (Vidur).
+- **No hardware in hand** — No actual H100 / HBM4 silicon. Quantitative evaluation deferred to the Phase 3 calibration track.
 - **HBM4 estimation** — Based on the JEDEC JESD270-4A spec + in-house Ramulator2-based cycle-accurate measurements (FP8 tile load / FP16 tile load / PIM compute regimes) as references.
 - **RTL substrate** — Limited to an open-source flow (Yosys + ASAP7 + OpenSTA pre-CTS). Out of scope of commercial signoff.
 - **Single-vendor production trace** — Publicly available long-context agentic production traces are effectively limited to one. Disclosed as a limitation; augmented with a 1M-class benchmark dataset + a mid-context production chat trace as supplementary axes.

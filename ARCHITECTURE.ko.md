@@ -21,7 +21,7 @@
   - [5.2 Fixed-shape Handoff to Instance B](#52-fixed-shape-handoff-to-instance-b)
   - [5.3 Compute-bound 구간 중 PIM 연산 Overlap](#53-compute-bound-구간-중-pim-연산-overlap)
   - [5.4 스케줄링 예측 가능성의 부분적 해소](#54-스케줄링-예측-가능성의-부분적-해소)
-  - [5.5 Prototype Vehicle: Production Serving Stack Fork](#55-prototype-vehicle-production-serving-stack-fork)
+  - [5.5 Prototype Vehicle: Self-authored Scheduler Framework](#55-prototype-vehicle-self-authored-scheduler-framework)
   - [5.6 Intra-instance Double-Buffering](#56-intra-instance-double-buffering)
   - [5.7 가속 Source 분해](#57-가속-source-분해)
 - [6. Instance A Scheduler 내부 정책](#6-instance-a-scheduler-내부-정책)
@@ -274,13 +274,13 @@ Instance A 내에서 GPU projection 이 compute-bound 상태일 때 HBM 대역�
 - **KV 길이 분산 흡수:** Decode 배치 내 요청별 KV 캐시 길이의 분산은 attention 연산 시간의 분산을 유발하여 straggler bubble 을 발생시킨다 (O1 참조). PIM 이 가변 길이 attention 을 흡수하면 Instance B 에는 항상 고정 형상 텐서가 전달되므로 (§5.2 참조), 이 불규칙성이 제거된다.
 - **Prefill 우선 스케줄링 stall 제거:** Mixed batch 환경에서 prefill 연산이 우선 처리될 경우 decode 요청의 지연이 불규칙하게 발생한다. PIM 이 attention 의 길이 의존성을 흡수하면 prefill 이 decode 를 stall 시키는 원인이 제거되어, 동일 배치 내에서 prefill 과 decode 의 공존이 가능해지고 decode 지연의 불규칙성이 완화된다.
 
-### 5.5 Prototype Vehicle: Production Serving Stack Fork
+### 5.5 Prototype Vehicle: Self-authored Scheduler Framework
 
-**chunked-prefill + 혼합 배치 OSS 스케줄러** 코드베이스를 fork 하고 PULS dispatch hook 을 삽입해 자체 스케줄러 정책 (§6) 의 prototype 을 실현한다.
+Scheduler core 는 self-authored event-driven framework 로 구현. OSS 코드베이스 (vLLM · Sarathi-Serve) 는 baseline scheduler reimplementation 의 reference 로만 활용하며 코드 의존은 없다.
 
-- **Hook 위치:** scheduler worker / model runner 경계. Attention 호출을 PIM executor 로 라우팅하고, layer 를 Instance A (attention + projection) ↔ Instance B (FFN) 두 인스턴스로 분리 dispatch 한다 (§3.4).
-- **Channel control:** Phase 진입 시 PIM 채널 수 *k* 를 scheduler step 에서 토글한다. Chunked prefill 정책과 직교적으로 호환된다.
-- **TP=8 + SP-PIM 통합:** Instance A 의 GQA 8 KV head × TP=8 mapping 위에 SP-PIM Q-replicate 추가. 기존 TP 코드 경로를 재사용하며 SP-PIM 은 attention kernel substitution 으로 구현.
+- **Framework 구조:** Event queue + dependency DAG + in-flight μ-batch window 의 self-contained 자료구조. Production scheduler step 과 동일 호출 주기. Attention 호출은 PIM executor 로 라우팅하고, layer 를 Instance A (attention + projection) ↔ Instance B (FFN) 두 인스턴스로 분리 dispatch (§3.4).
+- **Channel control:** Phase 진입 시 PIM 채널 수 *k* 를 scheduler step 에서 토글한다. Chunked prefill 정책과 직교적으로 호환.
+- **TP=8 + SP-PIM 통합:** Instance A 의 GQA 8 KV head × TP=8 mapping 위에 SP-PIM Q-replicate 추가. Attention kernel 은 SP-PIM substitution 으로 구현.
 
 ### 5.6 Intra-instance Double-Buffering
 
@@ -421,7 +421,7 @@ Adaptive admission 의 1차 objective = inter-instance pipeline cycle `max(A_cyc
 | Mid-ctx (~32k) | 중간 | 중간 |
 | Long-ctx (128k–1M) | 높음 (KV variance 지배) | 넓음 (clamp 0% 영역 진입) |
 
-`σ_total` 정량화 및 deadband sweep, online adaptive variant (per-iteration `σ` estimator 로 width 자동 갱신) 모두 본 연구 범위 밖 future work — scheduler simulator 에 실 hardware jitter 모델 부재로 σ 측정 자체가 정의되지 않음. 본 평가는 GPU·PIM cycle 이 균형 영역 (balanced regime) 에서 dispatch policy 의 정성적 거동만 측정.
+`σ_total` 정량화 및 deadband sweep, online adaptive variant (per-iteration `σ` estimator 로 width 자동 갱신) 모두 본 연구 범위 밖 future work — self-authored scheduler framework 에 실 hardware jitter 모델 부재로 σ 측정 자체가 정의되지 않음. 본 평가는 GPU·PIM cycle 이 균형 영역 (balanced regime) 에서 dispatch policy 의 정성적 거동만 측정.
 
 **Admission Lower Bound: MFU Floor.** `N ≥ N_sat` (FFN GEMM saturating knee) — 이 이하론 GEMM MFU sub-saturating, kernel launch overhead 지배. Upper bound 는 TPOT SLO model 영역 (future work). Ctx 별 binding:
 
@@ -474,7 +474,7 @@ PULS 스케줄러의 balanced steady state 에서 3 μ-batch in-flight window �
 
 ### 6.7 구현 요건
 
-- Open-source LLM serving simulator (Vidur) fork 위에 event queue 1 개, dependency DAG 1 개, in-flight window 3 μ-batch 상태. Production scheduler step 과 동일 호출 주기.
+- Self-authored event-driven framework: event queue 1 개, dependency DAG 1 개, in-flight window 3 μ-batch 상태. Production scheduler step 과 동일 호출 주기.
 - PIM 종료 시각 predictor (FSM cycle-accurate).
 - Idle fraction telemetry (GPU·PIM 별, iteration 단위 누적).
 - Admission controller (chunk size · decode batch 동적 조정).

@@ -21,7 +21,7 @@
   - [5.2 Fixed-shape Handoff to Instance B](#52-fixed-shape-handoff-to-instance-b)
   - [5.3 PIM Overlap during Compute-Bound Windows](#53-pim-overlap-during-compute-bound-windows)
   - [5.4 Partial Resolution of Scheduling Predictability](#54-partial-resolution-of-scheduling-predictability)
-  - [5.5 Prototype Vehicle: Production Serving Stack Fork](#55-prototype-vehicle-production-serving-stack-fork)
+  - [5.5 Prototype Vehicle: Self-authored Scheduler Framework](#55-prototype-vehicle-self-authored-scheduler-framework)
   - [5.6 Intra-instance Double-Buffering](#56-intra-instance-double-buffering)
   - [5.7 Acceleration Source Decomposition](#57-acceleration-source-decomposition)
 - [6. Instance A Internal Scheduler Policy](#6-instance-a-internal-scheduler-policy)
@@ -274,13 +274,13 @@ For quantitative evaluation of the concrete scheduling policy, see Open Empirica
 - **KV-length variance absorption:** Within a decode batch, the variance in per-request KV cache length induces variance in attention computation time, producing straggler bubbles (see O1). When PIM absorbs the variable-length attention, Instance B always receives fixed-shape tensors (see §5.2), eliminating this irregularity.
 - **Removal of prefill-priority scheduling stalls:** In a mixed-batch environment, when prefill operations are prioritized, decode requests experience irregular delays. When PIM absorbs the length dependency of attention, the cause of prefill stalling decode is removed; prefill and decode coexist within the same batch, and the irregularity of decode delay is alleviated.
 
-### 5.5 Prototype Vehicle: Production Serving Stack Fork
+### 5.5 Prototype Vehicle: Self-authored Scheduler Framework
 
-We fork the **chunked-prefill + mixed-batch OSS scheduler** codebase and insert a PULS dispatch hook to realize a prototype of our scheduler policy (§6).
+The scheduler core is implemented as a self-authored event-driven framework. OSS codebases (vLLM, Sarathi-Serve) serve only as references for baseline scheduler reimplementation; no code dependency.
 
-- **Hook location:** scheduler worker / model runner boundary. Attention calls are routed to the PIM executor, and the layer is dispatched split across two instances — Instance A (attention + projection) ↔ Instance B (FFN) (§3.4).
+- **Framework structure:** Self-contained data structure of event queue + dependency DAG + in-flight μ-batch window. Same invocation cadence as a production scheduler step. Attention calls are routed to the PIM executor, and layers split-dispatch across two instances — Instance A (attention + projection) ↔ Instance B (FFN) (§3.4).
 - **Channel control:** Upon phase entry, the PIM channel count *k* is toggled at the scheduler step. Orthogonally compatible with the chunked-prefill policy.
-- **TP=8 + SP-PIM integration:** SP-PIM Q-replicate is added on top of Instance A's GQA 8 KV head × TP=8 mapping. The existing TP code path is reused; SP-PIM is implemented as an attention-kernel substitution.
+- **TP=8 + SP-PIM integration:** SP-PIM Q-replicate is added on top of Instance A's GQA 8 KV head × TP=8 mapping. The attention kernel is implemented as an SP-PIM substitution.
 
 ### 5.6 Intra-instance Double-Buffering
 
@@ -421,7 +421,7 @@ Adaptive admission's primary objective = balancing the two instances of the inte
 | Mid-ctx (~32k) | medium | medium |
 | Long-ctx (128k–1M) | high (KV-variance dominated) | wide (enters clamp 0% region) |
 
-Quantification of `σ_total`, deadband sweep, and the online adaptive variant (a per-iteration `σ` estimator that auto-updates the width) are all future work outside the scope of this study — since the scheduler simulator lacks a real-hardware jitter model, the very definition of σ measurement is absent. This evaluation measures only the qualitative behavior of the dispatch policy in the regime where the GPU·PIM cycle is balanced (balanced regime).
+Quantification of `σ_total`, deadband sweep, and the online adaptive variant (a per-iteration `σ` estimator that auto-updates the width) are all future work outside the scope of this study — since the self-authored scheduler framework lacks a real-hardware jitter model, the very definition of σ measurement is absent. This evaluation measures only the qualitative behavior of the dispatch policy in the regime where the GPU·PIM cycle is balanced (balanced regime).
 
 **Admission Lower Bound: MFU Floor.** `N ≥ N_sat` (FFN GEMM saturating knee) — below this, GEMM MFU is sub-saturating and kernel-launch overhead dominates. The upper bound belongs to the TPOT SLO model domain (future work). Per-ctx binding:
 
@@ -474,7 +474,7 @@ Qualitative estimation. Since the scheduler recognizes the bound at runtime via 
 
 ### 6.7 Implementation Requirements
 
-- On top of an open-source LLM serving simulator (Vidur) fork: 1 event queue, 1 dependency DAG, 3-μ-batch state in the in-flight window. Same invocation cadence as the production scheduler step.
+- Self-authored event-driven framework: 1 event queue, 1 dependency DAG, 3-μ-batch state in the in-flight window. Same invocation cadence as the production scheduler step.
 - PIM completion-time predictor (FSM cycle-accurate).
 - Idle fraction telemetry (per GPU·PIM, accumulated per iteration).
 - Admission controller (dynamic adjustment of chunk size · decode batch).

@@ -6,7 +6,7 @@
 >
 > 혼자 공부하며 배우는 과정이며, 피드백 · 지적 · 가르침을 적극 환영합니다 (GitHub Issues / Discussions).
 
-본 repo 는 진행 중인 prototype 의 공개 RFC (Request for Comments). Architecture + design rationale + scheduler 정책 의 entry point 만 제공하며, 정량 평가 산출은 simulator 기반 시뮬레이션 영역에서 측정 예정.
+본 repo 는 진행 중인 prototype 의 공개 RFC (Request for Comments). Architecture + design rationale + scheduler 정책 의 entry point 만 제공하며, 정량 평가 산출은 Phase 3 calibration 영역에서 측정 예정.
 
 상세 본문 — [`ARCHITECTURE.md`](ARCHITECTURE.md) (substrate, instance disaggregation, scheduler integration, adaptive admission, layer flow, prior art 비교 통합).
 
@@ -133,7 +133,7 @@
 | Phase | 영역 | Status |
 |---|---|---|
 | Phase 0 — Discovery | η_HBM, NVLink 실측, ctx 외삽 식, KV 분산, FFN saturating, ramulator tile 시간, **FlashAttention 알고리즘 (online softmax + row-wise streaming) 활용 RTL substrate 설계 완료 (Yosys + ASAP7 + OpenSTA pre-CTS flow)** | ✓ Closed |
-| Phase 1 — Simulator Extension | open-source LLM serving simulator (Vidur) fork 위 PIM dispatch + FP8 KV 정합 + Instance A/B scheduler + PB3 보정 | 진행 중 |
+| Phase 1 — Scheduler Implementation | 자체 scheduler framework 구현 (event-driven DAG dispatcher + adaptive admission + Instance A/B disaggregation dispatch) + PIM executor emulator | 진행 중 |
 | Phase 2 — Time Model 및 Workload | PIM 정밀 시간 모델, trace replay, handoff 정밀화 | Pending |
 | Phase 3 — Calibration 및 Sensitivity | Sensitivity sweep, 정량 수치 확정 | Pending |
 
@@ -141,7 +141,7 @@
 
 ## Limitations / Disclosure
 
-- **Hardware 미보유** — 실제 H100 / HBM4 silicon 없음. 평가는 open-source LLM serving simulator (Vidur) 기반.
+- **Hardware 미보유** — 실제 H100 / HBM4 silicon 없음. 정량 평가는 Phase 3 calibration 영역으로 위임.
 - **HBM4 추정** — JEDEC JESD270-4A spec 기반 + 자체 Ramulator2 기반 cycle-accurate 측정 (FP8 tile load / FP16 tile load / PIM compute 영역) 인용.
 - **RTL substrate** — open-source flow (Yosys + ASAP7 + OpenSTA pre-CTS) 한정. Commercial signoff 영역 외.
 - **단일 vendor production trace** — 공개 long-ctx agentic production trace 가 사실상 1 종 한정. 한계 disclosure 와 함께 1M-class benchmark dataset + mid-ctx production chat trace 를 보강 axis 로 사용.
