@@ -542,6 +542,51 @@ F2·F3·F5 는 Impl-8 evaluator.acceleration_decomposition() 의 산식 그대�
   - `_maybe_advance_forward_pass` 의 prefill 완료 검출 → decode 전이 분기 (현재 1 cycle 만에 PENDING→PREFILL→DECODE 전이)
 - [ ] **O9.2 신설 — Mixed batching (Aux1 prereq)** — Same mb 영역에 prefill + decode 동시 dispatch. O9.1 의 prerequisite. `MicroBatch.prefill_chunk` + `MicroBatch.decode_tokens` 동시 populate + dispatcher 가 mixed dispatch 의 op_time 산식 정합 영역. ARCH §6.1 mixed batch 정합. D2 의 *Aux1 (weight streaming 1 회 절감, separate prefill+decode batch 대비)* 의 *진짜 산출* 영역 — 현재 모든 mb 가 pure-decode-only 라 Aux1 의 정량 ratio 산출 자체 불가
 
+#### Chunk Size Policy — Hybrid (Default base + adaptive adjustment)
+
+> ARCH §6.4 `balance_inter_AB(prefill_chunk_tokens, ...)` 의 산식 의도 정확 반영. *Fully adaptive (base 0)* 영역 배제 — cold start (a_cycle=b_cycle=0 위 chunk=0 또는 n_sat=16 만 산출 → 47K prompt 위 2940 iteration 비현실) + determinism 위협 (measurement noise) + D2 sweep 의 isolation 의미 (chunk_size 영향 분리 측정) 의 3 영역 위 결함. *Fixed-only (Sarathi 영역)* 영역 배제 — PULS 의 multi-signal balance (deadband + idle telemetry) 자연 inert.
+
+**Hybrid 영역 의미:**
+
+```
+deploy-time:   prefill_chunk_default = K  (config placeholder, sweep 산출)
+run-time per ADMISSION_TICK:
+    base = config.admission.prefill_chunk_default
+    base = balance_inter_AB(base, a_cycle, b_cycle, ctx)
+         ├─ diff in_band             → base 유지
+         ├─ a < b (Instance B 빠름)  → base + n_sat
+         └─ a > b (Instance A 빠름)  → base 유지
+    base, decode_count = balance_intra_A(base, decode_count)
+         ├─ gpu_idle > theta_high    → decode_count + 1
+         ├─ pim_idle > theta_high    → base + n_sat
+         └─ otherwise                → 유지
+    effective_chunk = base  →  spec.prefill_chunk_tokens
+```
+
+**Cold start anchor 영역**: 첫 admission tick 위 a_cycle=b_cycle=0 + idle_fraction=0 → balance 산식 모두 base 그대로 → *default 값 사용*. Measurement 누적 후 *점진 adapt*.
+
+**Steady state**: O5.1 wiring 후 a_cycle/b_cycle 측정 누적 + O8.2 wiring 후 idle telemetry 활성 → balance signal 위 *매 iteration 마다 effective_chunk 동적 산출*. F4 steady-state 전제 (deadband 수렴) 위 안정 영역.
+
+**Sweep 의 dual role (PULS-specific D2 분석):**
+
+- **역할 A — `prefill_chunk_default` 의 최적값 산출** (deploy-time decision): chunk_size ∈ {256, 512, 1024, 2048} × workload regime sweep → F2 (double-buffering) + Aux1 (mixed batching) cycle ratio 의 best chunk_size 산출 → production placeholder. *시중 표준 영역 정합* (Sarathi · vLLM 영역 의 512 default 위 출발 + PULS 영역 의 PIM-decode 병행 위 큰 chunk 가능성 검증).
+- **역할 B — Chunk size sensitivity 의 D2 영향 측정**: 각 (ctx, batch) cell 위 chunk_size 변화의 F2 · Aux1 ratio 영향 isolation 산출. ARCH §6.4 의 *"PULS 내부 admission 의 chunk 결정 sensitivity (외부 reference 없음)"* 정합.
+
+**PULS 차별점 vs Sarathi-Serve:**
+
+| 영역 | Sarathi-Serve | PULS Hybrid |
+|---|---|---|
+| Base 영역 | `compute_budget = chunk + decodes` fixed | `prefill_chunk_default` config + sweep |
+| Adaptive signal | Budget 균등성 (single-axis: decode count 만 adapt) | Deadband (a-b cycle balance) + idle telemetry (GPU vs PIM) — multi-signal |
+| Adaptive 변수 | Decode count 만 | Chunk size + decode count 둘 다 |
+| 의사결정 영역 | Per-iteration budget check | Per-iteration *2-axis balance* (inter-AB + intra-A) |
+| ARCH 정합 | N/A (시중 영역) | §6.4 multi-signal balance 산식 정확 반영 |
+
+**Config 영역 신설:**
+
+- [ ] `AdmissionConfig.prefill_chunk_default: int` — placeholder, sweep 산출 후 결정. 시작값 512 (시중 표준 영역) 추천. *Impl-10 sweep 위 PULS 영역 의 적정값 산출 후 lock-in*.
+- [ ] `TimeConfig.gpu_op_time_per_token_us: float` — `dispatch_gpu(prefill_attn)` 의 op_time = `chunk_size × gpu_op_time_per_token_us` 산출 영역 (현재 dummy `gpu_op_time_us["prefill_attn"]=1.0` 고정). Impl-10 calibration 영역 (blackwell whitepaper spec).
+
 **Wiring + 구현 후 활성되는 산식·알고리즘 (Impl-9 영역 기존 완비):**
 
 - `Admission.balance_inter_AB` (deadband 의 cycle balance) — 단위 test 완비, O5.1 wiring 후 진짜 `a_cycle`/`b_cycle` 산출 → 활성
