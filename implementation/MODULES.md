@@ -37,3 +37,14 @@
 - `config.py` — *(변경)* PIM 관련 placeholder 3 개 추가. KV 캐시를 FP8 로 저장할지 FP16 로 저장할지 (모델 단위 시스템 설정), PIM 한 타일의 행 수 (RTL 합성으로 확정된 32 행), 그리고 8 GPU 가 같이 일할 때 추가로 드는 통신 시간을 보관합니다.
 - `pim_emulator.py` — 한 번의 PIM 어텐션 연산이 *얼마나 걸리는지* 알려주는 시간 계산기입니다. "지금 PIM 으로 쓰는 채널 수" 와 "이번 batch 의 KV row 합" 두 가지만 주면 op time 을 즉시 산출해 줍니다. 채널 수가 한 GPU 의 채널 수보다 크면 (= 8 GPU 협력) 통신 시간도 더해 줍니다. Ramulator2 가 외부에서 미리 계산해 둔 cycle 데이터를 JSON 으로 읽어 들이는 로더도 같이 보유합니다 (실데이터 ingest 는 Impl-10).
 - `dispatcher.py` — *(의미 변경)* PIM 노드 dispatch 시 *얼마나 걸릴지* 의 시간 산출 책임을 `pim_emulator` 에게 위임합니다. 이전엔 고정 lookup 한 값이었던 PIM op time 이, 이제 PIMExecutor 가 채널 수 · KV row 수 기반으로 계산해 돌려줍니다. 단 dispatch 시점에 그 두 정보가 어디서 오는지의 *진짜 흐름* 은 Impl-5 영역 — 지금은 config 의 placeholder 값을 그대로 씁니다.
+
+## Impl-5 — Instance A/B Pipeline + Forward Pass + Inter-instance Handoff
+
+- `instance.py` — Instance A 또는 B 의 *자원 추적기* 입니다. GPU 자원은 TP=8 lock-step (8 GPU 가 항상 같이 한 op 만 처리) 으로 1 단위, PIM 은 Instance A 만 보유. acquire/release 의 중복 점유 · 미점유 release 는 모두 raise 로 차단합니다.
+- `nvlink.py` — Instance A ↔ B 의 NVLink 위 데이터 한 묶음 (decode `[B × hidden]` / prefill `[(B·chunk) × hidden]`) 이 건너가는 데 *얼마나 걸리는지* 만 알려주는 순수 시간 계산기입니다. 이벤트 push 도 자원 lock 도 하지 않습니다 — NVLink 은 데이터 통로 (dispatched resource 아님).
+- `instance_pipeline.py` — 한 layer 의 A → handoff → B → handoff → A_next 흐름을 들고 있습니다. (1) Instance B 에 넘기는 텐서가 *항상 fixed shape* 인지 검사하고 (ragged 면 raise), (2) `steady_state_cycle(A_cycle, B_cycle) = max(A_cycle, B_cycle)` 의 ARCH literal 산식을 runtime 에 돌려줍니다. L-layer 루프는 보유하지 않습니다 (forward_pass 책임).
+- `forward_pass.py` — *L 회 layer 통과* 의 loop owner 입니다. `LayerState.advance(mb)` 가 mb.current_layer_index 를 1 증가시키고, L 에 도달하면 *token decode signal* 의 trigger (True 반환) 를 돌려줍니다. 단조 위반 (역방향 · 이미 끝남) 은 raise. 실 instance_pipeline.dispatch 통합은 Impl-9 driver 영역입니다.
+- `micro_batch.py` — *(변경)* admission 의 결정 정보를 dispatch 까지 운반하는 3 필드 신설: `k_total` (SP-PIM aggregate channel count), `kv_rows_total` (decode reqs 의 kv_length 합), `current_layer_index` (forward pass 의 현재 layer). Impl-4 의 carry-over O4.1 (dispatcher PIM 의 placeholder default args) 가 해소됩니다.
+- `admission.py` — *(변경)* `MicroBatchSpec` 에 `kv_rows_total` 필드 추가. `layer1` 산출 시 decode_reqs 의 kv_length 를 합산하여 spec 에 담아 줍니다.
+- `dispatcher.py` — *(의미 변경)* `micro_batches: dict[int, MicroBatch]` 멤버 + `register`/`unregister` API 신설. `_op_time` 의 PIM branch 가 이제 placeholder 가 아닌 *실제 mb.k_total · mb.kv_rows_total* 로 op_time 을 산출합니다 (O4.1 해소). 미등록 mb 의 PIM dispatch 는 raise.
+- `main_loop.py` — *(의미 변경)* `ADMISSION_TICK` body 가 `MicroBatchSpec` → `MicroBatch` 변환 (Q1 — 변환 시점) 후 `dispatcher.register(mb)` 호출 → `window.admit(mb_id)` → `dispatcher.tick()` 의 순서로 진행합니다. spec 의 결정 정보 (k_total · kv_rows_total) 이 dispatcher 까지 유실 없이 흐릅니다.

@@ -17,6 +17,7 @@ class MicroBatchSpec:
     n: int
     k_total: int
     over_budget: bool
+    kv_rows_total: int                                   # Impl-5 — Σ kv_length over decode_requests (signal flow to dispatcher)
 
 
 @dataclass
@@ -88,6 +89,7 @@ class Admission:
 
         n = self.mfu_floor(decode_count)
         k_result = k_total_solve(t_proj, t_pim_fn, n, self.admission_cfg)
+        kv_rows_total = sum(r.kv_length for r in decode_reqs)
 
         return MicroBatchSpec(
             prefill_chunk_tokens=prefill_chunk_tokens,
@@ -95,4 +97,5 @@ class Admission:
             n=n,
             k_total=k_result.k_total,
             over_budget=k_result.over_budget,
+            kv_rows_total=kv_rows_total,
         )

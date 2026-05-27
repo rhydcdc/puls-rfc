@@ -1,8 +1,19 @@
 from puls_sched.event import Event, EventType
+from puls_sched.micro_batch import MicroBatch
 from puls_sched.node import NodeState, NodeType
 
 
+def _register_mb(scheduler_core, mb_id: int) -> None:
+    """Impl-5 — PIM dispatch signal flow. backward-compat (k=k_total_max, rows=tile_rows)."""
+    scheduler_core.dispatcher.register(MicroBatch(
+        id=mb_id,
+        k_total=scheduler_core.config.admission.k_total_max,
+        kv_rows_total=scheduler_core.config.time.rtl_fsm_tile_rows,
+    ))
+
+
 def test_single_event_dispatch_reaches_handler(scheduler_core):
+    _register_mb(scheduler_core, 0)
     scheduler_core.window.admit(0)
     qkv = scheduler_core.dag.get_node(0, NodeType.QKV)
     qkv.transition_to(NodeState.READY)
@@ -43,6 +54,7 @@ def _drain_micro_batch(scheduler_core, mb_id, base_time):
 def test_acceptance_10_micro_batch_trace(scheduler_core):
     all_timestamps = []
     for i in range(10):
+        _register_mb(scheduler_core, i)
         scheduler_core.window.admit(i)
         all_timestamps.extend(_drain_micro_batch(scheduler_core, i, base_time=float(i * 10)))
 

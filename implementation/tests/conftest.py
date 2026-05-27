@@ -8,9 +8,13 @@ from puls_sched.config import default_dummy_config
 from puls_sched.dag import DAG
 from puls_sched.dispatcher import Dispatcher
 from puls_sched.event_queue import EventQueue
+from puls_sched.forward_pass import ForwardPass, LayerState
 from puls_sched.idle_telemetry import IdleTelemetry
+from puls_sched.instance import Instance
+from puls_sched.instance_pipeline import InstancePipeline
 from puls_sched.kv_accountant import KVAccountant
 from puls_sched.main_loop import SchedulerCore
+from puls_sched.nvlink import NVLinkTransfer
 from puls_sched.pim_emulator import PIMExecutor
 from puls_sched.request_queue import RequestQueue
 from puls_sched.window import InFlightWindow
@@ -108,4 +112,47 @@ def scheduler_core(dummy_config, clock, event_queue, dag, window, dispatcher,
         request_queue=request_queue,
         kv_accountant=kv_accountant,
         admission=admission,
+    )
+
+
+# =========================================================================
+# Impl-5 fixtures
+# =========================================================================
+
+@pytest.fixture
+def instance_a():
+    return Instance(name="A", has_pim=True)
+
+
+@pytest.fixture
+def instance_b():
+    return Instance(name="B", has_pim=False)
+
+
+@pytest.fixture
+def nvlink_transfer(dummy_config):
+    return NVLinkTransfer(config=dummy_config)
+
+
+@pytest.fixture
+def instance_pipeline(dummy_config, instance_a, instance_b, nvlink_transfer):
+    return InstancePipeline(
+        config=dummy_config,
+        instance_a=instance_a,
+        instance_b=instance_b,
+        nvlink=nvlink_transfer,
+    )
+
+
+@pytest.fixture
+def layer_state(dummy_config):
+    return LayerState(num_layers=dummy_config.model.num_layers)
+
+
+@pytest.fixture
+def forward_pass(dummy_config, instance_pipeline, layer_state):
+    return ForwardPass(
+        config=dummy_config,
+        instance_pipeline=instance_pipeline,
+        layer_state=layer_state,
     )

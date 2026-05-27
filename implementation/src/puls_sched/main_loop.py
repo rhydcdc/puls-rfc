@@ -8,6 +8,7 @@ from puls_sched.dispatcher import Dispatcher
 from puls_sched.event import Event, EventType
 from puls_sched.event_queue import EventQueue
 from puls_sched.kv_accountant import KVAccountant
+from puls_sched.micro_batch import MicroBatch
 from puls_sched.request_queue import RequestQueue
 from puls_sched.window import InFlightWindow
 
@@ -46,6 +47,14 @@ class SchedulerCore:
                     return
                 mb_id = self._next_mb_id
                 self._next_mb_id += 1
+                # Impl-5 (Q1) — spec → MicroBatch 변환. decode_tokens · prefill_chunk 의 실 token data 는
+                # Impl-6 영역 (token sampling + prefill chunk schedule). 본 단계는 spec 의 결정 정보 운반.
+                mb = MicroBatch(
+                    id=mb_id,
+                    k_total=spec.k_total,
+                    kv_rows_total=spec.kv_rows_total,
+                )
+                self.dispatcher.register(mb)
                 self.window.admit(mb_id)
                 self.dispatcher.tick()
 

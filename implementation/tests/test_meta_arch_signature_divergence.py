@@ -18,6 +18,11 @@ ARCH 근거:
 
 import inspect
 
+from puls_sched.dispatcher import Dispatcher
+from puls_sched.forward_pass import ForwardPass, LayerState
+from puls_sched.instance import Instance
+from puls_sched.instance_pipeline import InstancePipeline
+from puls_sched.nvlink import NVLinkTransfer
 from puls_sched.pim_emulator import PIMExecutor
 
 
@@ -62,3 +67,68 @@ def test_pim_executor_no_clock_or_queue_field():
         f"PIMExecutor fields divergence — {fields}. "
         f"clock · queue 필드 추가 시 stateless 정합 깨짐 (ARCH §3.5.2)."
     )
+
+
+# =========================================================================
+# Impl-5 signature divergence lock-in
+# =========================================================================
+
+def test_instance_pipeline_no_l_loop():
+    """InstancePipeline 에 L-loop method 부재 (Q3 — forward_pass = L-loop owner)."""
+    for forbidden in ("run", "iterate_layers", "forward"):
+        assert not hasattr(InstancePipeline, forbidden), (
+            f"InstancePipeline.{forbidden} 존재 — Q3 위반 (L-loop 은 ForwardPass 책임)."
+        )
+
+
+def test_forward_pass_owns_l_loop():
+    """ForwardPass.run 존재 + signature `(self, mb)`."""
+    assert hasattr(ForwardPass, "run")
+    params = list(inspect.signature(ForwardPass.run).parameters.keys())
+    assert params == ["self", "mb"]
+
+
+def test_nvlink_no_event_push():
+    """NVLinkTransfer public method = {time} only (Q4 — pure function, event push 부재)."""
+    public_methods = {
+        name for name, _ in inspect.getmembers(NVLinkTransfer, predicate=inspect.isfunction)
+        if not name.startswith("_")
+    }
+    assert public_methods == {"time"}, (
+        f"NVLinkTransfer method divergence — {public_methods}. "
+        f"Q4 정합 — pure time function, event push 안 함."
+    )
+
+
+def test_nvlink_no_clock_or_queue_field():
+    """NVLinkTransfer field set = {config, bytes_per_element} only (Q4 stateless)."""
+    fields = set(NVLinkTransfer.__dataclass_fields__.keys())
+    assert fields == {"config", "bytes_per_element"}, (
+        f"NVLinkTransfer fields divergence — {fields}."
+    )
+
+
+def test_instance_pipeline_steady_state_runtime_getter():
+    """InstancePipeline.steady_state_cycle 존재 + signature `(self, a_cycle, b_cycle)` (Q6)."""
+    assert hasattr(InstancePipeline, "steady_state_cycle")
+    params = list(inspect.signature(InstancePipeline.steady_state_cycle).parameters.keys())
+    assert params == ["self", "a_cycle", "b_cycle"]
+
+
+def test_dispatcher_register_signature():
+    """Dispatcher.register signature `(self, mb)` (Q1-bis)."""
+    params = list(inspect.signature(Dispatcher.register).parameters.keys())
+    assert params == ["self", "mb"]
+
+
+def test_instance_has_pim_field():
+    """Instance.has_pim 필드 + bool 타입 (Q2 — Instance A/B 구조 차이)."""
+    fields = Instance.__dataclass_fields__
+    assert "has_pim" in fields
+    assert fields["has_pim"].type is bool
+
+
+def test_layer_state_advance_signature():
+    """LayerState.advance signature `(self, mb)` → bool (token decode signal)."""
+    params = list(inspect.signature(LayerState.advance).parameters.keys())
+    assert params == ["self", "mb"]

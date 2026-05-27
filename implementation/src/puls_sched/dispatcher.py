@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from puls_sched.clock import Clock
 from puls_sched.config import Config
@@ -6,6 +6,7 @@ from puls_sched.dag import DAG
 from puls_sched.event import Event, EventType
 from puls_sched.event_queue import EventQueue
 from puls_sched.invariants import check_I1, check_I2, check_I3, check_I4, check_I5
+from puls_sched.micro_batch import MicroBatch
 from puls_sched.node import Node, NodeState, NodeType
 from puls_sched.pim_emulator import PIMExecutor
 
@@ -29,8 +30,24 @@ class Dispatcher:
     queue: EventQueue
     dag: DAG
     pim_executor: PIMExecutor
+    micro_batches: dict[int, MicroBatch] = field(default_factory=dict)  # Impl-5 — Q1-bis lookup
     gpu_busy: bool = False
     pim_busy: bool = False
+
+    def register(self, mb: MicroBatch) -> None:
+        """MicroBatch 를 dispatcher 의 lookup 저장소에 등록 (Q1-bis).
+
+        main_loop 의 ADMISSION_TICK body 가 spec → MicroBatch 변환 후 호출.
+        """
+        if mb.id in self.micro_batches:
+            raise RuntimeError(f"MicroBatch {mb.id} already registered")
+        self.micro_batches[mb.id] = mb
+
+    def unregister(self, mb_id: int) -> None:
+        """Window eviction 시 호출 (Impl-9 wiring). 본 단계는 API 만 노출."""
+        if mb_id not in self.micro_batches:
+            raise RuntimeError(f"MicroBatch {mb_id} not registered (double unregister?)")
+        del self.micro_batches[mb_id]
 
     def refresh_ready(self) -> None:
         for mb_id, nodes in self.dag.nodes.items():
@@ -63,11 +80,15 @@ class Dispatcher:
     def _op_time(self, node: Node) -> float:
         if node.type in GPU_NODE_TYPES:
             return self.config.time.gpu_op_time_us[node.type.name.lower()]
-        # PIM (decode-attn). Impl-4 형식 wiring only — args 는 config placeholder default.
-        # 진짜 signal flow (MicroBatch 의 k_total · kv_rows_total 필드) 는 Impl-5 영역.
+        # PIM (decode-attn). Impl-5 — 실 signal flow (MicroBatch.k_total · kv_rows_total).
+        mb = self.micro_batches.get(node.micro_batch_id)
+        if mb is None:
+            raise RuntimeError(
+                f"PIM dispatch for unregistered MicroBatch {node.micro_batch_id}"
+            )
         return self.pim_executor.op_time(
-            k_channels=self.config.admission.k_total_max,
-            kv_rows_total=self.config.time.rtl_fsm_tile_rows,
+            k_channels=mb.k_total,
+            kv_rows_total=mb.kv_rows_total,
         )
 
     def dispatch_gpu(self, node: Node) -> None:

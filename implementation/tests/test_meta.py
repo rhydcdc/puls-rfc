@@ -2,11 +2,18 @@ import inspect
 from pathlib import Path
 
 import puls_sched
+from puls_sched.admission import MicroBatchSpec
 from puls_sched.config import AdmissionConfig, ModelConfig, TimeConfig, default_dummy_config
 from puls_sched.dag import DAG
+from puls_sched.dispatcher import Dispatcher
 from puls_sched.event import EventType
+from puls_sched.forward_pass import ForwardPass, LayerState
+from puls_sched.instance import Instance
+from puls_sched.instance_pipeline import InstancePipeline
 from puls_sched.main_loop import SchedulerCore
+from puls_sched.micro_batch import MicroBatch
 from puls_sched.node import NodeType
+from puls_sched.nvlink import NVLinkTransfer
 from puls_sched.pim_emulator import PIMExecutor
 from puls_sched.request import RequestState
 
@@ -34,6 +41,11 @@ _EXPECTED_MODULES = {
     "admission",
     # Impl-4
     "pim_emulator",
+    # Impl-5
+    "instance",
+    "nvlink",
+    "instance_pipeline",
+    "forward_pass",
 }
 
 
@@ -156,3 +168,67 @@ def test_meta_pim_tile_time_dict_has_both_regimes():
     """config.time.pim_tile_time_ns 가 FP8 + FP16 양 regime key 보유 (PLAN §3 literal)."""
     cfg = default_dummy_config()
     assert set(cfg.time.pim_tile_time_ns.keys()) == {"FP8", "FP16"}
+
+
+# =========================================================================
+# Impl-5 — PLAN literal meta-test
+# =========================================================================
+
+def test_meta_micro_batch_has_impl5_fields():
+    """MicroBatch 의 Impl-5 신규 3 필드 존재 + int."""
+    fields = MicroBatch.__dataclass_fields__
+    for name in ("k_total", "kv_rows_total", "current_layer_index"):
+        assert name in fields
+        assert fields[name].type is int
+
+
+def test_meta_micro_batch_spec_has_kv_rows_total_field():
+    fields = MicroBatchSpec.__dataclass_fields__
+    assert "kv_rows_total" in fields
+    assert fields["kv_rows_total"].type is int
+
+
+def test_meta_dispatcher_has_micro_batches_field():
+    assert "micro_batches" in Dispatcher.__dataclass_fields__
+
+
+def test_meta_dispatcher_has_register_method():
+    assert hasattr(Dispatcher, "register")
+    sig = inspect.signature(Dispatcher.register)
+    assert list(sig.parameters.keys()) == ["self", "mb"]
+
+
+def test_meta_instance_class_fields():
+    assert set(Instance.__dataclass_fields__.keys()) == {"name", "has_pim", "gpu_busy", "pim_busy"}
+
+
+def test_meta_instance_pipeline_class_fields():
+    assert set(InstancePipeline.__dataclass_fields__.keys()) == {
+        "config", "instance_a", "instance_b", "nvlink",
+    }
+
+
+def test_meta_nvlink_transfer_class_fields():
+    assert set(NVLinkTransfer.__dataclass_fields__.keys()) == {"config", "bytes_per_element"}
+
+
+def test_meta_forward_pass_class_fields():
+    assert set(ForwardPass.__dataclass_fields__.keys()) == {
+        "config", "instance_pipeline", "layer_state",
+    }
+
+
+def test_meta_layer_state_class_fields():
+    assert set(LayerState.__dataclass_fields__.keys()) == {"num_layers"}
+
+
+def test_meta_arch_3_4_case_a_gpus_total():
+    """ARCH §3.4 Case A literal — Instance A 8 + Instance B 8 = 16 GPUs total."""
+    cfg = default_dummy_config()
+    assert cfg.hw.num_gpus_instance_a + cfg.hw.num_gpus_instance_b == 16
+
+
+def test_meta_arch_3_4_inter_instance_data_decode_shape():
+    """ARCH §3.4 표 — A → B: O projection output [B × hidden]. NVLinkTransfer.time signature 정합."""
+    sig = inspect.signature(NVLinkTransfer.time)
+    assert "tensor_shape" in sig.parameters

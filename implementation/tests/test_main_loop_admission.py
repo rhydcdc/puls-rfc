@@ -118,3 +118,63 @@ def test_request_arrival_payload_missing_request_key_raises(scheduler_core):
     ))
     with pytest.raises(KeyError):
         scheduler_core.step()
+
+
+# =========================================================================
+# Impl-5 — spec → MicroBatch 변환 + dispatcher.register (Q1)
+# =========================================================================
+
+def test_admission_tick_converts_spec_to_micro_batch(scheduler_core):
+    """ADMISSION_TICK 후 dispatcher.micro_batches 에 신규 mb 등록."""
+    scheduler_core.request_queue.push(_make_req(0, kv_length=50))
+    scheduler_core._handle(Event(timestamp=0.0, type=EventType.ADMISSION_TICK, payload={}))
+    assert 0 in scheduler_core.dispatcher.micro_batches
+    mb = scheduler_core.dispatcher.micro_batches[0]
+    assert mb.id == 0
+
+
+def test_admission_tick_micro_batch_carries_k_total(scheduler_core):
+    """등록된 mb.k_total == spec.k_total (signal flow)."""
+    scheduler_core.request_queue.push(_make_req(0, kv_length=50))
+    scheduler_core._handle(Event(timestamp=0.0, type=EventType.ADMISSION_TICK, payload={}))
+    mb = scheduler_core.dispatcher.micro_batches[0]
+    # k_total 은 admission 의 결정 — 정확값은 admission.layer1 산출이지만, *0 이상 + 다이얼 내* invariant
+    assert mb.k_total >= 0
+    assert mb.k_total <= scheduler_core.config.admission.k_total_max
+
+
+def test_admission_tick_micro_batch_carries_kv_rows_total(scheduler_core):
+    """등록된 mb.kv_rows_total == Σ kv_length over admitted reqs."""
+    scheduler_core.request_queue.push(_make_req(0, kv_length=100))
+    scheduler_core.request_queue.push(_make_req(1, kv_length=250))
+    scheduler_core._handle(Event(timestamp=0.0, type=EventType.ADMISSION_TICK, payload={}))
+    mb = scheduler_core.dispatcher.micro_batches[0]
+    assert mb.kv_rows_total == 100 + 250
+
+
+def test_admission_tick_no_spec_no_register(scheduler_core):
+    """spec None (empty queue) → register 호출 0."""
+    scheduler_core._handle(Event(timestamp=0.0, type=EventType.ADMISSION_TICK, payload={}))
+    assert len(scheduler_core.dispatcher.micro_batches) == 0
+
+
+def test_admission_tick_multiple_ticks_unique_mb_ids(scheduler_core):
+    """다회 ADMISSION_TICK → mb_id 0, 1, 2 단조."""
+    for i in range(3):
+        scheduler_core.request_queue.push(_make_req(i, kv_length=10))
+        scheduler_core._handle(Event(timestamp=float(i), type=EventType.ADMISSION_TICK, payload={}))
+        scheduler_core.dispatcher.gpu_busy = False
+        scheduler_core.dispatcher.pim_busy = False
+    registered_ids = sorted(scheduler_core.dispatcher.micro_batches.keys())
+    assert registered_ids == [0, 1, 2]
+
+
+def test_admission_tick_register_before_window_admit(scheduler_core):
+    """register 호출이 window.admit *이전* — dispatcher.micro_batches 가 admit 시점에 보유.
+
+    Indirect check: after ADMISSION_TICK, mb 가 window 와 dispatcher.micro_batches 양쪽에 존재.
+    """
+    scheduler_core.request_queue.push(_make_req(0, kv_length=10))
+    scheduler_core._handle(Event(timestamp=0.0, type=EventType.ADMISSION_TICK, payload={}))
+    assert 0 in scheduler_core.window.current_ids()
+    assert 0 in scheduler_core.dispatcher.micro_batches

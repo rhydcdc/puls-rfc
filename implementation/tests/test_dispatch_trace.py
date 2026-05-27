@@ -21,6 +21,7 @@ from puls_sched.event_queue import EventQueue
 from puls_sched.idle_telemetry import IdleTelemetry
 from puls_sched.kv_accountant import KVAccountant
 from puls_sched.main_loop import SchedulerCore
+from puls_sched.micro_batch import MicroBatch
 from puls_sched.node import NodeState, NodeType
 from puls_sched.pim_emulator import PIMExecutor
 from puls_sched.request_queue import RequestQueue
@@ -57,6 +58,13 @@ def _make_trace_fixture():
     )
 
     for mb_id in (0, 1, 2):
+        # Impl-5 — PIM dispatch signal flow. backward-compat 위해 Impl-4 placeholder
+        # 와 동일 lookup 값 (k_total=2048, kv_rows_total=32) → trace timing 영향 0.
+        dispatcher.register(MicroBatch(
+            id=mb_id,
+            k_total=config.admission.k_total_max,
+            kv_rows_total=config.time.rtl_fsm_tile_rows,
+        ))
         window.admit(mb_id)
 
     # P (mb 0): QKV + PREFILL_ATTN already DONE; DECODE_ATTN RUNNING on PIM

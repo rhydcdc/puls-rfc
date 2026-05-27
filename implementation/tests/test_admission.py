@@ -272,3 +272,58 @@ def test_layer1_out_of_band_then_returns_to_band(admission_config, idle_telemetr
     )
     assert spec1.prefill_chunk_tokens == admission_config.n_sat  # out-of-band: increased
     assert spec2.prefill_chunk_tokens == 0                       # in-band: no change
+
+
+# =========================================================================
+# Impl-5 — MicroBatchSpec.kv_rows_total (signal flow to dispatcher)
+# =========================================================================
+
+def test_admission_spec_has_kv_rows_total():
+    """MicroBatchSpec 에 kv_rows_total 필드 존재 + int 타입."""
+    fields = MicroBatchSpec.__dataclass_fields__
+    assert "kv_rows_total" in fields
+    assert fields["kv_rows_total"].type is int
+
+
+def test_admission_kv_rows_total_sums_decode_reqs(admission, request_queue):
+    """Σ kv_length over decode_reqs == spec.kv_rows_total."""
+    request_queue.push(_make_req(0, kv_length=100))
+    request_queue.push(_make_req(1, kv_length=250))
+    request_queue.push(_make_req(2, kv_length=75))
+    spec = admission.layer1(
+        t_proj=1e9, t_pim_fn=lambda k, n: 0.0,
+        a_cycle=10.0, b_cycle=10.0, ctx_tokens=100,
+    )
+    assert spec is not None
+    assert spec.kv_rows_total == sum(r.kv_length for r in spec.decode_requests)
+    assert spec.kv_rows_total == 100 + 250 + 75
+
+
+def test_admission_kv_rows_total_zero_if_no_decode(admission):
+    """Empty queue → spec None (기존 동작 보존)."""
+    spec = admission.layer1(
+        t_proj=1e9, t_pim_fn=lambda k, n: 0.0,
+        a_cycle=10.0, b_cycle=10.0, ctx_tokens=100,
+    )
+    assert spec is None
+
+
+def test_admission_kv_rows_total_monotonic_with_req_count(admission_config, idle_telemetry):
+    """decode req 개수 증가 → kv_rows_total 비감소 (각 req kv_length 동일)."""
+    from puls_sched.kv_accountant import KVAccountant
+    from puls_sched.request_queue import RequestQueue
+
+    prev = -1
+    for n_reqs in [1, 3, 5, 10]:
+        rq = RequestQueue(capacity=admission_config.request_queue_capacity)
+        kv = KVAccountant(capacity=admission_config.kv_capacity_aggregate)
+        adm = Admission(admission_cfg=admission_config, request_queue=rq,
+                        kv_accountant=kv, idle_telemetry=idle_telemetry)
+        for i in range(n_reqs):
+            rq.push(_make_req(i, kv_length=50))
+        spec = adm.layer1(
+            t_proj=1e9, t_pim_fn=lambda k, n: 0.0,
+            a_cycle=10.0, b_cycle=10.0, ctx_tokens=100,
+        )
+        assert spec.kv_rows_total >= prev
+        prev = spec.kv_rows_total

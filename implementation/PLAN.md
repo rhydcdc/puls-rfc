@@ -327,29 +327,39 @@ Impl-1~9 (dummy time model 위) 가 산출 *가능 / 불가능 / 스코프 외* 
 
 ---
 
-### Impl-5 — Instance A/B Pipeline + Forward Pass + Inter-instance Handoff
+### Impl-5 — Instance A/B Pipeline + Forward Pass + Inter-instance Handoff ✓ (commit pending)
 
 **Implementation:**
-- [ ] `Instance` 클래스 — GPU pool + (Instance A 한정) PIM pool
-- [ ] `InstancePipeline` — A → B → A_next 순서 관리; 양방향 NVLink handoff
-- [ ] `NVLinkTransfer.time(tensor_shape)` — `config.nvlink_time_per_byte × bytes(tensor_shape)` 계산 로직. decode shape `[B × hidden]` + uniform-chunk prefill shape `[(B · chunk) × hidden]` 양 case 지원. **계수 자체는 config placeholder (Impl-10 에서 실측 / spec 인용으로 교체). §5.2 정합.**
-- [ ] Async transfer hiding — A_cycle / B_cycle 내 transfer time 흡수
-- [ ] Steady-state pipeline cycle measurement = `max(A_cycle, B_cycle)`
-- [ ] Fixed-shape handoff 강제 — Instance B 가 ragged batching 미수신 (§5.2)
-- [ ] `ForwardPass.run(μ_batch)` — L-layer iteration loop: `for layer_idx in range(L): instance_pipeline.dispatch(μ_batch, layer_idx)`
-- [ ] `LayerState` — μ-batch 의 current_layer_index 추적; L 도달 시 token decode signal 발사
+- [x] `Instance` 클래스 — GPU pool + (Instance A 한정) PIM pool. TP=8 lock-step 위 GPU = 단일 자원 (Q2)
+- [x] `InstancePipeline` — 단일 layer A → B 구조 + handoff (L-loop 은 forward_pass 책임, Q3)
+- [x] `NVLinkTransfer.time(tensor_shape)` — `config.nvlink_time_per_byte × bytes(tensor_shape)` pure function. decode `[B × hidden]` + uniform-chunk prefill `[(B · chunk) × hidden]` 양 case 지원. Event push · 자원 lock 안 함 (Q4). **계수 자체는 config placeholder (Impl-10 에서 실측 / spec 인용으로 교체). §5.2 정합.**
+- [x] Async transfer hiding — `steady_state_cycle = max(A_cycle, B_cycle)` ARCH literal 산식 위 자연 흡수 (Q7 — NVLink event 별도 push 안 함)
+- [x] Steady-state pipeline cycle measurement = `max(A_cycle, B_cycle)` (runtime getter, Q6)
+- [x] Fixed-shape handoff 강제 — Instance B 가 ragged batching 미수신 (§5.2). Violation 시 raise (Q5)
+- [x] `ForwardPass.run(μ_batch)` — L-layer iteration (LayerState.advance 의 L 회 반복 + token decode signal trigger). 실 instance_pipeline.dispatch 통합은 Impl-9 영역
+- [x] `LayerState` — μ-batch 의 current_layer_index 추적; L 도달 시 token decode signal 발사 (advance True 반환)
+- [x] `MicroBatch` 의 `k_total` · `kv_rows_total` · `current_layer_index` 3 필드 신설 (Impl-4 carry-over O4.1 해소)
+- [x] `MicroBatchSpec.kv_rows_total` 필드 신설 + `admission.layer1` 의 산출
+- [x] `dispatcher` 의 `micro_batches` dict + `register`/`unregister` API (Q1-bis) + `_op_time` PIM branch 의 실 signal flow (placeholder default args 제거)
+- [x] `main_loop.ADMISSION_TICK` body 의 `MicroBatchSpec` → `MicroBatch` 변환 (Q1) + `dispatcher.register` 호출
 
-**Unit Tests:**
-- [ ] `Instance` — GPU pool · PIM pool 자원 점유 / 해제 round-trip
-- [ ] `InstancePipeline` — A → B → A_next dispatch 순서 검증 (layer index 단조 증가)
-- [ ] `NVLinkTransfer.time` — decode shape `[B × hidden]` + prefill shape `[(B · chunk) × hidden]` 두 case 의 시간 산출 정확
-- [ ] Async transfer hiding — `t_handoff < A_cycle` 영역에서 effective cycle = A_cycle (transfer hidden)
-- [ ] Steady-state cycle — A_cycle · B_cycle 다른 값 입력 위에서 `max(A_cycle, B_cycle)` 출력
-- [ ] Fixed-shape gate — Instance B 가 ragged tensor 수신 시 assertion fail
-- [ ] `ForwardPass.run` — L = 32 입력 시 32 회 instance_pipeline.dispatch 호출
-- [ ] `LayerState` — layer index 단조 증가; L 도달 시 token decode signal 발사
+**Unit Tests:** (신규 ~167 + 기존 315 regression-fixed = **482 passed**)
+- [x] `Instance` — GPU pool · PIM pool 자원 점유 / 해제 round-trip (`test_instance.py` 11 passed)
+- [x] `InstancePipeline` — A → B → A_next dispatch 순서 + steady_state max(A,B) + init guard (Case A 16 GPU) (`test_instance_pipeline.py` 35 passed)
+- [x] `NVLinkTransfer.time` — decode + prefill shape 산식 정합 + coef linearity + monotonicity + determinism (`test_nvlink.py` 18 passed)
+- [x] Async transfer hiding — `test_nvlink_async_hidden_invariant` (Q7 dummy 영역 prefigure, visible NVLink sensitivity 는 Impl-10)
+- [x] Steady-state cycle — A_cycle · B_cycle parametrize (A>B / A<B / A=B) + negative reject + 1000-call determinism
+- [x] Fixed-shape gate — decode-only · prefill-uniform · mixed pass + ragged reject + cross-product parametrize (`test_instance_pipeline.py`)
+- [x] `ForwardPass.run` — L ∈ {1, 8, 32, 80} parametrize (`test_forward_pass.py` 19 passed)
+- [x] `LayerState` — advance 단조 + L 도달 token decode signal trigger + negative reject
+- [x] **Cross-module integration** — admission → MicroBatch 변환 → dispatcher.register → dispatch_pim 의 실 chain (`test_cross_module_pipeline.py` 19 passed)
+- [x] **F3 source 구조 비교** — throughput ratio 8-cell sweep + A=B balance extremum (ARCH §5.7 + §6.4 정성 ground)
+- [x] **Cross-module determinism** — chain 1000-iter bit-exact + seed sweep invariance (PLAN §0 C5 + ARCH §3.5.2)
+- [x] **Multi-mb stress (Impl-2 패턴 정합)** — Instance resource × 50 cycle + register/unregister × 20-30 + LayerState × 20-mb + InstancePipeline stateless × 100 + NVLink stateless × 100 + composite (`test_stress_pipeline_invariants.py` 11 passed)
+- [x] **Meta-test** — `_EXPECTED_MODULES` (instance · nvlink · instance_pipeline · forward_pass 추가) + Impl-5 field literal + Case A 16 GPU literal (`test_meta.py` 23 passed)
+- [x] **Signature divergence lock-in** — InstancePipeline no L-loop / NVLink pure / Dispatcher.register signature / Instance.has_pim / LayerState.advance signature (`test_meta_arch_signature_divergence.py` 13 passed)
 
-**Acceptance:** Single-instance baseline vs A-B split steady-state cycle 비교에서 F3 (inter-instance pipeline) 효과 정성 확인. Instance B 입력 텐서 항상 fixed shape. ForwardPass 가 L-layer 완주.
+**Acceptance:** ✓ F3 정성 prefigure (throughput ratio sweep + balance extremum, ARCH §5.7 + §6.4). ✓ Instance B 입력 항상 fixed shape (ragged reject cross-product). ✓ ForwardPass 가 L-layer iteration meta-count + token decode signal trigger (L=80 default — 실 instance_pipeline.dispatch 통합은 Impl-9). ✓ Impl-4 carry-over O4.1 해소 (실 signal flow `admission → register → dispatch_pim → pim_executor.op_time`). ✓ ARCH §3.4 · §5.2 · §5.7 · §6.4 literal lock-in. ✓ Multi-mb stress invariants 보존 (Impl-2 패턴). ✓ Cross-module determinism (PLAN §0 C5). **정량 fidelity (visible NVLink sensitivity · F3 정량 ratio) 는 Impl-10 / Phase 3 영역 deferred (§0.5 정합).**
 
 ---
 
