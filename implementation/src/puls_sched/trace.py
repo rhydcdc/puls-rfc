@@ -8,6 +8,7 @@ Q8 — 1M-class · mid-ctx 는 NotImplementedError("Phase 3") stub.
 """
 
 import csv
+import random
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
@@ -118,6 +119,35 @@ class TraceReplayer:
                 arrival_time=entry.arrived_at / rate_multiplier,
                 max_tokens=entry.num_decode_tokens,
             )
+
+    @staticmethod
+    def synthesize(n: int, seed: int) -> "TraceReplayer":
+        """Deterministic synthetic trace (Impl-9 Q5 — C1 acceptance source).
+
+        외부 fixture 파일 0. seed 위 bit-exact reproducibility. PLAN §0.5 dummy 분포 —
+        정량 workload 검증은 longctx_longbench_lambda_*.csv 위 cross-module 영역.
+
+        Property:
+            - n entries 산출
+            - arrival_at monotonic non-decreasing
+            - num_prefill_tokens > 0, num_decode_tokens > 0
+            - 동일 seed → bit-exact entries tuple
+        """
+        if n < 1:
+            raise ValueError(f"synthesize requires n >= 1, got {n}")
+        rng = random.Random(seed)
+        entries: list[TraceEntry] = []
+        cumulative_arrival = 0.0
+        for _ in range(n):
+            cumulative_arrival += rng.expovariate(1.0)
+            n_prefill = rng.randint(128, 2048)
+            n_decode = rng.randint(16, 64)
+            entries.append(TraceEntry(
+                arrived_at=cumulative_arrival,
+                num_prefill_tokens=n_prefill,
+                num_decode_tokens=n_decode,
+            ))
+        return TraceReplayer(entries=tuple(entries))
 
     def stats(self) -> TraceStats:
         """Trace 분포 통계 산출. Raises RuntimeError 시 entries 빈 상태."""

@@ -441,26 +441,33 @@ Impl-1~9 (dummy time model 위) 가 산출 *가능 / 불가능 / 스코프 외* 
 **본 phase 의 acceptance 통과 = §0 정의에 의한 scheduler 완성 시점.**
 
 **Implementation:**
-- [ ] `Run.init(config_path)` — config load → 모든 모듈 instantiate → trace open → initial state setup
-- [ ] `Run.step()` — outer iteration: admission tick → dispatch → event drain → completion handling. Per-step 단위는 admission cadence 와 일치
-- [ ] `Run.loop()` — termination condition (`RequestQueue` empty AND `InFlightWindow` empty) 까지 step 반복
-- [ ] `Run.teardown()` — metric report → cleanup
-- [ ] Entry point (binary `puls-sched` 또는 module main) — config path · trace path · output path 인자 받음
+- [x] `Run.init(config_module, trace_path_or_synthetic, output_dir, seed)` — Q3 dotted-path config lookup + Q4 eager trace pre-load + 모든 모듈 instantiate + evaluator wiring + Q1 first ADMISSION_TICK priming
+- [x] `Run.step()` — Q10 SchedulerCore.step delegate (thin wrapper) + _safety_step_limit guard
+- [x] `Run.loop()` — 3 조건 termination (queue empty AND window empty AND in_flight empty)
+- [x] `Run.teardown()` — evaluator.report → report.json + report.md atomic write (Q8)
+- [x] Entry point — `python -m puls_sched` (Q2 `__main__.py`) + argparse named flag (Q9)
+- [x] *Setup gap 해소 (R14)* — `SchedulerCore.enable_admission_tick_rescheduling` opt-in flag, Run.init 만 True
+- [x] *ARCH §3.4 layer cycling* — `DAG.reset_micro_batch` + `_maybe_advance_forward_pass` 의 layer-iteration branch
+- [x] *Q9 carry-over 해소* — `InFlightWindow.evict` + `dispatcher.unregister` (mb 의 모든 req finalize 후)
+- [x] *Window backpressure* — ADMISSION_TICK body 의 window full pre-check (capacity overflow auto-evict 영역 defensive 격하)
+- [x] *Q10 lock-in 보존* — mb.decode_tokens 미변경, in_flight_requests dict 가 lifecycle truth
 
 **Unit Tests:**
-- [ ] `Run.init` — 모든 module 정상 instantiate; config 부정확 시 fail-fast
-- [ ] `Run.step` — 1 step 후 적어도 1 event progress (clock advance 또는 node state transition)
-- [ ] `Run.loop` — bounded synthetic 10-request trace 위 finite 시간 내 termination
-- [ ] `Run.teardown` — metric report 정합 출력 (schema validation)
-- [ ] Determinism — 동일 config + 동일 trace + 동일 seed → 두 번 run 시 bit-exact output
+- [x] `Run.init` — 모든 module 정상 instantiate; config 부정확 시 fail-fast (Cluster A)
+- [x] `Run.step` — 1 step 후 적어도 1 event progress + _safety_step_limit guard
+- [x] `Run.loop` — bounded synthetic 10-request trace 위 finite 시간 내 termination
+- [x] `Run.teardown` — report.json + report.md 산출 + JSON parseable
+- [x] Determinism — 동일 seed + trace → bit-exact `report.json` (Cluster H + O process-level)
+- [x] Reliability boost — Cluster N (F4 monotonic convergence) + Cluster E (R12 priority literal substantive ordering) + Cluster O (PYTHONHASHSEED robustness)
+- [x] Meta lock-in — Run 5 method · `__main__.main` · `synthesize` · `tick_interval_us` · `reset_micro_batch` · `evict` · `enable_admission_tick_rescheduling` · `_DISPATCHER_PRIORITY_LITERAL` 영구 기록 (Cluster L + M)
 
 **Acceptance — Completeness Acceptance Test (§0):**
 
-- [ ] **C1.** Synthetic 100-request trace → 모든 request 가 EOS 또는 max_tokens 도달로 종료
-- [ ] **C2.** Schema-valid 한 *구조적 산출* — §6.5 dispatch trace (Init/T1–T5) 재현 + adaptive admission deadband 수렴 trace + F1·F2·F3·F5 ablation cycle ratio 표. *Comparative baseline 미산출 (Deliverables 정합).*
-- [ ] **C3.** KV slot 누수 없음 — completion 후 capacity 회수 정상 (`kv_accountant.remaining` 이 trace 종료 시 initial capacity 와 일치)
-- [ ] **C4.** Invariant (I1–I5) 위반 0 회 over full trace
-- [ ] **C5.** Determinism — 동일 seed + trace → bit-exact 구조 산출
+- [x] **C1.** Synthetic 100-request trace → 모든 request COMPLETED 도달
+- [x] **C2.** Schema-valid 한 *구조적 산출* — dispatch trace + admission deadband 수렴 trace + F1·F2·F3·F5 schema. *Comparative baseline · 절대 metric 부재 lock-in.*
+- [x] **C3.** KV slot 누수 없음 — `kv_accountant.remaining == initial capacity` at termination
+- [x] **C4.** Invariant (I1~I5) 위반 0 회 over full trace
+- [x] **C5.** Determinism — 동일 seed + trace → bit-exact `report.json`
 
 **이 phase 의 5 acceptance 동시 충족 = scheduler runnable.** 이후 추가 발견되는 gap 은 plan 갱신 영역.
 
@@ -516,6 +523,15 @@ F1_ratio = t_attn_GPU / t_attn_PIM
 
 F2·F3·F5 는 Impl-8 evaluator.acceleration_decomposition() 의 산식 그대로 — `a + b` vs `max(a, b)` 영역.
 
+#### Prerequisite (Impl-9 Carry-over 해소, D2 산출 진입 전)
+
+> Impl-9 acceptance (C1~C5) 통과 후 D2 sweep 진입 전에 풀어야 하는 wiring 영역. *D2 산출 자체* 가 아닌 *substrate* 영역 — 별도 commit 권장 (`feat(impl-10-pre): ...` → `feat(impl-10): D2 sweep`). 사유: Impl-9 의 surgical scope 정합 으로 deferred 된 두 영역이 D2 의 정확성 (F2·F3 의 event-time cycle 산출 · admission balance 의 inter-AB 분리) 의 전제.
+
+- [ ] **O5.1 carry-over (Q7 영역)** — `ForwardPass.run()` 이 `instance_pipeline.dispatch` 위 실 NVLink event chain (A → handoff → B → handoff → A_next) 거치게 wiring. 현재 `LayerState.advance` 의 L 회 iteration + token decode signal trigger 만 보유 — Impl-9 acceptance 충족용 minimum. D2 의 F2 (double-buffering) · F3 (instance A/B) cycle 산식의 *event-time* 정합성 영역. ARCH §3.4 pipeline literal 정확 반영
+- [ ] **O8.1 carry-over (Q6 영역)** — `idle_telemetry.py` 를 `(gpu_a, pim_a, gpu_b)` 3-key 로 분리 + `Evaluator.idle_fraction` schema 갱신 (`gpu_instance_a` · `pim_instance_a` → 3-key). Instance B 의 GPU activity recording 지점 = O5.1 의 NVLink dispatch chain — 두 영역 *짝* 으로 해소. ARCH §6.4 admission balance 의 'inter-AB · intra-A' 두 축 정확 반영
+- [ ] 양 영역의 Impl-8 lock-in test 갱신 — `test_evaluator.idle_fraction` 의 schema 정합 + `test_meta._EXPECTED_MODULES` 의 `idle_telemetry` field 수 갱신 + 기존 admission balance 검증 test (`test_admission` · `test_integration_admission`) 의 inter-AB key 정합 갱신
+- [ ] Regression 검증 — Impl-9 acceptance C1~C5 (`test_acceptance_c1~c5_*`) 가 wiring 후에도 green 보존. 특히 C5 determinism 의 bit-exact 가 Instance B activity 의 새 event-time stream 추가에도 동일 seed 위 보존
+
 #### Implementation:
 - [ ] Workload sweep — ctx ∈ {2k, 8k, 32k, 128k, 512k, 1M} × batch ∈ {16, 64, 128, 256}
 - [ ] k_total sweep — fixed k_total 대조군 + adaptive k_total 비교
@@ -569,6 +585,7 @@ F2·F3·F5 는 Impl-8 evaluator.acceleration_decomposition() 의 산식 그대�
 - **OI7. Phase 3 의 silicon validation 부재 disclosure.** Impl-10 후에도 PULS 자체 실리콘 부재로 PIM side (`t_PIM` · SP-PIM aggregate · broadcast overhead) 는 Ramulator2 추정 유지 (`ramulator2_hbm4_estimated_jedec_spec` 라벨). D2 산출은 *calibrated projection* 이지 silicon-validated measurement 아님. README/ARCHITECTURE 의 "will be measured in Phase 3" 류 문구는 "will be projected with stated provenance" 로 정정 필요 (별도 follow-up commit 영역; PLAN.md 자체에는 framing 반영 완료).
 - **OI8. Impl-10 의 lab Blackwell 실측 의존성 (spec-first 정합).** Impl-10 D2 산출은 *whitepaper + Ramulator2 + 모델 spec + trace* 의 4 source 만으로 가능 — *lab Blackwell 8 GPU 실측은 refinement (선택 영역), blocker 아님.* 사유: (i) D2 = *ratio* 산출 (절대 metric 아님) → 분자/분모 동일 출처 (whitepaper spec) 위 일관 → ratio robust, (ii) F2 · F3 산식이 `(a+b) / max(a,b)` 형태 → 절대값 영향 0, 균형 여부만 dominant, (iii) F5 = trace 의 KV variance dominant → PIM tile time 절대값 무관, (iv) F1 · Aux1 · Aux2 의 BW 비교는 spec 만으로 closed-form 산출 (§4 Impl-10 산식 영역). Lab 실측이 있으면 정확도 ±10% → ±2% 로 좁힘 (qualitative correctness 는 spec 만으로 충분). 따라서 *Impl-10 진입 = lab 접근 가용성에 blocked 아님*. Lab 실측은 *후속 refinement commit* 으로 처리 가능.
 - **OI9. η_HBM 출처 결정 (Impl-10 진입 시).** η_HBM_external (~0.7~0.8) 은 NVIDIA whitepaper 에 *명시 안 됨* (peak BW 만 광고). 3 출처 옵션: (a) academic GPU memory micro-benchmark 논문 (가장 정확) — (b) NVIDIA Nsight Compute kernel-level analysis report (공개 자료) — (c) conservative estimate (0.75 ± 0.05 sensitivity sweep + 출처 라벨 동반). 선택은 Impl-10 진입 시점에 — 어느 옵션이든 PLAN §0.5 *출처 라벨 동반* 으로 정직한 disclosure 보장. η_HBM_internal (~1.0) 은 RTL FSM cycle 정확 산출 영역 (확정값 영역).
+- **OI10. Impl-9 → Impl-10 carry-over 추적 (Q6 · Q7 deferred 결정).** Impl-9 의 surgical scope 정합 으로 두 영역이 Impl-10 prerequisite (§4 Impl-10 *Prerequisite* 섹션) 로 deferred — (i) **O5.1 / Q7** = ForwardPass.run() ↔ instance_pipeline.dispatch 통합 (NVLink event chain), (ii) **O8.1 / Q6** = idle_telemetry 의 per-instance A/B (`gpu_a` · `pim_a` · `gpu_b`) 3-key 분리. 두 영역은 *coupling* — gpu_b activity instrument 지점이 instance_pipeline.dispatch chain 후에야 존재. 짝 으로 해소. *Impl-9 의 evaluator.idle_fraction schema 는 single-instance (gpu_instance_a · pim_instance_a) 2-key 유지* — D2 schema 의 완전성은 Impl-10 prerequisite 후 lock-in. 사유 disclosure: gpu_b 를 Impl-9 에서 추가하면 instrument 부재로 항상 0 으로 misleading (정직성 결손) — *영역 부재* 가 *값 0* 보다 honest.
 
 ---
 

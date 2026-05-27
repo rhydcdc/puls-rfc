@@ -78,28 +78,34 @@ def test_admission_tick_payload_dummy_values_safe(scheduler_core):
 # --- Integration chain (보강) ---
 
 def test_admission_tick_then_completion_natural_progression(scheduler_core):
-    """ADMISSION_TICK → KERNEL_COMPLETION → 다음 ADMISSION_TICK chain."""
-    # admit mb 0
+    """ADMISSION_TICK → KERNEL_COMPLETION chain → L=80 layer cycle → finalize → evict.
+
+    Impl-9 ARCH-compliant lifecycle 정합 갱신 (Impl-6 시점의 'mb 4 node 모두 DONE' 가정 폐기).
+    """
     scheduler_core.request_queue.push(_make_req(0))
     scheduler_core.queue.push(Event(
         timestamp=0.0, type=EventType.ADMISSION_TICK, payload={},
     ))
     scheduler_core.step()
     assert scheduler_core.dispatcher.gpu_busy is True
-
-    # QKV completes
+    # L=80 layer cycling + max_tokens=0 → first token_signal 위 finalize → evict
     while len(scheduler_core.queue) > 0:
         scheduler_core.step()
-    # All nodes of mb 0 should reach DONE
-    for ntype in (NodeType.QKV, NodeType.PREFILL_ATTN, NodeType.DECODE_ATTN, NodeType.O_PROJ):
-        assert scheduler_core.dag.get_node(0, ntype).state is NodeState.DONE
+    # Impl-9 — mb 0 의 모든 req finalize → window evict + DAG remove + dispatcher unregister
+    assert 0 not in scheduler_core.dag.nodes
+    assert 0 not in scheduler_core.window.current_ids()
+    assert 0 not in scheduler_core.dispatcher.micro_batches
     assert scheduler_core.dispatcher.gpu_busy is False
     assert scheduler_core.dispatcher.pim_busy is False
 
 
-def test_window_eviction_during_admission_dag_consistency(scheduler_core):
-    """4번째 admission → eviction → DAG remove → evicted mb 노드 참조 0회.
-    White-box _handle 직접 호출로 queue race 회피."""
+def test_window_full_admission_deferred(scheduler_core):
+    """Impl-9 — window full 위 admission pre-check (auto-evict path 비활성).
+
+    *기존 'window_eviction_during_admission_dag_consistency' 의 Impl-9 ARCH-compliant 갱신.*
+    Auto-evict (capacity overflow) 은 *defensive* 영역. Pre-check 으로 4번째 admission 은
+    window full 검출 시 spec=None (deferred) → window 는 first 3 (0, 1, 2) 유지.
+    """
     for i in range(4):
         scheduler_core.request_queue.push(_make_req(i))
         scheduler_core._handle(Event(
@@ -107,9 +113,10 @@ def test_window_eviction_during_admission_dag_consistency(scheduler_core):
         ))
         scheduler_core.dispatcher.gpu_busy = False
         scheduler_core.dispatcher.pim_busy = False
-    # Window holds last 3 (1, 2, 3); mb 0 evicted from DAG
-    assert scheduler_core.window.current_ids() == (1, 2, 3)
-    assert 0 not in scheduler_core.dag.nodes
+    # Pre-check 으로 4번째 admission deferred — window 는 first 3 mbs 보유
+    assert scheduler_core.window.current_ids() == (0, 1, 2)
+    # 4번째 req (id=3) 는 admission deferred — request_queue 잔존
+    assert len(scheduler_core.request_queue) == 1
 
 
 def test_request_arrival_payload_missing_request_key_raises(scheduler_core):

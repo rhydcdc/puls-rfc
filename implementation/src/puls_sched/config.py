@@ -48,6 +48,7 @@ class AdmissionConfig:
     request_queue_capacity: int
     k_total_step: int
     k_total_max: int
+    tick_interval_us: float = 10.0   # Impl-9 Q1 — ADMISSION_TICK self-rescheduling cadence placeholder. PLAN §0.5 dummy
 
 
 @dataclass(frozen=True)
@@ -114,7 +115,7 @@ def default_dummy_config() -> Config:
         slo=SLOConfig(ttft_target_ms=100.0, tpot_target_ms=10.0),
         admission=AdmissionConfig(
             n_sat=16,
-            kv_capacity_aggregate=1_000_000,
+            kv_capacity_aggregate=4_000_000,   # Llama-3 70B FP8 × 8 H100 (640GB HBM / 0.16MB·token) ≈ 4M token placeholder. PLAN §0.5 ratio 정합.
             ctx_tier_short_max=8_000,
             ctx_tier_mid_max=32_000,
             deadband_width={"short": 1.0, "mid": 2.0, "long": 3.0},

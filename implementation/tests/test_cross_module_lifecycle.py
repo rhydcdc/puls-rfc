@@ -79,9 +79,18 @@ def _decode_one_token(core, mb_id):
 
 
 def _drive_until_done(core, mb_id):
-    """반복 token decode signal 위 mb 의 모든 req finalize 까지"""
-    while any(r_id in core.in_flight_requests
-              for r_id in core.dispatcher.micro_batches[mb_id].decode_tokens.keys()):
+    """반복 token decode signal 위 mb 의 모든 req finalize 까지.
+
+    Impl-9 — mb 의 모든 req finalize 시 dispatcher.unregister 호출됨 (Q9 carry-over 해소).
+    Loop 진입 전 mb 가 이미 evict 된 경우 즉시 종료 (defensive).
+    """
+    while (
+        mb_id in core.dispatcher.micro_batches
+        and any(
+            r_id in core.in_flight_requests
+            for r_id in core.dispatcher.micro_batches[mb_id].decode_tokens.keys()
+        )
+    ):
         _decode_one_token(core, mb_id)
 
 
@@ -180,12 +189,17 @@ def test_real_longbench_3_40_first_100_req_lifecycle():
     for req in list(r.replay())[:100]:
         # max_tokens=350 → 시뮬레이션 단축 위 max_tokens=2 override
         req.max_tokens = 2
+        n_decode_before = len(core.dispatcher.micro_batches.get(
+            core._next_mb_id, None
+        ).decode_tokens) if core._next_mb_id in core.dispatcher.micro_batches else 0
         core.request_queue.push(req)
         core._handle(_admission_event())
         mb_id = core._next_mb_id - 1
         if mb_id in core.dispatcher.micro_batches:
+            # Snapshot decode_tokens count BEFORE drive (Impl-9 — drive 가 evict 유발)
+            n_decode = len(core.dispatcher.micro_batches[mb_id].decode_tokens)
             _drive_until_done(core, mb_id)
-            completed += len(core.dispatcher.micro_batches[mb_id].decode_tokens)
+            completed += n_decode
     # 모든 req lifecycle 정상 종료
     assert core.kv_accountant.remaining == initial
 

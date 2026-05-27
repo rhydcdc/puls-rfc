@@ -51,42 +51,29 @@ def _make_core():
     )
 
 
-def _make_req(req_id: int, kv_length: int = 10) -> Request:
-    return Request(id=req_id, prompt_tokens=[1], kv_length=kv_length)
+def _make_req(req_id: int, kv_length: int = 10, max_tokens: int = 0) -> Request:
+    return Request(id=req_id, prompt_tokens=[1], kv_length=kv_length, max_tokens=max_tokens)
 
 
 def test_stress_100_cycle_admission_dispatch_no_invariant_violation():
-    """100 cycle 위 I1~I5 위반 0 + KV/queue/window state consistency."""
+    """Impl-9 ARCH-compliant 갱신 — 100 req lifecycle 위 I1~I5 invariant + state consistency.
+
+    Run.loop 의 단일 admission tick 후 step drain 패턴 (proper lifecycle, manual busy reset 폐기).
+    """
     core = _make_core()
     n_requests = 100
-    arrived = 0
-    admitted_via_layer1 = 0
-    rejected = 0
 
     for i in range(n_requests):
-        req = _make_req(i, kv_length=10)
-        pushed = core.request_queue.push(req)
-        arrived += 1
-        if not pushed:
-            rejected += 1
-        # Each cycle: admission tick + drain dispatcher
+        req = _make_req(i, kv_length=10, max_tokens=1)
+        core.request_queue.push(req)
         core._handle(Event(
             timestamp=float(i), type=EventType.ADMISSION_TICK, payload={},
         ))
-        # Manual reset busy to allow next dispatch (Impl-3 단계 mock — Impl-6 completion 부재)
-        if i % 2 == 0:
-            core.dispatcher.gpu_busy = False
-            core.dispatcher.pim_busy = False
+        # Drain events (proper lifecycle — invariants 강제 위)
+        while core.step():
+            pass
 
-    # Invariant I1~I5 위반 0 — explicit re-check on current DAG state
-    for mb_id, nodes in core.dag.nodes.items():
-        if nodes[NodeType.PREFILL_ATTN].state is NodeState.RUNNING:
-            check_I1(core.dag, mb_id)
-        if nodes[NodeType.DECODE_ATTN].state is NodeState.RUNNING:
-            check_I2(core.dag, mb_id)
-        if nodes[NodeType.O_PROJ].state is NodeState.RUNNING:
-            check_I3(core.dag, mb_id)
-    # I4·I5: GPU/PIM at most 1 running each
+    # I4·I5: GPU/PIM at most 1 running each (invariant 자연 보존)
     gpu_running = sum(1 for nodes in core.dag.nodes.values()
                       for n in nodes.values()
                       if n.state is NodeState.RUNNING and n.type is not NodeType.DECODE_ATTN)
@@ -102,31 +89,24 @@ def test_stress_100_cycle_admission_dispatch_no_invariant_violation():
 
 
 def test_stress_admission_completion_kv_roundtrip():
-    """admission admit N req → mock completion (release) → kv.remaining == initial.
-    Impl-3 단독 cross-module 검증의 핵심. Real Completion handler 는 Impl-6."""
+    """Impl-9 갱신 — admission + lifecycle 완주 → kv.remaining == initial.
+
+    Impl-3 시점 mock release path 의 ARCH-compliant 갱신. Real Completion.finalize 가
+    layer cycling + token signal + evict chain 위 KV release.
+    """
     core = _make_core()
     initial = core.kv_accountant.remaining
 
-    # Push 50 req + admit via 50 alternating ticks
+    # 50 reqs 위 proper lifecycle drain
     for i in range(50):
-        core.request_queue.push(_make_req(i, kv_length=20))
+        core.request_queue.push(_make_req(i, kv_length=20, max_tokens=1))
         core._handle(Event(
             timestamp=float(i), type=EventType.ADMISSION_TICK, payload={},
         ))
-        core.dispatcher.gpu_busy = False
-        core.dispatcher.pim_busy = False
+        while core.step():
+            pass
 
-    # All KV should now be allocated to admitted requests
-    assert core.kv_accountant.used == 50 * 20
-
-    # Mock Completion.finalize for each — release all admitted KV
-    # (Real handler in Impl-6; here we directly call release on each admitted req id.)
-    admitted_ids = list(core.kv_accountant._admitted.keys())
-    for req_id in admitted_ids:
-        # Reconstruct req with the recorded kv_length
-        kv_length = core.kv_accountant._admitted[req_id]
-        core.kv_accountant.release(Request(id=req_id, prompt_tokens=[1], kv_length=kv_length))
-
+    # Lifecycle 완주 → 모든 KV 회수 (admit ↔ release round-trip)
     assert core.kv_accountant.remaining == initial
     assert core.kv_accountant.used == 0
 

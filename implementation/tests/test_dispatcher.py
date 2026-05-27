@@ -347,25 +347,29 @@ def test_dispatcher_pim_executor_field_present(dispatcher: Dispatcher):
 # =========================================================================
 
 def test_stress_100_micro_batch_no_invariant_violation(scheduler_core):
-    """100 μ-batch 자연 dispatch — 각 mb 가 in-flight 동안 dispatcher 자연 진행.
-    Window capacity 3 이므로 한 시점에 최대 3 mb in-flight. mb i 의 모든 노드 DONE
-    이후 다음 admit (orphan event 회피)."""
+    """100 μ-batch 자연 dispatch (Impl-9 ARCH-compliant 갱신).
+
+    각 mb 가 L=80 layer cycle 후 finalize → window/DAG/dispatcher 에서 evict.
+    Window capacity 3 이지만 mb 가 cycle 완료 후 즉시 evict 되므로 다음 admit 자유.
+    Impl-9 lifecycle 영역의 stress — invariant 위반 0 + orphan 0.
+    """
     for mb_id in range(100):
         _register_pim_mb(scheduler_core.dispatcher, mb_id)
         scheduler_core.window.admit(mb_id)
         scheduler_core.dispatcher.tick()
         while len(scheduler_core.queue) > 0:
             scheduler_core.step()
-        # After drain: mb's 4 nodes all DONE
-        for ntype in NodeType:
-            assert scheduler_core.dag.get_node(mb_id, ntype).state is NodeState.DONE
+        # Impl-9 — mb 의 모든 req (이 setup 에선 decode_tokens 비어있음) finalize 후 evict
+        assert mb_id not in scheduler_core.dag.nodes
+        assert mb_id not in scheduler_core.window.current_ids()
+        assert mb_id not in scheduler_core.dispatcher.micro_batches
         # Idle resources between μ-batches
         assert scheduler_core.dispatcher.gpu_busy is False
         assert scheduler_core.dispatcher.pim_busy is False
 
-    # Final state: only last 3 μ-batches in window
-    assert scheduler_core.window.current_ids() == (97, 98, 99)
-    assert set(scheduler_core.dag.nodes.keys()) == {97, 98, 99}
+    # Final state: all 100 mbs evicted (lifecycle 완료)
+    assert scheduler_core.window.current_ids() == ()
+    assert scheduler_core.dag.nodes == {}
 
 
 # =========================================================================

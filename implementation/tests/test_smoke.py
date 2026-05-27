@@ -1,6 +1,52 @@
+import dataclasses
+
+import pytest
+
+from puls_sched.admission import Admission
+from puls_sched.clock import Clock
+from puls_sched.completion import Completion
+from puls_sched.config import default_dummy_config
+from puls_sched.dag import DAG
+from puls_sched.dispatcher import Dispatcher
 from puls_sched.event import Event, EventType
+from puls_sched.event_queue import EventQueue
+from puls_sched.forward_pass import LayerState
+from puls_sched.idle_telemetry import IdleTelemetry
+from puls_sched.kv_accountant import KVAccountant
+from puls_sched.main_loop import SchedulerCore
 from puls_sched.micro_batch import MicroBatch
 from puls_sched.node import NodeState, NodeType
+from puls_sched.pim_emulator import PIMExecutor
+from puls_sched.request_queue import RequestQueue
+from puls_sched.window import InFlightWindow
+
+
+@pytest.fixture
+def scheduler_core_l1():
+    """Impl-9 — num_layers=1 fixture (layer cycling 비활성, §6.5 single-layer pattern 영역)."""
+    base = default_dummy_config()
+    config = dataclasses.replace(base, model=dataclasses.replace(base.model, num_layers=1))
+    clock = Clock()
+    queue = EventQueue(clock)
+    dag = DAG()
+    window = InFlightWindow(dag, config=config)
+    pim_executor = PIMExecutor(config=config)
+    dispatcher = Dispatcher(
+        config=config, clock=clock, queue=queue, dag=dag, pim_executor=pim_executor,
+    )
+    request_queue = RequestQueue(capacity=config.admission.request_queue_capacity)
+    kv_accountant = KVAccountant(capacity=config.admission.kv_capacity_aggregate)
+    admission = Admission(
+        admission_cfg=config.admission, request_queue=request_queue,
+        kv_accountant=kv_accountant, idle_telemetry=IdleTelemetry(),
+    )
+    return SchedulerCore(
+        config=config, clock=clock, queue=queue, dag=dag,
+        window=window, dispatcher=dispatcher,
+        request_queue=request_queue, kv_accountant=kv_accountant, admission=admission,
+        layer_state=LayerState(num_layers=1),
+        completion=Completion(clock=clock, kv_accountant=kv_accountant),
+    )
 
 
 def _register_mb(scheduler_core, mb_id: int) -> None:
@@ -51,15 +97,20 @@ def _drain_micro_batch(scheduler_core, mb_id, base_time):
     return timestamps
 
 
-def test_acceptance_10_micro_batch_trace(scheduler_core):
+def test_acceptance_10_micro_batch_trace(scheduler_core_l1):
+    """Impl-9 ARCH-compliant 갱신 — num_layers=1 fixture 위 10 mb 순차 lifecycle.
+
+    각 mb 가 O_PROJ done → token_signal=True (L=1) → empty decode_tokens → evict.
+    Final state: 모든 10 mb evict 완료 (이전 auto-evict overflow path 의 last-3 영역과 다름).
+    """
     all_timestamps = []
     for i in range(10):
-        _register_mb(scheduler_core, i)
-        scheduler_core.window.admit(i)
-        all_timestamps.extend(_drain_micro_batch(scheduler_core, i, base_time=float(i * 10)))
+        _register_mb(scheduler_core_l1, i)
+        scheduler_core_l1.window.admit(i)
+        all_timestamps.extend(_drain_micro_batch(scheduler_core_l1, i, base_time=float(i * 10)))
 
     assert all_timestamps == sorted(all_timestamps)
     assert len(all_timestamps) == 10 * len(NodeType)
-    assert len(scheduler_core.window.current_ids()) == 3
-    assert scheduler_core.window.current_ids() == (7, 8, 9)
-    assert set(scheduler_core.dag.nodes.keys()) == set(scheduler_core.window.current_ids())
+    # Impl-9 — 각 mb lifecycle 완료 후 evict (auto-evict path 비활성, explicit evict)
+    assert scheduler_core_l1.window.current_ids() == ()
+    assert scheduler_core_l1.dag.nodes == {}

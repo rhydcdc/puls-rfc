@@ -166,14 +166,19 @@ def test_in_flight_requests_owner_pattern(scheduler_core, dummy_config):
     assert len(scheduler_core.in_flight_requests) == 0
 
 
-def test_dispatcher_unregister_not_called_on_completion(scheduler_core, dummy_config):
-    """Q9 책임 분리 — finalize 가 dispatcher.unregister 호출 0 (mb 그대로)"""
+def test_dispatcher_unregister_called_on_completion(scheduler_core, dummy_config):
+    """Impl-9 — Q9 carry-over 해소. mb 의 모든 req finalize 시 dispatcher.unregister + window.evict.
+
+    *Impl-6 시점 의미* (`not_called_on_completion`) 의 ARCH-compliant 갱신 영역.
+    """
     mb_id = _setup_mb_with_decode_reqs(scheduler_core, n_reqs=1, max_tokens=1)
     mb = scheduler_core.dispatcher.micro_batches[mb_id]
     mb.current_layer_index = dummy_config.model.num_layers - 1
     scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.O_PROJ))
-    # mb 그대로 등록 유지 (window eviction 이 Impl-9 영역)
-    assert mb_id in scheduler_core.dispatcher.micro_batches
+    # Impl-9 — mb 의 모든 req finalize → window evict + dispatcher unregister + DAG remove
+    assert mb_id not in scheduler_core.dispatcher.micro_batches
+    assert mb_id not in scheduler_core.window.current_ids()
+    assert mb_id not in scheduler_core.dag.nodes
 
 
 # ============================================================================

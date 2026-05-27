@@ -69,13 +69,27 @@ class Admission:
         ctx_tokens: int,
     ) -> MicroBatchSpec | None:
         decode_reqs: list[Request] = []
+        # Impl-9 — Head-of-line skip (production scheduler 정합, vLLM/Sarathi 영역).
+        # FIFO break 대신 queue 전체 walk + fit 가능한 것만 admit. 큰 req 는 *상대 순서 유지*
+        # 위 re-push → 다음 tick 위 capacity 회수 후 재시도. ARCH §3.3 'permanently resident' +
+        # §6.4 admission policy 의 *implementation choice* 영역.
+        candidates: list[Request] = []
         while True:
-            req = self.request_queue.peek_oldest()
-            if req is None or not self.kv_accountant.can_admit(req):
+            req = self.request_queue.pop_oldest()
+            if req is None:
                 break
-            self.request_queue.pop_oldest()
-            self.kv_accountant.admit(req)
-            decode_reqs.append(req)
+            candidates.append(req)
+        for req in candidates:
+            if self.kv_accountant.can_admit(req):
+                self.kv_accountant.admit(req)
+                decode_reqs.append(req)
+            else:
+                # Defer — queue 의 그 자리 (상대 순서 유지) 위 re-push
+                if not self.request_queue.push(req):
+                    raise RuntimeError(
+                        f"admission re-push failed for req {req.id} "
+                        f"(RequestQueue capacity violation — defensive raise)"
+                    )
 
         if not decode_reqs:
             return None

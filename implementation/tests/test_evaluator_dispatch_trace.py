@@ -35,7 +35,9 @@ def _make_trace_fixture_with_evaluator():
         pim_tile_time_ns={"FP8": 3.0, "FP16": 6.0},
         pim_broadcast_latency_ns_cross_gpu=0.0,
     )
-    config = dataclasses.replace(base, time=time_config)
+    # Impl-9 — §6.5 single-layer dispatch pattern 검증 위 num_layers=1 (layer cycling 비활성)
+    model_config = dataclasses.replace(base.model, num_layers=1)
+    config = dataclasses.replace(base, time=time_config, model=model_config)
     clock = Clock()
     queue = EventQueue(clock)
     dag = DAG()

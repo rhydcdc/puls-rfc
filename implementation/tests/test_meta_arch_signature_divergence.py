@@ -305,3 +305,102 @@ def test_evaluator_no_dispatcher_field():
     fields = Evaluator.__dataclass_fields__
     assert "dispatcher" not in fields
     assert "scheduler_core" not in fields
+
+
+# ============================================================================
+# Impl-9 meta — Run / __main__ / Q1 self-rescheduling / Q9 carry-over 영구 기록
+# ============================================================================
+
+def test_run_method_inventory():
+    """Run 5 method bit-exact lock-in (Impl-9 Q2 · Q9 · Q10 정합)."""
+    from puls_sched.run import Run
+    publics = {
+        n for n in dir(Run)
+        if not n.startswith("_") and callable(getattr(Run, n))
+    }
+    expected = {"init", "step", "loop", "teardown", "main"}
+    assert expected.issubset(publics)
+
+
+def test_run_init_signature():
+    """Run.init signature lock-in (Q3 dotted-path config + Q5 synthetic sentinel + Q9 named flag)."""
+    from puls_sched.run import Run
+    sig = inspect.signature(Run.init)
+    params = list(sig.parameters.keys())
+    assert params == ["config_module", "trace_path_or_synthetic", "output_dir", "seed"]
+
+
+def test_run_main_signature():
+    """Run.main signature lock-in (Q2 — `python -m puls_sched`)."""
+    from puls_sched.run import Run
+    sig = inspect.signature(Run.main)
+    params = list(sig.parameters.keys())
+    assert params == ["argv"]
+
+
+def test_trace_synthesize_signature():
+    """TraceReplayer.synthesize signature lock-in (Q5 — Impl-9 acceptance source)."""
+    from puls_sched.trace import TraceReplayer
+    sig = inspect.signature(TraceReplayer.synthesize)
+    params = list(sig.parameters.keys())
+    assert params == ["n", "seed"]
+
+
+def test_admission_config_has_tick_interval_us():
+    """AdmissionConfig.tick_interval_us field — Q1 self-rescheduling cadence placeholder."""
+    from puls_sched.config import AdmissionConfig
+    fields = AdmissionConfig.__dataclass_fields__
+    assert "tick_interval_us" in fields
+    assert fields["tick_interval_us"].type is float
+
+
+def test_scheduler_core_has_self_rescheduling_flag():
+    """SchedulerCore.enable_admission_tick_rescheduling — Impl-9 opt-in flag (R14)."""
+    from puls_sched.main_loop import SchedulerCore
+    fields = SchedulerCore.__dataclass_fields__
+    assert "enable_admission_tick_rescheduling" in fields
+    assert fields["enable_admission_tick_rescheduling"].type is bool
+
+
+def test_scheduler_core_has_schedule_next_admission_tick():
+    """SchedulerCore._schedule_next_admission_tick method (Q1 chain entry)."""
+    from puls_sched.main_loop import SchedulerCore
+    assert hasattr(SchedulerCore, "_schedule_next_admission_tick")
+    sig = inspect.signature(SchedulerCore._schedule_next_admission_tick)
+    params = list(sig.parameters.keys())
+    assert params == ["self", "prev_event"]
+
+
+def test_dag_has_reset_micro_batch_method():
+    """DAG.reset_micro_batch method (Impl-9 ARCH §3.4 L × cycle re-dispatch entry)."""
+    from puls_sched.dag import DAG
+    assert hasattr(DAG, "reset_micro_batch")
+    sig = inspect.signature(DAG.reset_micro_batch)
+    params = list(sig.parameters.keys())
+    assert params == ["self", "micro_batch_id"]
+
+
+def test_window_has_evict_method():
+    """InFlightWindow.evict method (Q9 carry-over 해소 — explicit mb eviction)."""
+    from puls_sched.window import InFlightWindow
+    assert hasattr(InFlightWindow, "evict")
+    sig = inspect.signature(InFlightWindow.evict)
+    params = list(sig.parameters.keys())
+    assert params == ["self", "micro_batch_id"]
+
+
+# ============================================================================
+# Impl-9 R12 — ARCH §6.3 priority literal 영구 lock-in
+# ============================================================================
+
+_DISPATCHER_PRIORITY_LITERAL = ("O_PROJ", "PREFILL_ATTN", "QKV")
+
+
+def test_dispatcher_gpu_priority_order_literal_lock_in():
+    """ARCH §6.3 GPU priority literal — O_PROJ > PREFILL_ATTN > QKV. R12 영구 lock-in.
+
+    미래 priority 변경 시 *두 영역 (production code + Cluster E test) 동시 갱신 강제*.
+    """
+    from puls_sched.dispatcher import GPU_PRIORITY_ORDER
+    actual = tuple(t.name for t in GPU_PRIORITY_ORDER)
+    assert actual == _DISPATCHER_PRIORITY_LITERAL

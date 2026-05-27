@@ -51,6 +51,9 @@ _EXPECTED_MODULES = {
     "completion",
     # Impl-8
     "evaluator",
+    # Impl-9
+    "run",
+    "__main__",
 }
 
 
@@ -67,6 +70,8 @@ _EXPECTED_ADMISSION_FIELDS = {
     "request_queue_capacity",
     "k_total_step",
     "k_total_max",
+    # Impl-9 — ADMISSION_TICK self-rescheduling cadence (Q1)
+    "tick_interval_us",
 }
 
 

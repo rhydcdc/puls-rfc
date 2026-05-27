@@ -42,6 +42,10 @@ class SchedulerCore:
     _next_mb_id: int = 0
     # ---- Impl-8 — D1 admission tick hook (evaluator 등록 점) ----
     _admission_tick_callbacks: list[AdmissionTickCallback] = field(default_factory=list)
+    # ---- Impl-9 Q1 — ADMISSION_TICK self-rescheduling opt-in (Run.init 가 enable). ----
+    # Default False: isolated unit test 영역의 single-shot 처리 보존 (R14 setup gap).
+    # True: ARCH §6.4 per-iteration admission cadence 정합 (continuous chain).
+    enable_admission_tick_rescheduling: bool = False
 
     def on_admission_tick(self, callback: AdmissionTickCallback) -> None:
         """Admission tick snapshot capture 위 callback 등록 (Impl-8 D1 hook).
@@ -90,6 +94,17 @@ class SchedulerCore:
     def _handle(self, event: Event) -> None:
         match event.type:
             case EventType.KERNEL_COMPLETION:
+                # Impl-9 — 방어: mb 가 이미 evict 된 경우 (auto-evict 또는 explicit) stale event skip.
+                # window.admit overflow 위 auto-evict + explicit evict (token 완료) 의 race 정합.
+                mb_id_completion = event.payload.get("micro_batch_id")
+                if mb_id_completion not in self.dag.nodes:
+                    resource = event.payload.get("resource")
+                    if resource == "GPU":
+                        self.dispatcher.gpu_busy = False
+                    elif resource == "PIM":
+                        self.dispatcher.pim_busy = False
+                    self.dispatcher.tick()
+                    return
                 self.dispatcher.on_completion(event)
                 # Impl-6 (Q5) — O_PROJ done 분기 → LayerState.advance → L 도달 시 token decode signal
                 self._maybe_advance_forward_pass(event)
@@ -97,33 +112,76 @@ class SchedulerCore:
             case EventType.REQUEST_ARRIVAL:
                 req = event.payload["request"]
                 self.request_queue.push(req)
+                # Impl-9 Q1 — Arrival re-wakes admission chain (idle guard 의 dual entry).
+                # ARCH §6.4 'per-iteration admission' 의 arrival-driven 재기동 의미 정합.
+                if self.enable_admission_tick_rescheduling:
+                    self._schedule_admission_tick_with_default_payload()
             case EventType.ADMISSION_TICK:
                 # Impl-8 — admission tick hook 위 spec + cycle 값 산출 (snapshot fire 영역)
                 a_cycle = event.payload.get("a_cycle", 0.0)
                 b_cycle = event.payload.get("b_cycle", 0.0)
                 ctx_tokens = event.payload.get("ctx_tokens", 0)
+                # Impl-9 — Window full 시 admission 대기 (ARCH §6.7 '3-μ-batch in-flight window' 의미).
+                # Auto-evict (window.admit overflow) 는 *defensive* 영역으로 격하.
+                if len(self.window.current_ids()) >= self.window.capacity:
+                    self._fire_admission_tick(None, a_cycle, b_cycle, ctx_tokens)
+                    if self.enable_admission_tick_rescheduling:
+                        self._schedule_next_admission_tick(event)
+                    return
                 spec = self._invoke_admission(event)
                 self._fire_admission_tick(spec, a_cycle, b_cycle, ctx_tokens)
-                if spec is None:
-                    return
-                mb_id = self._next_mb_id
-                self._next_mb_id += 1
-                mb = MicroBatch(
-                    id=mb_id,
-                    k_total=spec.k_total,
-                    kv_rows_total=spec.kv_rows_total,
-                    kv_rows_lockstep=spec.kv_rows_lockstep,   # Impl-8 — F5 ablation 위 signal flow
-                    # Q10 (b) — decode_tokens 는 dispatch metadata (placeholder int value). Request 가 lifecycle owner.
-                    decode_tokens={req.id: 0 for req in spec.decode_requests},
-                )
-                # Impl-6 (Q10) — Request lifecycle owner = SchedulerCore.in_flight_requests
-                for req in spec.decode_requests:
-                    if req.state == RequestState.PENDING:
-                        req.transition_to(RequestState.PREFILL)
-                    self.in_flight_requests[req.id] = req
-                self.dispatcher.register(mb)
-                self.window.admit(mb_id)
-                self.dispatcher.tick()
+                if spec is not None:
+                    mb_id = self._next_mb_id
+                    self._next_mb_id += 1
+                    mb = MicroBatch(
+                        id=mb_id,
+                        k_total=spec.k_total,
+                        kv_rows_total=spec.kv_rows_total,
+                        kv_rows_lockstep=spec.kv_rows_lockstep,   # Impl-8 — F5 ablation 위 signal flow
+                        # Q10 (b) — decode_tokens 는 dispatch metadata (placeholder int value). Request 가 lifecycle owner.
+                        decode_tokens={req.id: 0 for req in spec.decode_requests},
+                    )
+                    # Impl-6 (Q10) — Request lifecycle owner = SchedulerCore.in_flight_requests
+                    for req in spec.decode_requests:
+                        if req.state == RequestState.PENDING:
+                            req.transition_to(RequestState.PREFILL)
+                        self.in_flight_requests[req.id] = req
+                    self.dispatcher.register(mb)
+                    self.window.admit(mb_id)
+                    self.dispatcher.tick()
+                # Impl-9 Q1 — self-rescheduling. spec=None 도 chain 유지 (idle termination guard 가 stop 결정).
+                # opt-in flag (Run.init 가 enable) — isolated unit test 와 의미 분리 (R14).
+                if self.enable_admission_tick_rescheduling:
+                    self._schedule_next_admission_tick(event)
+
+    def _schedule_next_admission_tick(self, prev_event: Event) -> None:
+        """Impl-9 Q1 — ADMISSION_TICK 처리 직후 다음 tick auto-push.
+
+        ARCH §6.4 'per-iteration basis' 정합. Idle termination guard:
+        request_queue + in_flight_requests 동시 empty 시 self-push 중단 (Run.loop 3 조건 정합).
+        """
+        if len(self.request_queue) == 0 and len(self.in_flight_requests) == 0:
+            return
+        next_t = self.clock.now + self.config.admission.tick_interval_us
+        self.queue.push(Event(
+            timestamp=next_t,
+            type=EventType.ADMISSION_TICK,
+            payload=prev_event.payload,
+        ))
+
+    def _schedule_admission_tick_with_default_payload(self) -> None:
+        """REQUEST_ARRIVAL 위 admission chain 재기동 — zero-default payload (dummy 영역)."""
+        if len(self.request_queue) == 0 and len(self.in_flight_requests) == 0:
+            return
+        next_t = self.clock.now + self.config.admission.tick_interval_us
+        self.queue.push(Event(
+            timestamp=next_t,
+            type=EventType.ADMISSION_TICK,
+            payload={
+                "t_proj": 0.0, "t_pim_fn": lambda k, n: 0.0,
+                "a_cycle": 0.0, "b_cycle": 0.0, "ctx_tokens": 0,
+            },
+        ))
 
     def _maybe_advance_forward_pass(self, event: Event, eos_seen: bool = False) -> None:
         """KERNEL_COMPLETION (O_PROJ done) → LayerState.advance → L 도달 시 token decode signal.
@@ -140,6 +198,8 @@ class SchedulerCore:
             return  # defensive — mb already unregistered
         token_signal = self.layer_state.advance(mb)
         if not token_signal:
+            # Impl-9 — 다음 layer 의 fresh dispatch 위 DAG nodes 재생성. ARCH §3.4 L × cycle 정합.
+            self.dag.reset_micro_batch(mb.id)
             return
         # ---- L 도달 — token decode signal ----
         for req_id in list(mb.decode_tokens.keys()):
@@ -154,6 +214,16 @@ class SchedulerCore:
                 self.in_flight_requests.pop(req_id, None)
         # 다음 token 의 forward pass 위 reset (multi-token decode 정합)
         mb.current_layer_index = 0
+        # Impl-9 — mb 의 모든 req finalize 시 evict (Q9 carry-over). Q10 lock-in 보존 —
+        # mb.decode_tokens 미변경, in_flight_requests 가 lifecycle truth.
+        mb_has_active_reqs = any(
+            rid in self.in_flight_requests for rid in mb.decode_tokens.keys()
+        )
+        if not mb_has_active_reqs:
+            self.window.evict(mb.id)
+            self.dispatcher.unregister(mb.id)
+        else:
+            self.dag.reset_micro_batch(mb.id)
 
     def _invoke_admission(self, event: Event) -> MicroBatchSpec | None:
         t_proj = event.payload.get("t_proj", 0.0)

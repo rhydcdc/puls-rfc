@@ -82,8 +82,14 @@ def _decode_one(core, mb_id):
 
 
 def _drive_until_done(core, mb_id):
-    while any(r in core.in_flight_requests
-              for r in core.dispatcher.micro_batches[mb_id].decode_tokens.keys()):
+    """Impl-9 — mb evict 후엔 mb 가 dispatcher.micro_batches 에서 사라짐 (defensive)."""
+    while (
+        mb_id in core.dispatcher.micro_batches
+        and any(
+            r in core.in_flight_requests
+            for r in core.dispatcher.micro_batches[mb_id].decode_tokens.keys()
+        )
+    ):
         _decode_one(core, mb_id)
 
 

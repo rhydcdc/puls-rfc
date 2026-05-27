@@ -35,5 +35,16 @@ class InFlightWindow:
         self._dag.add_micro_batch(micro_batch_id)
         return evicted
 
+    def evict(self, micro_batch_id: int) -> None:
+        """Impl-9 — specific mb 의 explicit eviction (모든 req finalize 후).
+
+        Q9 carry-over (MODULES.md Impl-6 'window eviction 은 Impl-9 영역') 해소.
+        DAG remove 도 atomic 으로 수행. 미존재 mb_id 는 KeyError raise.
+        """
+        if micro_batch_id not in self._micro_batch_ids:
+            raise KeyError(f"micro_batch {micro_batch_id} not in window (evict failed)")
+        self._micro_batch_ids.remove(micro_batch_id)
+        self._dag.remove_micro_batch(micro_batch_id)
+
     def current_ids(self) -> tuple[int, ...]:
         return tuple(self._micro_batch_ids)

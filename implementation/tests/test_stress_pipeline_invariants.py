@@ -22,8 +22,8 @@ from puls_sched.micro_batch import MicroBatch
 from puls_sched.request import Request
 
 
-def _make_req(req_id: int, kv_length: int = 10) -> Request:
-    return Request(id=req_id, prompt_tokens=[1], kv_length=kv_length)
+def _make_req(req_id: int, kv_length: int = 10, max_tokens: int = 0) -> Request:
+    return Request(id=req_id, prompt_tokens=[1], kv_length=kv_length, max_tokens=max_tokens)
 
 
 # =========================================================================
@@ -164,18 +164,23 @@ def test_stress_nvlink_100_shape_sequence_stateless(nvlink_transfer, dummy_confi
 # =========================================================================
 
 def test_stress_full_pipeline_20_admission_ticks(scheduler_core):
-    """20 회 ADMISSION_TICK — 각 tick 의 register 정확 + cross-contamination 0."""
+    """Impl-9 갱신 — 20 cumulative admit. Lifecycle 완주 후 모든 mb evict.
+
+    Pre-check + explicit evict 의 ARCH-compliant lifecycle: admit → cycle → evict → admit. 누적 mb_id
+    sequence 의 monotonic 산출 + 종료 시 모든 mb evict (dispatcher.unregister) 검증.
+    """
+    # mb_id sequence 추적
     for i in range(20):
-        scheduler_core.request_queue.push(_make_req(i, kv_length=10 * (i + 1)))
+        scheduler_core.request_queue.push(_make_req(i, kv_length=10 * (i + 1), max_tokens=1))
         scheduler_core._handle(Event(timestamp=float(i), type=EventType.ADMISSION_TICK, payload={}))
-        # 자원 reset for next tick (in stress test, GPU/PIM busy 격 무시)
-        scheduler_core.dispatcher.gpu_busy = False
-        scheduler_core.dispatcher.pim_busy = False
-    # 누적 micro_batches 의 size — admit 된 모든 mb 가 register 됨
-    # (단 window eviction 으로 dispatcher.unregister 가 미호출 — Impl-9 영역)
-    assert len(scheduler_core.dispatcher.micro_batches) == 20
-    # 각 mb 의 id 가 0..19 단조
-    assert sorted(scheduler_core.dispatcher.micro_batches.keys()) == list(range(20))
+        # Drain lifecycle (proper completion → evict 위)
+        while scheduler_core.step():
+            pass
+    # Lifecycle 완주 — 모든 mb evict (dispatcher.unregister + window.evict + DAG remove)
+    assert len(scheduler_core.dispatcher.micro_batches) == 0
+    assert scheduler_core.window.current_ids() == ()
+    # _next_mb_id 가 20 으로 증가 (admission 시점에 새 mb_id 발급 → 20 admit 발생 정합)
+    assert scheduler_core._next_mb_id == 20
 
 
 # =========================================================================
