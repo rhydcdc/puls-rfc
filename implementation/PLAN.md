@@ -525,12 +525,34 @@ F2·F3·F5 는 Impl-8 evaluator.acceleration_decomposition() 의 산식 그대�
 
 #### Prerequisite (Impl-9 Carry-over 해소, D2 산출 진입 전)
 
-> Impl-9 acceptance (C1~C5) 통과 후 D2 sweep 진입 전에 풀어야 하는 wiring 영역. *D2 산출 자체* 가 아닌 *substrate* 영역 — 별도 commit 권장 (`feat(impl-10-pre): ...` → `feat(impl-10): D2 sweep`). 사유: Impl-9 의 surgical scope 정합 으로 deferred 된 두 영역이 D2 의 정확성 (F2·F3 의 event-time cycle 산출 · admission balance 의 inter-AB 분리) 의 전제.
+> Impl-9 acceptance (C1~C5) 통과 후 D2 sweep 진입 전에 풀어야 하는 wiring + 구현 영역. *D2 산출 자체* 가 아닌 *substrate* 영역 — 별도 commit 권장 (`feat(impl-10-pre): ...` → `feat(impl-10): D2 sweep`). 사유: Impl-9 의 surgical scope 정합 으로 deferred 된 영역들이 D2 의 정확성 (F2·F3 의 event-time cycle 산출 · admission balance 의 inter-AB 분리 · Aux1 mixed batching weight reuse 산출) 의 전제.
 
-- [ ] **O5.1 carry-over (Q7 영역)** — `ForwardPass.run()` 이 `instance_pipeline.dispatch` 위 실 NVLink event chain (A → handoff → B → handoff → A_next) 거치게 wiring. 현재 `LayerState.advance` 의 L 회 iteration + token decode signal trigger 만 보유 — Impl-9 acceptance 충족용 minimum. D2 의 F2 (double-buffering) · F3 (instance A/B) cycle 산식의 *event-time* 정합성 영역. ARCH §3.4 pipeline literal 정확 반영
+**그룹 1 — Signal wiring (산식·알고리즘 완비, driving signal 만 활성):**
+
+- [ ] **O5.1 carry-over (Q7 영역)** — `ForwardPass.run()` 이 `instance_pipeline.dispatch` 위 실 NVLink event chain (A → handoff → B → handoff → A_next) 거치게 wiring. 현재 `LayerState.advance` 의 L 회 iteration + token decode signal trigger 만 보유 — Impl-9 acceptance 충족용 minimum. `InstancePipeline.dispatch()` method 자체 신설 필요 (현재 `steady_state_cycle` getter + `validate_handoff_shape` 만 보유). D2 의 F2 (double-buffering) · F3 (instance A/B) cycle 산식의 *event-time* 정합성 영역. ARCH §3.4 pipeline literal 정확 반영
 - [ ] **O8.1 carry-over (Q6 영역)** — `idle_telemetry.py` 를 `(gpu_a, pim_a, gpu_b)` 3-key 로 분리 + `Evaluator.idle_fraction` schema 갱신 (`gpu_instance_a` · `pim_instance_a` → 3-key). Instance B 의 GPU activity recording 지점 = O5.1 의 NVLink dispatch chain — 두 영역 *짝* 으로 해소. ARCH §6.4 admission balance 의 'inter-AB · intra-A' 두 축 정확 반영
-- [ ] 양 영역의 Impl-8 lock-in test 갱신 — `test_evaluator.idle_fraction` 의 schema 정합 + `test_meta._EXPECTED_MODULES` 의 `idle_telemetry` field 수 갱신 + 기존 admission balance 검증 test (`test_admission` · `test_integration_admission`) 의 inter-AB key 정합 갱신
-- [ ] Regression 검증 — Impl-9 acceptance C1~C5 (`test_acceptance_c1~c5_*`) 가 wiring 후에도 green 보존. 특히 C5 determinism 의 bit-exact 가 Instance B activity 의 새 event-time stream 추가에도 동일 seed 위 보존
+- [ ] **O8.2 신설 (Q6 보강)** — `idle_telemetry.record_active(resource, t_start, t_end)` 의 *호출 wiring*. 현재 src/ 어디서도 미호출 → `gpu_idle_fraction` · `pim_idle_fraction` 영원 0 → `Admission.balance_intra_A` 의 idle-driven 결정 영원 trivial. Wiring 지점: `Dispatcher.dispatch_gpu/dispatch_pim` 의 dispatch 시점 + `KERNEL_COMPLETION` handler 의 release 시점. 이 wiring 후 `Admission.balance_intra_A` 의 *진짜 활성*
+
+**그룹 2 — 코드 자체 구현 (Impl-9 미작성 영역, D2 의 Aux1 정확 산출 prereq):**
+
+- [ ] **O9.1 신설 — Prefill chunking dispatch** (Sarathi-Serve 영역의 chunked prefill 정합): Request 의 prompt_tokens (현재 placeholder list `[0] * N`) 를 admission 의 `prefill_chunk_tokens` 단위로 *chunk-by-chunk multi-iteration dispatch*. 필요 영역:
+  - `Request.prefill_processed: int` field 신설 (per-req prefill position 추적)
+  - `main_loop` 의 ADMISSION_TICK body 가 `spec.prefill_chunk_tokens > 0` 시 `MicroBatch.prefill_chunk` 영역 populate (현재 모든 req 가 `decode_tokens={req.id: 0}` 만 set)
+  - `Dispatcher.dispatch_gpu(prefill_attn)` 의 op_time = `chunk_size × gpu_op_time_per_token` (현재 dummy 1.0us 고정)
+  - `_maybe_advance_forward_pass` 의 prefill 완료 검출 → decode 전이 분기 (현재 1 cycle 만에 PENDING→PREFILL→DECODE 전이)
+- [ ] **O9.2 신설 — Mixed batching (Aux1 prereq)** — Same mb 영역에 prefill + decode 동시 dispatch. O9.1 의 prerequisite. `MicroBatch.prefill_chunk` + `MicroBatch.decode_tokens` 동시 populate + dispatcher 가 mixed dispatch 의 op_time 산식 정합 영역. ARCH §6.1 mixed batch 정합. D2 의 *Aux1 (weight streaming 1 회 절감, separate prefill+decode batch 대비)* 의 *진짜 산출* 영역 — 현재 모든 mb 가 pure-decode-only 라 Aux1 의 정량 ratio 산출 자체 불가
+
+**Wiring + 구현 후 활성되는 산식·알고리즘 (Impl-9 영역 기존 완비):**
+
+- `Admission.balance_inter_AB` (deadband 의 cycle balance) — 단위 test 완비, O5.1 wiring 후 진짜 `a_cycle`/`b_cycle` 산출 → 활성
+- `Admission.balance_intra_A` (idle 의 chunk/decode balance) — 단위 test 완비, O8.2 wiring 후 진짜 idle telemetry → 활성
+- `k_total_decider.solve` (9-step dial) — 단위 test 완비, calibrated `t_proj`·`t_pim_fn` 주입 후 진짜 의사결정
+
+**Regression + test 갱신:**
+
+- [ ] 그룹 1 wiring 후 Impl-8 lock-in test 갱신 — `test_evaluator.idle_fraction` 의 schema 정합 + `test_meta._EXPECTED_MODULES` 의 `idle_telemetry` field 수 갱신 + 기존 admission balance 검증 test (`test_admission` · `test_integration_admission`) 의 inter-AB key 정합 갱신
+- [ ] 그룹 2 구현 후 lifecycle test 갱신 — Request.state 전이 영역 (PREFILL phase 의 L_prefill cycle 이상 잔존), `test_acceptance_c1` 의 max_tokens·prefill_tokens 정합 갱신
+- [ ] Regression 검증 — Impl-9 acceptance C1~C5 (`test_acceptance_c1~c5_*`) 가 wiring + 구현 후에도 green 보존. 특히 C5 determinism 의 bit-exact 가 Instance B activity 의 새 event-time stream + prefill chunked dispatch 의 새 KERNEL_COMPLETION 추가에도 동일 seed 위 보존
 
 #### Implementation:
 - [ ] Workload sweep — ctx ∈ {2k, 8k, 32k, 128k, 512k, 1M} × batch ∈ {16, 64, 128, 256}
@@ -586,6 +608,12 @@ F2·F3·F5 는 Impl-8 evaluator.acceleration_decomposition() 의 산식 그대�
 - **OI8. Impl-10 의 lab Blackwell 실측 의존성 (spec-first 정합).** Impl-10 D2 산출은 *whitepaper + Ramulator2 + 모델 spec + trace* 의 4 source 만으로 가능 — *lab Blackwell 8 GPU 실측은 refinement (선택 영역), blocker 아님.* 사유: (i) D2 = *ratio* 산출 (절대 metric 아님) → 분자/분모 동일 출처 (whitepaper spec) 위 일관 → ratio robust, (ii) F2 · F3 산식이 `(a+b) / max(a,b)` 형태 → 절대값 영향 0, 균형 여부만 dominant, (iii) F5 = trace 의 KV variance dominant → PIM tile time 절대값 무관, (iv) F1 · Aux1 · Aux2 의 BW 비교는 spec 만으로 closed-form 산출 (§4 Impl-10 산식 영역). Lab 실측이 있으면 정확도 ±10% → ±2% 로 좁힘 (qualitative correctness 는 spec 만으로 충분). 따라서 *Impl-10 진입 = lab 접근 가용성에 blocked 아님*. Lab 실측은 *후속 refinement commit* 으로 처리 가능.
 - **OI9. η_HBM 출처 결정 (Impl-10 진입 시).** η_HBM_external (~0.7~0.8) 은 NVIDIA whitepaper 에 *명시 안 됨* (peak BW 만 광고). 3 출처 옵션: (a) academic GPU memory micro-benchmark 논문 (가장 정확) — (b) NVIDIA Nsight Compute kernel-level analysis report (공개 자료) — (c) conservative estimate (0.75 ± 0.05 sensitivity sweep + 출처 라벨 동반). 선택은 Impl-10 진입 시점에 — 어느 옵션이든 PLAN §0.5 *출처 라벨 동반* 으로 정직한 disclosure 보장. η_HBM_internal (~1.0) 은 RTL FSM cycle 정확 산출 영역 (확정값 영역).
 - **OI10. Impl-9 → Impl-10 carry-over 추적 (Q6 · Q7 deferred 결정).** Impl-9 의 surgical scope 정합 으로 두 영역이 Impl-10 prerequisite (§4 Impl-10 *Prerequisite* 섹션) 로 deferred — (i) **O5.1 / Q7** = ForwardPass.run() ↔ instance_pipeline.dispatch 통합 (NVLink event chain), (ii) **O8.1 / Q6** = idle_telemetry 의 per-instance A/B (`gpu_a` · `pim_a` · `gpu_b`) 3-key 분리. 두 영역은 *coupling* — gpu_b activity instrument 지점이 instance_pipeline.dispatch chain 후에야 존재. 짝 으로 해소. *Impl-9 의 evaluator.idle_fraction schema 는 single-instance (gpu_instance_a · pim_instance_a) 2-key 유지* — D2 schema 의 완전성은 Impl-10 prerequisite 후 lock-in. 사유 disclosure: gpu_b 를 Impl-9 에서 추가하면 instrument 부재로 항상 0 으로 misleading (정직성 결손) — *영역 부재* 가 *값 0* 보다 honest.
+- **OI11. Impl-9 미작성 영역 추적 (prefill chunking · mixed batching · idle_telemetry.record_active wiring).** Impl-9 의 D1 (lifecycle scheduler) 영역 완성 + C1~C5 acceptance 통과. 단 *진정한 ARCH-compliant batch composition* 의 3 영역은 Impl-9 의 scope 외 — Impl-10 prerequisite (§4 Impl-10 *Prerequisite* §그룹 2) 에서 신규 구현:
+  - **O8.2 (Q6 보강)** — `idle_telemetry.record_active` 호출 wiring (현재 src/ 어디서도 미호출 → `Admission.balance_intra_A` 의 idle-driven 결정 trivial)
+  - **O9.1 — Prefill chunking dispatch** — Sarathi-style multi-iteration chunked prefill (Request.prompt_tokens 의 chunk-by-chunk dispatch). 현재 모든 req 가 1 cycle 만에 PREFILL→DECODE 전이
+  - **O9.2 — Mixed batching** — same mb 의 prefill+decode 동시 dispatch (D2 *Aux1 weight streaming 절감* 산출의 prereq). 현재 mb 가 pure-decode-only
+  
+  본 3 영역은 *Impl-9 plan 작성 시점에 미식별* (구현 중 발견 + 사용자 push-back 위 명시 영역). Impl-10 prereq commit 영역에서 *완성*. *D1 의 Impl-9 영역 완성 정합* (lifecycle scheduler + C1~C5 acceptance) — *D2 정확 산출 의 prereq* 영역 격리.
 
 ---
 
