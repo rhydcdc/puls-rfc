@@ -17,7 +17,8 @@ class MicroBatchSpec:
     n: int
     k_total: int
     over_budget: bool
-    kv_rows_total: int                                   # Impl-5 — Σ kv_length over decode_requests (signal flow to dispatcher)
+    kv_rows_total: int                                   # Impl-5 — Σ kv_length over decode_requests (signal flow to dispatcher, F5 활성화 path)
+    kv_rows_lockstep: int                                # Impl-8 — max(kv_length) × num_decode_reqs (F5 ablation 위 lock-step penalty 산식)
 
 
 @dataclass
@@ -90,6 +91,8 @@ class Admission:
         n = self.mfu_floor(decode_count)
         k_result = k_total_solve(t_proj, t_pim_fn, n, self.admission_cfg)
         kv_rows_total = sum(r.kv_length for r in decode_reqs)
+        # Impl-8 — F5 ablation 위 lock-step penalty 입력. decode_reqs 비어 있으면 0.
+        kv_rows_lockstep = max((r.kv_length for r in decode_reqs), default=0) * len(decode_reqs)
 
         return MicroBatchSpec(
             prefill_chunk_tokens=prefill_chunk_tokens,
@@ -98,4 +101,5 @@ class Admission:
             k_total=k_result.k_total,
             over_budget=k_result.over_budget,
             kv_rows_total=kv_rows_total,
+            kv_rows_lockstep=kv_rows_lockstep,
         )

@@ -39,28 +39,47 @@ class PIMExecutor:
         regime = self.config.model.kv_precision
         return self.config.time.pim_tile_time_ns[regime]
 
-    def op_time(self, k_channels: int, kv_rows_total: int) -> float:
+    def op_time(
+        self, k_channels: int, kv_rows_total: int, kv_rows_lockstep: int = 0,
+    ) -> float:
         """SP-PIM aggregate op-level time. ARCH §3.4 Q-replicate + KV-row sharding.
 
         Args:
             k_channels: SP-PIM activated channel count (aggregate, 0..2048).
-            kv_rows_total: batch 의 KV row 합 (exact, average 아님).
+            kv_rows_total: batch 의 KV row 합 (exact, F5 활성화 path 위 산식 입력).
+            kv_rows_lockstep: max(kv_length) × num_decode_reqs (F5 ablation 위 lock-step
+                              penalty 산식 입력). F5 활성화 path 위에선 사용 안 함 (default 0).
 
         Returns:
             op time = (per-channel tile count × tile_time) + broadcast overhead.
 
-        산식 (단일 ceil, Hermite identity 위 두 단계 ceil 과 수학적 등가):
+        산식 (F5 활성화 — 정상 PULS 동작):
             tiles_per_channel = ceil(kv_rows_total / (k_channels × rtl_fsm_tile_rows))
-            per_channel_time  = tiles_per_channel × tile_time()
-            broadcast         = pim_broadcast_latency_ns_cross_gpu if k > k_per_gpu_max else 0
-            return per_channel_time + broadcast
 
-        batch dim (N_decode) 무관 ← ARCH §3.1 "FSM cycle structure is invariant".
+        산식 (F5 비활성화 — ARCH §5.7 F5 "max-KV straggler bubble within a batch"):
+            tiles_per_channel = ceil(kv_rows_lockstep / (k_channels × rtl_fsm_tile_rows))
+            여기서 kv_rows_lockstep = max(kv_length) × num_decode_reqs — 각 req 의
+            effective work 가 max-KV 로 inflate (lock-step penalty). Channel sharding 은
+            유지 (k_channels 가 분모) — channel structure 무효 아님.
+
+        batch dim (N_decode) 의 직접 영향 0 ← ARCH §3.1 "FSM cycle structure is invariant".
+        F5 ablation 시 num_decode_reqs 는 kv_rows_lockstep 산출에 *admission 단계* 에서 반영
+        (PIMExecutor 는 stateless 시간 계산기, request 수 직접 인지 안 함).
         """
         if k_channels == 0:
             return 0.0  # PIM disabled — pure-prefill batch (ARCH §5.1)
         tile_rows = self.config.time.rtl_fsm_tile_rows
-        tiles_per_channel = math.ceil(kv_rows_total / (k_channels * tile_rows))
+        if self.config.ablation.f5_disabled:
+            # F5 ablation — lock-step max-KV penalty. kv_rows_lockstep 은 admission 산출.
+            if kv_rows_lockstep <= 0:
+                raise ValueError(
+                    f"F5 ablation requires kv_rows_lockstep > 0, got {kv_rows_lockstep} "
+                    f"(MicroBatch.kv_rows_lockstep 가 admission 에서 산출되어야 함)"
+                )
+            tiles_per_channel = math.ceil(kv_rows_lockstep / (k_channels * tile_rows))
+        else:
+            # 정상 PULS 동작 (F5 활성화) — channel-independent scheduling
+            tiles_per_channel = math.ceil(kv_rows_total / (k_channels * tile_rows))
         per_channel_time = tiles_per_channel * self.tile_time()
         k_per_gpu_max = (
             self.config.hw.num_stacks_per_gpu * self.config.hw.num_channels_per_stack

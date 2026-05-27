@@ -51,12 +51,27 @@ class AdmissionConfig:
 
 
 @dataclass(frozen=True)
+class AblationConfig:
+    """F1~F5 ablation flag — Impl-10 sweep 의 single-flag isolation 영역 (D2 정합).
+
+    Default 는 모든 flag off = F1~F5 모두 활성화 = 정상 PULS 동작 (backward-compat).
+    PLAN §0.5 — 본 영역의 코드 로직은 flag 의 *분기* 만, *정량 ratio 값* 산출 0.
+    """
+
+    f1_disabled: bool = False                       # SP-PIM 비활성화 — dispatcher 의 PIM op_time → GPU fallback
+    f2_window_capacity_override: int | None = None  # double-buffering 비활성화 — InFlightWindow CAPACITY override (1 강제 시 직렬)
+    f3_disabled: bool = False                       # Instance A/B 비활성화 — Evaluator 가 single_instance_cycle = a + b 산출
+    f5_disabled: bool = False                       # channel-independent 비활성화 — PIMExecutor 의 lock-step max-KV penalty 분기
+
+
+@dataclass(frozen=True)
 class Config:
     model: ModelConfig
     hw: HWConfig
     time: TimeConfig
     slo: SLOConfig
     admission: AdmissionConfig
+    ablation: AblationConfig
     seed: int
 
 
@@ -84,7 +99,12 @@ def default_dummy_config() -> Config:
             num_channels_per_stack=32,
         ),
         time=TimeConfig(
-            gpu_op_time_us={"qkv": 1.0, "prefill_attn": 1.0, "o_proj": 1.0},
+            gpu_op_time_us={
+                "qkv": 1.0,
+                "prefill_attn": 1.0,
+                "o_proj": 1.0,
+                "decode_attn_fallback": 4.0,    # Impl-8 — F1 ablation 시 PIM → GPU fallback placeholder. dummy ratio (Impl-10 calibrated)
+            },
             pim_tile_time_ns={"FP8": 1.0, "FP16": 2.0},
             nvlink_time_per_byte_ns=1.0,
             rtl_fsm_cycle_per_tile=1,
@@ -104,5 +124,6 @@ def default_dummy_config() -> Config:
             k_total_step=256,
             k_total_max=2048,
         ),
+        ablation=AblationConfig(),
         seed=42,
     )

@@ -9,8 +9,11 @@ class MicroBatch:
     decode_tokens: dict[int, int] = field(default_factory=dict)
     # Impl-5 — admission decision 운반 + forward_pass runtime tracker (O4.1 해소)
     k_total: int = 0                                     # SP-PIM aggregate channel count (admission 산출)
-    kv_rows_total: int = 0                               # Σ kv_length over decode_reqs (admission spec 산출)
+    kv_rows_total: int = 0                               # Σ kv_length over decode_reqs (admission spec 산출) — F5 활성화 path
     current_layer_index: int = 0                         # forward_pass 의 L-iteration 현재 위치 (시작 layer ≠ 현재 — Impl-9 통합 시점 §7 O5.1)
+    # Impl-8 — F5 ablation 위 lock-step max-KV penalty 산식 입력 (max kv_length × num_decode_reqs).
+    # F5 활성화 path 위에선 사용 안 함 (default 0). ARCH §5.7 F5 "max-KV straggler bubble within a batch" 정합.
+    kv_rows_lockstep: int = 0
 
     def request_ids(self) -> set[int]:
         return set(self.prefill_chunk.keys()) | set(self.decode_tokens.keys())

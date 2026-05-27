@@ -120,13 +120,17 @@ def test_op_time_kv_row_sharding_ratio_property(pim_executor, dummy_config):
 
 
 def test_op_time_batch_dim_invariance_via_signature(pim_executor):
-    """ARCH §3.1 'FSM cycle structure invariant' — signature 에 batch arg 부재 (구조 강제)."""
+    """ARCH §3.1 'FSM cycle structure invariant' — signature 에 batch arg 부재 (구조 강제).
+
+    Impl-8 — kv_rows_lockstep 추가 (F5 ablation signal flow, default 0 backward-compat).
+    batch arg (N_decode / n_decode) 는 여전히 부재 (ARCH §3.1 invariance 보존).
+    """
     sig = inspect.signature(pim_executor.op_time)
     params = set(sig.parameters.keys())
     assert "N_decode" not in params
     assert "batch" not in params
     assert "n_decode" not in params
-    assert params == {"k_channels", "kv_rows_total"}
+    assert params == {"k_channels", "kv_rows_total", "kv_rows_lockstep"}
 
 
 def test_op_time_ceil_equivalence_hermite_identity(pim_executor, dummy_config):

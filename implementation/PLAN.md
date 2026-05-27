@@ -403,29 +403,36 @@ Impl-1~9 (dummy time model 위) 가 산출 *가능 / 불가능 / 스코프 외* 
 
 ---
 
-### Impl-8 — Structural Evaluator (Dispatch Trace + Convergence + F1~F5 Decomposition)
+### Impl-8 — Structural Evaluator (Dispatch Trace + Convergence + F1~F5 Decomposition) ✓ (commit pending)
 
 > **Deliverables 정합.** 본 phase 는 D1 (Impl-9 시뮬레이터 통과) 의 *증거 산출* + D2 (Impl-10 calibrated projection) 의 *schema 골격*. 절대 metric (TTFT · TPOT · throughput · goodput) 은 §1.2 Out of Scope.
 
 **Implementation:**
-- [ ] `Evaluator.dispatch_trace` — §6.5 Init/T1~T5 sequence 캡처 (event timestamp + dispatch 노드 + DAG state)
-- [ ] `Evaluator.admission_convergence` — deadband 위 idle fraction 시간 series (oscillation / 수렴 판정 입력)
-- [ ] `Evaluator.idle_fraction` — Instance A · B 별, GPU · PIM 별
-- [ ] `Evaluator.pim_utilization` — aggregate channel-time utilization
-- [ ] `Evaluator.pipeline_efficiency` — `max(A, B) / (A + B)` ratio
-- [ ] `Evaluator.acceleration_decomposition` — F1·F2·F3·F5 각 source isolated cycle ratio 표 (workload regime 격자 위 — D2 schema 골격)
-- [ ] `Evaluator.report` — 표 + 분포 출력 (PULS 단독 구조 산출, comparative 없음)
+- [x] `Evaluator.dispatch_trace` — §6.5 Init/T1~T5 sequence 캡처 (DispatchEvent dataclass: timestamp · mb_id · node_type · resource · k_total · dag_state_snapshot)
+- [x] `Evaluator.admission_convergence` — deadband 위 idle fraction 시간 series + ConvergenceVerdict (converged · oscillating · in_band_fraction · samples)
+- [x] `Evaluator.idle_fraction` — Instance A scope (GPU · PIM 2 자원). Per-instance A/B split 은 Impl-9 (O8.1 carry-over)
+- [x] `Evaluator.pim_utilization` — `Σ k_total · dt / (k_max · total_time)` aggregate channel-time
+- [x] `Evaluator.pipeline_efficiency` — `max(A, B) / (A + B)` ratio (a/b ≤ 0 reject)
+- [x] `Evaluator.acceleration_decomposition` — F1·F2·F3·F5 cycle ratio direction 표 (D2 schema 골격, F4 미포함 = ARCH §5.7 precondition)
+- [x] `Evaluator.report` — Python dict (8 key) + markdown 표 (PULS 단독, Comparative baseline 없음)
+- [x] D1 hook API — `Dispatcher.on_dispatch` + `SchedulerCore.on_admission_tick` (Evaluator standalone 정합, D3)
+- [x] F1~F5 ablation flag wiring — `config.AblationConfig` (D2 정합) + dispatcher F1 분기 + window F2 capacity override + evaluator F3 직접 산식 + pim_emulator F5 분기 (kv_rows_lockstep = max_kv × num_decode_reqs)
 
-**Unit Tests:**
-- [ ] `Evaluator.dispatch_trace` — §6.5 fixture (P, M, N 3 μ-batch) 입력 시 Init/T1~T5 sequence 정확 재현
-- [ ] `Evaluator.admission_convergence` — 합성 oscillation / 수렴 trace 입력 시 판정 정확
-- [ ] `Evaluator.idle_fraction` — Instance / executor 별 idle fraction 정확
-- [ ] `Evaluator.pim_utilization` — `Σ k_total · dt / (k_max · total_time)` 정확
-- [ ] `Evaluator.pipeline_efficiency` — A_cycle · B_cycle 입력에서 `max / (A + B)` 정확
-- [ ] `Evaluator.acceleration_decomposition` — F1/F2/F3/F5 각 ablation flag on/off 시 cycle ratio 계산 정합 (구조 검증)
-- [ ] Reproducibility — 동일 seed + 동일 trace + 동일 scheduler → bit-exact 구조 산출
+**Unit Tests:** (총 ~110 신규 passed; 기존 652 + 신규 ~110 = ~760+ — `implementation/plans/impl_8.md` 참조)
+- [x] `Evaluator.dispatch_trace` — §6.5 P/M/N fixture 위 Init/T1~T5 sequence 정확 재현 (cluster B 12 tests)
+- [x] `Evaluator.admission_convergence` — 합성 oscillation / 수렴 / boundary trace 판정 정확 (cluster C 10 tests)
+- [x] `Evaluator.idle_fraction` — Instance A scope (gpu/pim 2 자원) bit-exact telemetry (cluster A)
+- [x] `Evaluator.pim_utilization` — Σ k·dt 산식 정합 + [0,1] boundary (cluster A + F)
+- [x] `Evaluator.pipeline_efficiency` — max/(a+b) 산식 + balance/extremum boundary (cluster A)
+- [x] `Evaluator.acceleration_decomposition` — F1·F2·F3·F5 산식 정합 + direction_positive + F4 미포함 lock-in (cluster A + D 17 tests)
+- [x] Reproducibility — 동일 seed + 동일 trace → bit-exact report (cluster A + E + F multi-seed sweep)
+- [x] **D1 hook chain** — dispatcher.on_dispatch + scheduler_core.on_admission_tick → record_dispatch/record_admission_tick chain (cluster E 10 tests)
+- [x] **Non-intrusion** — Evaluator 부착 전후 KV invariant + DAG state bit-exact (cluster E + F)
+- [x] **Multi-mb stress** — 100-mb dispatch + 100 admission tick 위 capture loss 0 + I-E1~I-E5 invariant 보존 (cluster F 19 tests)
+- [x] **Comparative baseline 부재 lock-in** — Evaluator 의 method · field 에 baseline/sarathi/vllm/compare + ttft/tpot/throughput/goodput substring 부재 meta-test (cluster G + H 4 tests)
+- [x] **F4 precondition lock-in** — AblationSource enum == {F1, F2, F3, F5}, decomp cell 4 만 (ARCH §5.7 literal, cluster D + G)
 
-**Acceptance:** PULS scheduler 의 구조 산출 (dispatch trace · 수렴 trace · F1~F5 decomposition) schema 정합 + reproducibility 성립. *Comparative baseline 미산출 (Deliverables · §1.2 정합).*
+**Acceptance:** ✓ PULS scheduler 의 구조 산출 (dispatch trace · 수렴 trace · F1~F5 decomposition) schema 정합 + reproducibility 성립 (PLAN §0 C5 prefigure). ✓ §6.5 Init/T1~T5 fixture reproduction (12 tests). ✓ §6.4 deadband convergence heuristic 정합 (10 tests). ✓ F1·F2·F3·F5 ablation direction + 산식 정합 (17 tests). ✓ *Comparative baseline 미산출 lock-in* — Evaluator method/field 부재 meta-test 4. ✓ *절대 metric 미산출 lock-in* — TTFT/TPOT/throughput/goodput substring 부재. ✓ Multi-mb stress (100-mb × 4 seed) 위 I-E1~I-E5 invariant 보존. ✓ ARCH §5.7 · §6.4 · §6.5 · §6.7 literal lock-in. **정량 ratio 절대값 산출 0 (Impl-10 deferred — PLAN §0.5).**
 
 ---
 

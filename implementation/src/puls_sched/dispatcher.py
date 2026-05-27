@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Callable, TYPE_CHECKING
 
 from puls_sched.clock import Clock
 from puls_sched.config import Config
@@ -9,6 +10,9 @@ from puls_sched.invariants import check_I1, check_I2, check_I3, check_I4, check_
 from puls_sched.micro_batch import MicroBatch
 from puls_sched.node import Node, NodeState, NodeType
 from puls_sched.pim_emulator import PIMExecutor
+
+if TYPE_CHECKING:
+    from puls_sched.evaluator import DispatchEvent
 
 
 GPU_NODE_TYPES: frozenset[NodeType] = frozenset(
@@ -23,6 +27,9 @@ GPU_PRIORITY_ORDER: tuple[NodeType, ...] = (
 )
 
 
+DispatchCallback = Callable[["DispatchEvent"], None]
+
+
 @dataclass
 class Dispatcher:
     config: Config
@@ -33,6 +40,7 @@ class Dispatcher:
     micro_batches: dict[int, MicroBatch] = field(default_factory=dict)  # Impl-5 — Q1-bis lookup
     gpu_busy: bool = False
     pim_busy: bool = False
+    _dispatch_callbacks: list[DispatchCallback] = field(default_factory=list)  # Impl-8 — D1 hook (evaluator 등록 점)
 
     def register(self, mb: MicroBatch) -> None:
         """MicroBatch 를 dispatcher 의 lookup 저장소에 등록 (Q1-bis).
@@ -48,6 +56,40 @@ class Dispatcher:
         if mb_id not in self.micro_batches:
             raise RuntimeError(f"MicroBatch {mb_id} not registered (double unregister?)")
         del self.micro_batches[mb_id]
+
+    def on_dispatch(self, callback: DispatchCallback) -> None:
+        """Dispatch 시점 event capture 위 callback 등록 (Impl-8 D1 hook).
+
+        Evaluator 같은 외부 inspector 가 dispatch_trace 캡처 위 등록. Dispatcher 자체는
+        Evaluator 를 모름 (D3 standalone — Dispatcher 가 reverse-aware 아님).
+        """
+        self._dispatch_callbacks.append(callback)
+
+    def _fire_dispatch(self, node: Node, resource: str) -> None:
+        """등록된 callback 들에게 dispatch event 통지 (Impl-8 D1 hook fire)."""
+        if not self._dispatch_callbacks:
+            return
+        # Lazy import — dispatcher ↔ evaluator 순환 회피
+        from puls_sched.evaluator import DispatchEvent
+        mb = self.micro_batches.get(node.micro_batch_id)
+        k_total = mb.k_total if mb is not None else 0
+        event = DispatchEvent(
+            timestamp=self.clock.now,
+            micro_batch_id=node.micro_batch_id,
+            node_type=node.type,
+            resource=resource,
+            k_total=k_total,
+            dag_state_snapshot=self._snapshot_dag_state(),
+        )
+        for cb in self._dispatch_callbacks:
+            cb(event)
+
+    def _snapshot_dag_state(self) -> dict[int, dict[str, str]]:
+        """DAG state 의 defensive copy — Evaluator 가 받은 snapshot 위 mutation 시 DAG 영향 0."""
+        return {
+            mb_id: {ntype.name: node.state.name for ntype, node in nodes.items()}
+            for mb_id, nodes in self.dag.nodes.items()
+        }
 
     def refresh_ready(self) -> None:
         for mb_id, nodes in self.dag.nodes.items():
@@ -81,6 +123,9 @@ class Dispatcher:
         if node.type in GPU_NODE_TYPES:
             return self.config.time.gpu_op_time_us[node.type.name.lower()]
         # PIM (decode-attn). Impl-5 — 실 signal flow (MicroBatch.k_total · kv_rows_total).
+        # Impl-8 F1 ablation — PIM dispatch path 유지 (I5 invariant 보존) + op_time 만 GPU fallback.
+        if self.config.ablation.f1_disabled:
+            return self.config.time.gpu_op_time_us["decode_attn_fallback"]
         mb = self.micro_batches.get(node.micro_batch_id)
         if mb is None:
             raise RuntimeError(
@@ -89,6 +134,7 @@ class Dispatcher:
         return self.pim_executor.op_time(
             k_channels=mb.k_total,
             kv_rows_total=mb.kv_rows_total,
+            kv_rows_lockstep=mb.kv_rows_lockstep,   # Impl-8 — F5 ablation 위. F5 활성화 path 위에선 pim_executor 가 사용 안 함
         )
 
     def dispatch_gpu(self, node: Node) -> None:
@@ -108,6 +154,7 @@ class Dispatcher:
                 "resource": "GPU",
             },
         ))
+        self._fire_dispatch(node, resource="GPU")    # Impl-8 — D1 hook (evaluator 통지)
 
     def dispatch_pim(self, node: Node) -> None:
         check_I5(self.pim_busy)
@@ -123,6 +170,7 @@ class Dispatcher:
                 "resource": "PIM",
             },
         ))
+        self._fire_dispatch(node, resource="PIM")    # Impl-8 — D1 hook (evaluator 통지). F1 ablation 시에도 resource="PIM" 유지 (I5 invariant 정합)
 
     def on_completion(self, event: Event) -> None:
         mb_id: int = event.payload["micro_batch_id"]

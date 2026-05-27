@@ -27,9 +27,10 @@ from puls_sched.pim_emulator import PIMExecutor
 
 
 def test_op_time_signature_matches_arch_3_1_invariance():
-    """op_time signature = {self, k_channels, kv_rows_total}. N_decode 부재 (ARCH §3.1)."""
+    """op_time signature = {self, k_channels, kv_rows_total, kv_rows_lockstep}. N_decode 부재 (ARCH §3.1).
+    Impl-8 — kv_rows_lockstep 추가 (F5 ablation 위, default 0 backward-compat)."""
     params = set(inspect.signature(PIMExecutor.op_time).parameters.keys())
-    assert params == {"self", "k_channels", "kv_rows_total"}, (
+    assert params == {"self", "k_channels", "kv_rows_total", "kv_rows_lockstep"}, (
         f"PIMExecutor.op_time signature divergence — {params}. "
         f"ARCH §3.1 'FSM cycle structure invariant' 정합 으로 batch arg 부재 요구."
     )
@@ -212,3 +213,95 @@ def test_main_loop_in_flight_requests_dict():
     from puls_sched.main_loop import SchedulerCore
     fields = SchedulerCore.__dataclass_fields__
     assert "in_flight_requests" in fields
+
+
+# ============================================================================
+# Impl-8 — Evaluator + ablation wiring signature lock-in
+# ============================================================================
+
+def test_evaluator_record_dispatch_signature():
+    """Evaluator.record_dispatch signature == (self, event: DispatchEvent) -> None"""
+    from puls_sched.evaluator import Evaluator
+    sig = inspect.signature(Evaluator.record_dispatch)
+    assert list(sig.parameters.keys()) == ["self", "event"]
+
+
+def test_evaluator_record_admission_tick_signature():
+    """Evaluator.record_admission_tick signature == (self, snapshot)"""
+    from puls_sched.evaluator import Evaluator
+    sig = inspect.signature(Evaluator.record_admission_tick)
+    assert list(sig.parameters.keys()) == ["self", "snapshot"]
+
+
+def test_evaluator_no_baseline_method():
+    """Comparative baseline 부재 lock-in — method name 에 baseline/sarathi/vllm/compare 부재."""
+    from puls_sched.evaluator import Evaluator
+    forbidden = {"baseline", "sarathi", "vllm", "compare"}
+    for name in dir(Evaluator):
+        for f in forbidden:
+            assert f not in name.lower(), f"Evaluator.{name} contains forbidden term '{f}'"
+
+
+def test_evaluator_no_absolute_metric_method():
+    """절대 metric 부재 lock-in — method name 에 ttft/tpot/throughput/goodput/slo 부재."""
+    from puls_sched.evaluator import Evaluator
+    forbidden = {"ttft", "tpot", "throughput", "goodput", "slo"}
+    for name in dir(Evaluator):
+        for f in forbidden:
+            assert f not in name.lower(), f"Evaluator.{name} contains forbidden term '{f}'"
+
+
+def test_dispatcher_on_dispatch_signature():
+    """Dispatcher.on_dispatch == (self, callback) -> None (D1 hook 등록 API)"""
+    sig = inspect.signature(Dispatcher.on_dispatch)
+    assert list(sig.parameters.keys()) == ["self", "callback"]
+
+
+def test_dispatcher_dispatch_callbacks_field():
+    """Dispatcher._dispatch_callbacks field 존재 (D1 hook 영구 기록)"""
+    assert "_dispatch_callbacks" in Dispatcher.__dataclass_fields__
+
+
+def test_scheduler_core_on_admission_tick_signature():
+    """SchedulerCore.on_admission_tick == (self, callback)"""
+    from puls_sched.main_loop import SchedulerCore
+    sig = inspect.signature(SchedulerCore.on_admission_tick)
+    assert list(sig.parameters.keys()) == ["self", "callback"]
+
+
+def test_window_no_class_const_capacity():
+    """InFlightWindow.CAPACITY 부재 (rename → DEFAULT_CAPACITY + instance.capacity)."""
+    from puls_sched.window import InFlightWindow
+    assert not hasattr(InFlightWindow, "CAPACITY"), (
+        "InFlightWindow.CAPACITY 가 instance field 화되어야 함 (F2 ablation 위)"
+    )
+    assert hasattr(InFlightWindow, "DEFAULT_CAPACITY")
+
+
+def test_ablation_config_is_frozen():
+    """AblationConfig frozen dataclass — immutable lock-in."""
+    import dataclasses as dc
+    from puls_sched.config import AblationConfig
+    assert AblationConfig.__dataclass_params__.frozen is True
+
+
+def test_evaluator_is_dataclass():
+    """Evaluator 는 dataclass — field 기반 inspector 가능."""
+    import dataclasses as dc
+    from puls_sched.evaluator import Evaluator
+    assert dc.is_dataclass(Evaluator)
+
+
+def test_pim_emulator_op_time_signature_has_kv_rows_lockstep():
+    """PIMExecutor.op_time signature 에 kv_rows_lockstep param + default 0 (Q8 backward-compat)."""
+    sig = inspect.signature(PIMExecutor.op_time)
+    assert "kv_rows_lockstep" in sig.parameters
+    assert sig.parameters["kv_rows_lockstep"].default == 0
+
+
+def test_evaluator_no_dispatcher_field():
+    """D3 — Evaluator 가 dispatcher/scheduler_core reference 미보유 (standalone)."""
+    from puls_sched.evaluator import Evaluator
+    fields = Evaluator.__dataclass_fields__
+    assert "dispatcher" not in fields
+    assert "scheduler_core" not in fields

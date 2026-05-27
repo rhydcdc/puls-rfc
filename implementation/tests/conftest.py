@@ -164,3 +164,51 @@ def forward_pass(dummy_config, instance_pipeline, layer_state):
         instance_pipeline=instance_pipeline,
         layer_state=layer_state,
     )
+
+
+# =========================================================================
+# Impl-8 fixtures
+# =========================================================================
+
+from puls_sched.config import AblationConfig
+from puls_sched.evaluator import Evaluator
+
+
+@pytest.fixture
+def ablation_config_default():
+    """Default ablation config — 모든 flag off (정상 PULS 동작 backward-compat)."""
+    return AblationConfig()
+
+
+@pytest.fixture
+def ablation_config_all_disabled():
+    """모든 F1·F2·F3·F5 disabled (composite ablation, Impl-10 sweep 영역과 형태만 동일)."""
+    return AblationConfig(
+        f1_disabled=True,
+        f2_window_capacity_override=1,
+        f3_disabled=True,
+        f5_disabled=True,
+    )
+
+
+@pytest.fixture
+def config_f1_disabled(dummy_config):
+    ab = dataclasses.replace(dummy_config.ablation, f1_disabled=True)
+    return dataclasses.replace(dummy_config, ablation=ab)
+
+
+@pytest.fixture
+def config_f2_capacity_1(dummy_config):
+    ab = dataclasses.replace(dummy_config.ablation, f2_window_capacity_override=1)
+    return dataclasses.replace(dummy_config, ablation=ab)
+
+
+@pytest.fixture
+def config_f5_disabled(dummy_config):
+    ab = dataclasses.replace(dummy_config.ablation, f5_disabled=True)
+    return dataclasses.replace(dummy_config, ablation=ab)
+
+
+@pytest.fixture
+def evaluator(dummy_config, clock, idle_telemetry):
+    return Evaluator(config=dummy_config, clock=clock, idle_telemetry=idle_telemetry)

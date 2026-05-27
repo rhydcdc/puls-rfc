@@ -49,6 +49,8 @@ _EXPECTED_MODULES = {
     # Impl-6
     "trace",
     "completion",
+    # Impl-8
+    "evaluator",
 }
 
 
@@ -326,3 +328,145 @@ def test_meta_data_directory_traces_present():
     p2 = data_dir / "longctx_longbench_lambda_6_67.csv"
     assert p1.exists() and p1.stat().st_size > 0
     assert p2.exists() and p2.stat().st_size > 0
+
+
+# ============================================================================
+# Impl-8 meta — Evaluator inventory + field lock-in + Comparative baseline 부재 lock-in
+# ============================================================================
+
+def test_meta_evaluator_method_inventory():
+    """Evaluator 의 public method bit-exact: 2 callback + 7 산출 = 9 method."""
+    from puls_sched.evaluator import Evaluator
+    publics = {
+        n for n in dir(Evaluator)
+        if not n.startswith("_") and callable(getattr(Evaluator, n))
+    }
+    expected = {
+        "record_dispatch", "record_admission_tick",
+        "dispatch_trace", "admission_convergence", "idle_fraction",
+        "pim_utilization", "pipeline_efficiency", "acceleration_decomposition",
+        "report",
+    }
+    assert expected.issubset(publics)
+
+
+def test_meta_evaluator_no_absolute_metric_methods():
+    """PLAN §1.2 lock-in — Evaluator 에 절대 metric method (TTFT · TPOT · throughput) 부재."""
+    from puls_sched.evaluator import Evaluator
+    forbidden = {"ttft", "tpot", "throughput", "goodput", "slo"}
+    for name in dir(Evaluator):
+        for f in forbidden:
+            assert f not in name.lower(), f"Evaluator.{name} contains forbidden absolute metric term '{f}'"
+
+
+def test_meta_evaluator_no_baseline_field():
+    """Comparative baseline 부재 — Evaluator field 에 baseline/sarathi/vllm/compare 부재."""
+    from puls_sched.evaluator import Evaluator
+    forbidden = {"baseline", "sarathi", "vllm", "compare"}
+    for field_name in Evaluator.__dataclass_fields__.keys():
+        for f in forbidden:
+            assert f not in field_name.lower(), f"Evaluator.{field_name} contains forbidden term '{f}'"
+
+
+def test_meta_dispatch_event_fields():
+    """DispatchEvent schema lock-in — 6 field."""
+    from puls_sched.evaluator import DispatchEvent
+    assert set(DispatchEvent.__dataclass_fields__.keys()) == {
+        "timestamp", "micro_batch_id", "node_type", "resource", "k_total", "dag_state_snapshot",
+    }
+
+
+def test_meta_admission_snapshot_fields():
+    """AdmissionSnapshot schema lock-in — 9 field."""
+    from puls_sched.evaluator import AdmissionSnapshot
+    assert set(AdmissionSnapshot.__dataclass_fields__.keys()) == {
+        "timestamp", "gpu_idle_fraction", "pim_idle_fraction",
+        "a_cycle", "b_cycle", "ctx_tokens", "spec_admitted", "n", "k_total",
+    }
+
+
+def test_meta_decomposition_cell_fields():
+    """DecompositionCell schema lock-in — 5 field."""
+    from puls_sched.evaluator import DecompositionCell
+    assert set(DecompositionCell.__dataclass_fields__.keys()) == {
+        "source", "cycle_with_source", "cycle_without_source", "ratio", "direction_positive",
+    }
+
+
+def test_meta_ablation_source_enum_4_values():
+    """AblationSource == {F1, F2, F3, F5} — F4 미포함 (ARCH §5.7 precondition lock-in)."""
+    from puls_sched.evaluator import AblationSource
+    assert {s.name for s in AblationSource} == {"F1", "F2", "F3", "F5"}
+
+
+def test_meta_ablation_config_fields():
+    """AblationConfig schema lock-in — D2 정합."""
+    from puls_sched.config import AblationConfig
+    assert set(AblationConfig.__dataclass_fields__.keys()) == {
+        "f1_disabled", "f2_window_capacity_override", "f3_disabled", "f5_disabled",
+    }
+
+
+def test_meta_ablation_config_defaults_all_off():
+    """Default ablation 모든 flag off = 정상 PULS 동작 (backward-compat lock-in)."""
+    from puls_sched.config import AblationConfig
+    ab = AblationConfig()
+    assert ab.f1_disabled is False
+    assert ab.f2_window_capacity_override is None
+    assert ab.f3_disabled is False
+    assert ab.f5_disabled is False
+
+
+def test_meta_time_config_has_decode_attn_fallback():
+    """default_dummy_config().time.gpu_op_time_us 에 'decode_attn_fallback' key 보유 (F1 fallback)."""
+    cfg = default_dummy_config()
+    assert "decode_attn_fallback" in cfg.time.gpu_op_time_us
+
+
+def test_meta_window_capacity_default_3():
+    """InFlightWindow(dag) default capacity == 3 (Impl-1 보존, F2 default lock-in)."""
+    from puls_sched.window import InFlightWindow
+    dag = DAG()
+    w = InFlightWindow(dag)
+    assert w.capacity == 3
+    assert w.DEFAULT_CAPACITY == 3
+
+
+def test_meta_window_capacity_config_driven():
+    """f2_window_capacity_override=1 위 InFlightWindow.capacity == 1 (F2 override path)."""
+    import dataclasses as dc
+    from puls_sched.window import InFlightWindow
+    cfg = default_dummy_config()
+    cfg = dc.replace(cfg, ablation=dc.replace(cfg.ablation, f2_window_capacity_override=1))
+    dag = DAG()
+    w = InFlightWindow(dag, config=cfg)
+    assert w.capacity == 1
+
+
+def test_meta_micro_batch_has_kv_rows_lockstep_field():
+    """MicroBatch.kv_rows_lockstep field (Q8 — F5 ablation signal flow)."""
+    assert "kv_rows_lockstep" in MicroBatch.__dataclass_fields__
+    assert MicroBatch.__dataclass_fields__["kv_rows_lockstep"].type is int
+
+
+def test_meta_micro_batch_spec_has_kv_rows_lockstep_field():
+    """MicroBatchSpec.kv_rows_lockstep field."""
+    assert "kv_rows_lockstep" in MicroBatchSpec.__dataclass_fields__
+
+
+def test_meta_dispatcher_has_on_dispatch_method():
+    """Dispatcher.on_dispatch method (D1 hook API)."""
+    assert hasattr(Dispatcher, "on_dispatch")
+    sig = inspect.signature(Dispatcher.on_dispatch)
+    assert list(sig.parameters.keys()) == ["self", "callback"]
+
+
+def test_meta_scheduler_core_has_on_admission_tick_method():
+    """SchedulerCore.on_admission_tick method (D1 hook API)."""
+    assert hasattr(SchedulerCore, "on_admission_tick")
+
+
+def test_meta_arch_5_7_f4_not_decomposed():
+    """ARCH §5.7 F4 ("not a standalone contribution") — Evaluator decomp 에 F4 enum 부재."""
+    from puls_sched.evaluator import AblationSource
+    assert not any("F4" in s.name for s in AblationSource)
