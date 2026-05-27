@@ -4,6 +4,7 @@ import pytest
 
 from puls_sched.admission import Admission
 from puls_sched.clock import Clock
+from puls_sched.completion import Completion
 from puls_sched.config import default_dummy_config
 from puls_sched.dag import DAG
 from puls_sched.dispatcher import Dispatcher
@@ -100,8 +101,13 @@ def admission(admission_config, request_queue, kv_accountant, idle_telemetry):
 
 
 @pytest.fixture
+def completion(clock, kv_accountant):
+    return Completion(clock=clock, kv_accountant=kv_accountant)
+
+
+@pytest.fixture
 def scheduler_core(dummy_config, clock, event_queue, dag, window, dispatcher,
-                   request_queue, kv_accountant, admission):
+                   request_queue, kv_accountant, admission, layer_state, completion):
     return SchedulerCore(
         config=dummy_config,
         clock=clock,
@@ -112,6 +118,8 @@ def scheduler_core(dummy_config, clock, event_queue, dag, window, dispatcher,
         request_queue=request_queue,
         kv_accountant=kv_accountant,
         admission=admission,
+        layer_state=layer_state,
+        completion=completion,
     )
 
 

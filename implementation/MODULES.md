@@ -48,3 +48,12 @@
 - `admission.py` — *(변경)* `MicroBatchSpec` 에 `kv_rows_total` 필드 추가. `layer1` 산출 시 decode_reqs 의 kv_length 를 합산하여 spec 에 담아 줍니다.
 - `dispatcher.py` — *(의미 변경)* `micro_batches: dict[int, MicroBatch]` 멤버 + `register`/`unregister` API 신설. `_op_time` 의 PIM branch 가 이제 placeholder 가 아닌 *실제 mb.k_total · mb.kv_rows_total* 로 op_time 을 산출합니다 (O4.1 해소). 미등록 mb 의 PIM dispatch 는 raise.
 - `main_loop.py` — *(의미 변경)* `ADMISSION_TICK` body 가 `MicroBatchSpec` → `MicroBatch` 변환 (Q1 — 변환 시점) 후 `dispatcher.register(mb)` 호출 → `window.admit(mb_id)` → `dispatcher.tick()` 의 순서로 진행합니다. spec 의 결정 정보 (k_total · kv_rows_total) 이 dispatcher 까지 유실 없이 흐릅니다.
+
+## Impl-6 — Trace Replayer + Completion Handler + Request Lifecycle Closure
+
+- `trace.py` — Long-ctx production trace (LongBench + 사용자 추가 Poisson(λ) arrival) 를 CSV 그대로 읽어 들이는 *replayer* 입니다. `load(path)` 가 schema 검증 (malformed 5종 fail-fast), `replay(rate)` 가 arrival time scaling 위 Request generator 를 yield (max_tokens 는 trace 의 num_decode_tokens 로 set — Q6 hybrid), `stats()` 가 KV length · arrival interval 분포 통계를 산출합니다. RNG 의존 0 (determinism 자연 보존). 1M-class · mid-ctx schema 는 NotImplementedError("Phase 3") stub.
+- `completion.py` — Request 의 lifecycle 종료를 검출하고 *KV slot 을 회수* 하는 책임자입니다. `check(req, eos_seen=False)` 가 max_tokens 도달 또는 EOS marker 위 True 반환 (idempotent), `finalize(req)` 가 KV release → completion_time 기록 → state → COMPLETED 의 3 단계를 atomic 하게 진행합니다. Q9 책임 분리 — dispatcher 미터치 (window eviction 은 Impl-9 영역).
+- `request.py` — *(변경)* Q10 (b) lifecycle owner 패턴 정합으로 `max_tokens` (종료 임계값), `decoded_count` (현재 decoded 개수, signal 1회 = +1), `completion_time` (finalize 시점 clock time) 3 필드 신설. `decoded_tokens` (기존 list, Impl-1) 과 `decoded_count` (신규 int, Impl-6) 의 의미 분리 — pre-HW mode 의 *count 만 owner* / *실 token id 는 비어 있음* 의 의도된 분리 (Phase 3 시점 통합 검토).
+- `main_loop.py` — *(의미 변경)* `_handle(KERNEL_COMPLETION)` body 에 token decode signal consumer (`_maybe_advance_forward_pass`) 추가. O_PROJ done 검출 → LayerState.advance → L 도달 시 mb.decode_tokens 의 각 req 위 decoded_count +1 + Completion.check → finalize. 다음 token 위 current_layer_index reset (multi-token decode 정합). `SchedulerCore` 에 `layer_state` · `completion` · `in_flight_requests` 3 필드 신설 (Q10 — Request lifecycle owner). ADMISSION_TICK body 가 admitted Request 의 state 를 PENDING → PREFILL 로 transition + in_flight_requests dict 등록.
+
+추가 산출 — `implementation/data/longctx_longbench_lambda_{3_40, 6_67}.csv` (12,279 · 24,054 row, 외부 Vidur 변환 trace 의 self-contained copy).

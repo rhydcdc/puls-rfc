@@ -10,11 +10,13 @@ import pytest
 
 from puls_sched.admission import Admission
 from puls_sched.clock import Clock
+from puls_sched.completion import Completion
 from puls_sched.config import default_dummy_config
 from puls_sched.dag import DAG
 from puls_sched.dispatcher import Dispatcher
 from puls_sched.event import Event, EventType
 from puls_sched.event_queue import EventQueue
+from puls_sched.forward_pass import LayerState
 from puls_sched.idle_telemetry import IdleTelemetry
 from puls_sched.instance import Instance
 from puls_sched.instance_pipeline import InstancePipeline
@@ -53,6 +55,8 @@ def _fresh_core(seed: int | None = None):
     return SchedulerCore(
         config=config, clock=clock, queue=queue, dag=dag, window=window, dispatcher=dispatcher,
         request_queue=rq, kv_accountant=kv, admission=admission,
+        layer_state=LayerState(num_layers=config.model.num_layers),
+        completion=Completion(clock=clock, kv_accountant=kv),
     )
 
 

@@ -25,6 +25,10 @@ class Request:
     kv_length: int = 0
     arrival_time: float = 0.0
     state: RequestState = RequestState.PENDING
+    # ---- Impl-6 lifecycle fields (Q6 · Q10 — Request = lifecycle owner) ----
+    max_tokens: int = 0
+    decoded_count: int = 0
+    completion_time: float | None = None
 
     def transition_to(self, new_state: RequestState) -> None:
         if new_state not in _VALID_TRANSITIONS[self.state]:

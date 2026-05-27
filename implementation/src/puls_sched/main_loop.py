@@ -1,14 +1,18 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from puls_sched.admission import Admission, MicroBatchSpec
 from puls_sched.clock import Clock
+from puls_sched.completion import Completion
 from puls_sched.config import Config
 from puls_sched.dag import DAG
 from puls_sched.dispatcher import Dispatcher
 from puls_sched.event import Event, EventType
 from puls_sched.event_queue import EventQueue
+from puls_sched.forward_pass import LayerState
 from puls_sched.kv_accountant import KVAccountant
 from puls_sched.micro_batch import MicroBatch
+from puls_sched.node import NodeType
+from puls_sched.request import Request, RequestState
 from puls_sched.request_queue import RequestQueue
 from puls_sched.window import InFlightWindow
 
@@ -24,6 +28,10 @@ class SchedulerCore:
     request_queue: RequestQueue
     kv_accountant: KVAccountant
     admission: Admission
+    # ---- Impl-6 — Q5 (token decode signal consumer) + Q10 (Request lifecycle owner) ----
+    layer_state: LayerState
+    completion: Completion
+    in_flight_requests: dict[int, Request] = field(default_factory=dict)
     _next_mb_id: int = 0
 
     def step(self) -> bool:
@@ -37,6 +45,8 @@ class SchedulerCore:
         match event.type:
             case EventType.KERNEL_COMPLETION:
                 self.dispatcher.on_completion(event)
+                # Impl-6 (Q5) — O_PROJ done 분기 → LayerState.advance → L 도달 시 token decode signal
+                self._maybe_advance_forward_pass(event)
                 self.dispatcher.tick()
             case EventType.REQUEST_ARRIVAL:
                 req = event.payload["request"]
@@ -47,16 +57,51 @@ class SchedulerCore:
                     return
                 mb_id = self._next_mb_id
                 self._next_mb_id += 1
-                # Impl-5 (Q1) — spec → MicroBatch 변환. decode_tokens · prefill_chunk 의 실 token data 는
-                # Impl-6 영역 (token sampling + prefill chunk schedule). 본 단계는 spec 의 결정 정보 운반.
                 mb = MicroBatch(
                     id=mb_id,
                     k_total=spec.k_total,
                     kv_rows_total=spec.kv_rows_total,
+                    # Q10 (b) — decode_tokens 는 dispatch metadata (placeholder int value). Request 가 lifecycle owner.
+                    decode_tokens={req.id: 0 for req in spec.decode_requests},
                 )
+                # Impl-6 (Q10) — Request lifecycle owner = SchedulerCore.in_flight_requests
+                for req in spec.decode_requests:
+                    if req.state == RequestState.PENDING:
+                        req.transition_to(RequestState.PREFILL)
+                    self.in_flight_requests[req.id] = req
                 self.dispatcher.register(mb)
                 self.window.admit(mb_id)
                 self.dispatcher.tick()
+
+    def _maybe_advance_forward_pass(self, event: Event, eos_seen: bool = False) -> None:
+        """KERNEL_COMPLETION (O_PROJ done) → LayerState.advance → L 도달 시 token decode signal.
+
+        Q5 — consumer 는 main_loop 영역. Dispatcher / forward_pass 침범 0.
+        Q6 (c) — eos_seen=True 명시 시 EOS branch 발동 (외부 caller / test fixture path).
+        """
+        node_type = event.payload.get("node_type")
+        if node_type is not NodeType.O_PROJ:
+            return
+        mb_id = event.payload.get("micro_batch_id")
+        mb = self.dispatcher.micro_batches.get(mb_id) if mb_id is not None else None
+        if mb is None:
+            return  # defensive — mb already unregistered
+        token_signal = self.layer_state.advance(mb)
+        if not token_signal:
+            return
+        # ---- L 도달 — token decode signal ----
+        for req_id in list(mb.decode_tokens.keys()):
+            req = self.in_flight_requests.get(req_id)
+            if req is None:
+                continue  # already completed — defensive (Q9 책임 분리 의 correctness invariant, R7)
+            req.decoded_count += 1
+            if req.state == RequestState.PREFILL:
+                req.transition_to(RequestState.DECODE)
+            if self.completion.check(req, eos_seen=eos_seen):
+                self.completion.finalize(req)
+                self.in_flight_requests.pop(req_id, None)
+        # 다음 token 의 forward pass 위 reset (multi-token decode 정합)
+        mb.current_layer_index = 0
 
     def _invoke_admission(self, event: Event) -> MicroBatchSpec | None:
         t_proj = event.payload.get("t_proj", 0.0)

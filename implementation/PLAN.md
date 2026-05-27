@@ -363,29 +363,35 @@ Impl-1~9 (dummy time model 위) 가 산출 *가능 / 불가능 / 스코프 외* 
 
 ---
 
-### Impl-6 — Trace Replayer + Completion Handler
+### Impl-6 — Trace Replayer + Completion Handler ✓ (commit pending)
 
 > **보유 long-ctx production trace 시범 ingest.** Impl-9 acceptance 까지는 synthetic trace 만으로 자족 가능하나, 본 phase 에서 **보유 trace 를 1 회 ingest → schema 설계 정합 + 분포 sanity check 권고**. Real workload 의 본격 sweep 사용은 Impl-10 이지만, schema reading + parsing 검증은 Impl-6 시점이 자연스러움. Vidur 작업 시 변환해 둔 원본 데이터 재활용 가능 (Vidur-specific wrapping 제거 + 우리 `TraceReplayer` schema 로 adapt).
 
 **Implementation:**
-- [ ] `TraceReplayer.load(path)` — long-ctx production trace ingest
-- [ ] `TraceReplayer.replay(rate_multiplier)` — arrival time scaling
-- [ ] KV length 분포 · arrival rate 통계 산출 (sanity check)
-- [ ] 1M-class benchmark dataset adapter (long-doc) — Phase 3 영역
-- [ ] Mid-ctx production chat trace adapter — Phase 3 영역
-- [ ] `Completion.check(request, decoded_token)` — EOS 토큰 검출 또는 max_tokens 도달 검사
-- [ ] `Completion.finalize(request)` — KV slot 회수 (`kv_accountant.release`) + completion timestamp 기록 + state → completed
+- [x] `TraceReplayer.load(path)` — long-ctx production trace ingest (CSV schema, Q2 — longbench_csv only)
+- [x] `TraceReplayer.replay(rate_multiplier)` — arrival time scaling + Request generator (max_tokens = num_decode_tokens, Q6 hybrid)
+- [x] KV length 분포 · arrival rate 통계 산출 (`stats()` — TraceStats dataclass)
+- [x] 1M-class benchmark dataset adapter (long-doc) — Phase 3 영역 (NotImplementedError stub, Q8)
+- [x] Mid-ctx production chat trace adapter — Phase 3 영역 (NotImplementedError stub, Q8)
+- [x] `Completion.check(req, eos_seen=False)` — EOS marker (Q6 hybrid) 또는 max_tokens 도달 검사 (idempotent)
+- [x] `Completion.finalize(request)` — KV slot 회수 (`kv_accountant.release`, Q7 직후) + completion_time 기록 + state → COMPLETED
+- [x] `Request` lifecycle field 신설 — `max_tokens` · `decoded_count` · `completion_time` (Q10 (b) Request = lifecycle owner)
+- [x] `SchedulerCore._maybe_advance_forward_pass` — KERNEL_COMPLETION(O_PROJ) → LayerState.advance → L 도달 시 token decode signal consumer (Q5 — main_loop 영역)
+- [x] `implementation/data/longctx_longbench_lambda_{3_40, 6_67}.csv` 신설 — 외부 Vidur 변환 trace 의 self-contained copy (Q1)
 
-**Unit Tests:**
-- [ ] `TraceReplayer.load` — fixture trace 파일 schema 검증 + parsing round-trip
-- [ ] `TraceReplayer.replay` — arrival time scaling (rate_multiplier × 2 → arrival interval / 2)
-- [ ] KV length 분포 — 원 trace 와 KS test p > 0.05
-- [ ] Arrival rate 통계 — 원 trace 와 평균 · 분산 ±5% 이내
-- [ ] Determinism — 동일 seed → 동일 replay 시퀀스
-- [ ] `Completion.check` — EOS 토큰 입력 시 True; max_tokens 도달 시 True; 그 외 False
-- [ ] `Completion.finalize` — 회수 후 `kv_accountant.remaining` 증가; completion_time 기록 정확
+**Unit Tests:** (총 170 신규 passed; 기존 482 + 신규 170 = **652** — `implementation/plans/impl_6.md` 참조)
+- [x] `TraceReplayer.load` — fixture trace 파일 schema 검증 + parsing round-trip + 5 malformed cross-product fail-fast + Phase 3 stub raise (Q8) + 실 trace (12,279 + 24,054 row) ingest 정합
+- [x] `TraceReplayer.replay` — arrival time scaling (rate sweep + extreme value R10) + max_tokens / kv_length / prompt_tokens 정합 + R6 generator one-shot semantic
+- [x] KV length 분포 — load → replay 자기 일치 (D=0 자명) + R1 실 trace stats 값 hardcoded lock-in (regression detection)
+- [x] Arrival rate 통계 — stats() 의 mean / std 산식 정합 + R1 실 trace 값 lock-in
+- [x] Determinism — 동일 path 1000-iter load bit-exact + seed independence (RNG 의존 0)
+- [x] `Completion.check` — max_tokens boundary (above · equal · below · zero) + EOS branch (Q6 hybrid) + 5×3×2 cross-product 전수 + idempotent (COMPLETED True) + pure (no mutation)
+- [x] `Completion.finalize` — KV release (Q7) + completion_time (clock.now) + state → COMPLETED + atomic (release 실패 시 state 보존) + double finalize raise + PENDING raise + 50-roundtrip 누수 0
+- [x] **Cross-module integration** (R3·R4·R7 보강) — trace → admission → register → dispatch → completion → release 진정한 chain + 50/100-req lifecycle KV no-leak + 실 trace capacity boundary (default reject + bumped admits) + finalized req mb 잔존의 correctness invariant
+- [x] **Multi-mb stress** (R8 보강) — (I-F1)~(I-F6) 6 invariant 위 100-roundtrip + 50-mb decoded_count signal + completion_time single-set + in_flight_requests no orphan + Q10 mb.decode_tokens 불변 + composite seed sweep (4 cell)
+- [x] **Meta-test + signature divergence lock-in** — Q1~Q10 결정 영구 기록 (TraceReplayer RNG 부재 · Completion dispatcher 부재 · Request lifecycle fields · SchedulerCore in_flight_requests · supported/Phase-3 schemas inventory · data directory presence · ARCH §3.3 KV resident invariant)
 
-**Acceptance:** Replay 출력의 KV length 분포 + arrival rate 통계가 원 trace 와 일치. Completion 후 KV slot 누수 0.
+**Acceptance:** ✓ Replay 출력의 KV length + arrival rate 통계 정합 (R1 lock-in). ✓ Completion 후 KV slot 누수 0 (50/100 req lifecycle · 실 trace 100 req). ✓ Token decode signal chain 정합 (R2 EOS path + R5 multi-token step-by-step). ✓ Impl-5 carry-over O5.6 해소 (Request = lifecycle owner, MicroBatch.decode_tokens 는 dispatch metadata placeholder 유지). ✓ ARCH §3.3 · §8 literal lock-in. ✓ Q1~Q10 결정 정합 lock-in (9 signature meta-tests). ✓ PLAN §0 C1·C3·C5 prefigure (50-req all-completed + KV no-leak + deterministic seed). ✓ 모든 unit test green (652 passed, regression 0). **정량 fidelity (외부 reference distribution 과의 KS test) 는 Impl-10 deferred (§0.5 정합, §7 O6.9)**.
 
 ---
 

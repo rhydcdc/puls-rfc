@@ -132,3 +132,83 @@ def test_layer_state_advance_signature():
     """LayerState.advance signature `(self, mb)` → bool (token decode signal)."""
     params = list(inspect.signature(LayerState.advance).parameters.keys())
     assert params == ["self", "mb"]
+
+
+# =========================================================================
+# Impl-6 signature divergence lock-in
+# =========================================================================
+
+def test_trace_replayer_no_rng_field():
+    """Q4 — TraceReplayer 에 RNG / seed / random_state field 부재 (determinism 자연 보존)"""
+    from puls_sched.trace import TraceReplayer
+    fields = set(TraceReplayer.__dataclass_fields__.keys())
+    forbidden = {"rng", "seed", "random_state", "rand"}
+    assert not (fields & forbidden), (
+        f"TraceReplayer 가 RNG field 보유: {fields & forbidden}. "
+        f"Q4 정합 — pure stateless, RNG 의존 0."
+    )
+
+
+def test_trace_replayer_load_static_method():
+    """load → instance 패턴 — staticmethod 로 노출"""
+    from puls_sched.trace import TraceReplayer
+    # __dict__ 접근으로 staticmethod 확인 (dataclass 가 wrap 안 함)
+    assert isinstance(TraceReplayer.__dict__["load"], staticmethod)
+
+
+def test_trace_replay_signature():
+    """TraceReplayer.replay signature `(self, rate_multiplier=1.0)`"""
+    from puls_sched.trace import TraceReplayer
+    params = list(inspect.signature(TraceReplayer.replay).parameters.keys())
+    assert params == ["self", "rate_multiplier"]
+
+
+def test_completion_check_signature():
+    """Completion.check signature `(self, req, eos_seen=False)` — Q6 EOS branch lock-in"""
+    from puls_sched.completion import Completion
+    sig = inspect.signature(Completion.check)
+    params = list(sig.parameters.keys())
+    assert params == ["self", "req", "eos_seen"]
+    assert sig.parameters["eos_seen"].default is False
+
+
+def test_completion_finalize_signature():
+    """Completion.finalize signature `(self, req)` — dispatcher arg 부재 (Q9)"""
+    from puls_sched.completion import Completion
+    params = list(inspect.signature(Completion.finalize).parameters.keys())
+    assert params == ["self", "req"]
+    assert "dispatcher" not in params
+    assert "mb" not in params
+
+
+def test_completion_no_dispatcher_field():
+    """Q9 책임 분리 — Completion field 에 dispatcher 부재"""
+    from puls_sched.completion import Completion
+    fields = set(Completion.__dataclass_fields__.keys())
+    forbidden = {"dispatcher", "micro_batch", "mb"}
+    assert not (fields & forbidden), (
+        f"Completion 이 dispatcher field 보유: {fields & forbidden}. "
+        f"Q9 책임 분리 위반."
+    )
+
+
+def test_request_lifecycle_owner_pattern():
+    """Q10 (b) — Request 가 decoded_count + max_tokens + completion_time 보유"""
+    from puls_sched.request import Request
+    fields = Request.__dataclass_fields__
+    assert "decoded_count" in fields
+    assert "max_tokens" in fields
+    assert "completion_time" in fields
+
+
+def test_main_loop_token_decode_signal_method():
+    """Q5 — SchedulerCore._maybe_advance_forward_pass 존재"""
+    from puls_sched.main_loop import SchedulerCore
+    assert hasattr(SchedulerCore, "_maybe_advance_forward_pass")
+
+
+def test_main_loop_in_flight_requests_dict():
+    """Q10 lifecycle owner — SchedulerCore.in_flight_requests field 존재"""
+    from puls_sched.main_loop import SchedulerCore
+    fields = SchedulerCore.__dataclass_fields__
+    assert "in_flight_requests" in fields

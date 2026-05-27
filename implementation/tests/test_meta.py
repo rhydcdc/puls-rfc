@@ -46,6 +46,9 @@ _EXPECTED_MODULES = {
     "nvlink",
     "instance_pipeline",
     "forward_pass",
+    # Impl-6
+    "trace",
+    "completion",
 }
 
 
@@ -232,3 +235,94 @@ def test_meta_arch_3_4_inter_instance_data_decode_shape():
     """ARCH §3.4 표 — A → B: O projection output [B × hidden]. NVLinkTransfer.time signature 정합."""
     sig = inspect.signature(NVLinkTransfer.time)
     assert "tensor_shape" in sig.parameters
+
+
+# ============================================================================
+# Impl-6 meta — Q lock-in + ARCH §3.3 / §8 literal + data directory
+# ============================================================================
+
+def test_meta_request_has_impl6_lifecycle_fields():
+    """Q10 (b) — Request 가 lifecycle owner (max_tokens, decoded_count, completion_time)"""
+    from puls_sched.request import Request
+    fields = Request.__dataclass_fields__
+    assert "max_tokens" in fields
+    assert "decoded_count" in fields
+    assert "completion_time" in fields
+    assert fields["max_tokens"].type is int
+    assert fields["decoded_count"].type is int
+
+
+def test_meta_trace_entry_fields():
+    from puls_sched.trace import TraceEntry
+    assert set(TraceEntry.__dataclass_fields__.keys()) == {
+        "arrived_at", "num_prefill_tokens", "num_decode_tokens"
+    }
+
+
+def test_meta_trace_replayer_methods():
+    from puls_sched.trace import TraceReplayer
+    publics = {n for n in dir(TraceReplayer)
+               if not n.startswith("_") and callable(getattr(TraceReplayer, n))}
+    # entries 는 field — load · replay · stats 만 public method
+    assert {"load", "replay", "stats"}.issubset(publics)
+
+
+def test_meta_trace_supported_schemas_longbench_only():
+    """Q2 lock-in — longbench_csv 만 지원"""
+    from puls_sched.trace import _SUPPORTED_SCHEMAS
+    assert _SUPPORTED_SCHEMAS == ("longbench_csv",)
+
+
+def test_meta_trace_phase_3_schemas_inventory():
+    """Q8 lock-in — 1M-class + mid-ctx 가 Phase 3 stub"""
+    from puls_sched.trace import _PHASE_3_SCHEMAS
+    assert _PHASE_3_SCHEMAS == ("vidur_1m_class", "mooncake_chat")
+
+
+def test_meta_completion_methods():
+    from puls_sched.completion import Completion
+    publics = {n for n in dir(Completion)
+               if not n.startswith("_") and callable(getattr(Completion, n))}
+    assert {"check", "finalize"}.issubset(publics)
+
+
+def test_meta_completion_class_fields():
+    """Q9 책임 분리 — Completion 에 dispatcher 없음"""
+    from puls_sched.completion import Completion
+    assert set(Completion.__dataclass_fields__.keys()) == {"clock", "kv_accountant"}
+
+
+def test_meta_scheduler_core_has_layer_state_field():
+    """Q5 · Q10 lifecycle owner 패턴"""
+    fields = SchedulerCore.__dataclass_fields__
+    assert "layer_state" in fields
+    assert "completion" in fields
+    assert "in_flight_requests" in fields
+
+
+def test_meta_arch_3_3_kv_resident_invariant():
+    """ARCH §3.3 — KV admit ↔ release round-trip 의 보존성"""
+    from puls_sched.kv_accountant import KVAccountant
+    from puls_sched.request import Request
+    kv = KVAccountant(capacity=1000)
+    req = Request(id=0, prompt_tokens=[], kv_length=100)
+    kv.admit(req)
+    assert kv.remaining == 900
+    kv.release(req)
+    assert kv.remaining == 1000
+
+
+def test_meta_arch_8_trace_area_longctx_only():
+    """ARCH §8 — Impl-6 의 trace 영역은 long-ctx 만 (1M / mid-ctx 부재)"""
+    from puls_sched.trace import _SUPPORTED_SCHEMAS, _PHASE_3_SCHEMAS
+    assert "vidur_1m_class" not in _SUPPORTED_SCHEMAS
+    assert "mooncake_chat" not in _SUPPORTED_SCHEMAS
+
+
+def test_meta_data_directory_traces_present():
+    """Q1 lock-in — implementation/data/ 의 두 trace 파일 존재 + 비어있지 않음"""
+    data_dir = Path(__file__).parent.parent / "data"
+    p1 = data_dir / "longctx_longbench_lambda_3_40.csv"
+    p2 = data_dir / "longctx_longbench_lambda_6_67.csv"
+    assert p1.exists() and p1.stat().st_size > 0
+    assert p2.exists() and p2.stat().st_size > 0
