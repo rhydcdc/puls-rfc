@@ -7,6 +7,7 @@ from puls_sched.event import Event, EventType
 from puls_sched.event_queue import EventQueue
 from puls_sched.invariants import check_I1, check_I2, check_I3, check_I4, check_I5
 from puls_sched.node import Node, NodeState, NodeType
+from puls_sched.pim_emulator import PIMExecutor
 
 
 GPU_NODE_TYPES: frozenset[NodeType] = frozenset(
@@ -27,6 +28,7 @@ class Dispatcher:
     clock: Clock
     queue: EventQueue
     dag: DAG
+    pim_executor: PIMExecutor
     gpu_busy: bool = False
     pim_busy: bool = False
 
@@ -61,8 +63,12 @@ class Dispatcher:
     def _op_time(self, node: Node) -> float:
         if node.type in GPU_NODE_TYPES:
             return self.config.time.gpu_op_time_us[node.type.name.lower()]
-        # PIM regime branching (FP8 / FP16 selection) is Impl-4; here, fixed FP8 lookup.
-        return self.config.time.pim_tile_time_ns["FP8"]
+        # PIM (decode-attn). Impl-4 형식 wiring only — args 는 config placeholder default.
+        # 진짜 signal flow (MicroBatch 의 k_total · kv_rows_total 필드) 는 Impl-5 영역.
+        return self.pim_executor.op_time(
+            k_channels=self.config.admission.k_total_max,
+            kv_rows_total=self.config.time.rtl_fsm_tile_rows,
+        )
 
     def dispatch_gpu(self, node: Node) -> None:
         check_I4(self.gpu_busy)

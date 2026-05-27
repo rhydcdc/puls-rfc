@@ -2,11 +2,12 @@ import inspect
 from pathlib import Path
 
 import puls_sched
-from puls_sched.config import AdmissionConfig, default_dummy_config
+from puls_sched.config import AdmissionConfig, ModelConfig, TimeConfig, default_dummy_config
 from puls_sched.dag import DAG
 from puls_sched.event import EventType
 from puls_sched.main_loop import SchedulerCore
 from puls_sched.node import NodeType
+from puls_sched.pim_emulator import PIMExecutor
 from puls_sched.request import RequestState
 
 
@@ -31,6 +32,8 @@ _EXPECTED_MODULES = {
     "deadband",
     "k_total",
     "admission",
+    # Impl-4
+    "pim_emulator",
 }
 
 
@@ -113,3 +116,43 @@ def test_meta_main_loop_handles_all_event_types():
         assert f"EventType.{etype.name}" in source, (
             f"_handle missing case for {etype.name}"
         )
+
+
+# =========================================================================
+# Impl-4 — PLAN literal meta-test
+# =========================================================================
+
+def test_meta_model_config_has_kv_precision_field():
+    """ModelConfig.kv_precision 필드 존재 + str 타입 (Q1, ARCH §3.1)."""
+    fields = ModelConfig.__dataclass_fields__
+    assert "kv_precision" in fields
+    assert fields["kv_precision"].type is str
+
+
+def test_meta_time_config_has_rtl_fsm_tile_rows_field():
+    """TimeConfig.rtl_fsm_tile_rows 필드 존재 + int 타입 (ARCH §3.1 literal)."""
+    fields = TimeConfig.__dataclass_fields__
+    assert "rtl_fsm_tile_rows" in fields
+    assert fields["rtl_fsm_tile_rows"].type is int
+
+
+def test_meta_time_config_has_broadcast_latency_field():
+    """TimeConfig.pim_broadcast_latency_ns_cross_gpu 필드 존재 + float 타입 (Q4)."""
+    fields = TimeConfig.__dataclass_fields__
+    assert "pim_broadcast_latency_ns_cross_gpu" in fields
+    assert fields["pim_broadcast_latency_ns_cross_gpu"].type is float
+
+
+def test_meta_pim_executor_method_inventory():
+    """PIMExecutor 의 public method set bit-exact lock-in (Q7·Q8·Q9 정합)."""
+    public_methods = {
+        name for name, _ in inspect.getmembers(PIMExecutor, predicate=inspect.isfunction)
+        if not name.startswith("_")
+    }
+    assert public_methods == {"tile_time", "op_time", "load_ramulator2_cycles"}
+
+
+def test_meta_pim_tile_time_dict_has_both_regimes():
+    """config.time.pim_tile_time_ns 가 FP8 + FP16 양 regime key 보유 (PLAN §3 literal)."""
+    cfg = default_dummy_config()
+    assert set(cfg.time.pim_tile_time_ns.keys()) == {"FP8", "FP16"}

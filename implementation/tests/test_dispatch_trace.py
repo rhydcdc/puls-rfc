@@ -22,6 +22,7 @@ from puls_sched.idle_telemetry import IdleTelemetry
 from puls_sched.kv_accountant import KVAccountant
 from puls_sched.main_loop import SchedulerCore
 from puls_sched.node import NodeState, NodeType
+from puls_sched.pim_emulator import PIMExecutor
 from puls_sched.request_queue import RequestQueue
 from puls_sched.window import InFlightWindow
 
@@ -32,13 +33,17 @@ def _make_trace_fixture():
         base.time,
         gpu_op_time_us={"qkv": 1.0, "prefill_attn": 1.0, "o_proj": 1.0},
         pim_tile_time_ns={"FP8": 3.0, "FP16": 6.0},  # PIM > GPU for §6.5 ordering
+        pim_broadcast_latency_ns_cross_gpu=0.0,  # ordering preservation 위 broadcast 분리
     )
     config = dataclasses.replace(base, time=time_config)
     clock = Clock()
     queue = EventQueue(clock)
     dag = DAG()
     window = InFlightWindow(dag)
-    dispatcher = Dispatcher(config=config, clock=clock, queue=queue, dag=dag)
+    pim_executor = PIMExecutor(config=config)
+    dispatcher = Dispatcher(
+        config=config, clock=clock, queue=queue, dag=dag, pim_executor=pim_executor,
+    )
     request_queue = RequestQueue(capacity=config.admission.request_queue_capacity)
     kv_accountant = KVAccountant(capacity=config.admission.kv_capacity_aggregate)
     admission = Admission(

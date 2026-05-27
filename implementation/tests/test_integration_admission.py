@@ -18,6 +18,7 @@ from puls_sched.invariants import (
 from puls_sched.kv_accountant import KVAccountant
 from puls_sched.main_loop import SchedulerCore
 from puls_sched.node import NodeState, NodeType
+from puls_sched.pim_emulator import PIMExecutor
 from puls_sched.request import Request
 from puls_sched.request_queue import RequestQueue
 from puls_sched.window import InFlightWindow
@@ -29,7 +30,10 @@ def _make_core():
     queue = EventQueue(clock)
     dag = DAG()
     window = InFlightWindow(dag)
-    dispatcher = Dispatcher(config=config, clock=clock, queue=queue, dag=dag)
+    pim_executor = PIMExecutor(config=config)
+    dispatcher = Dispatcher(
+        config=config, clock=clock, queue=queue, dag=dag, pim_executor=pim_executor,
+    )
     rq = RequestQueue(capacity=config.admission.request_queue_capacity)
     kv = KVAccountant(capacity=config.admission.kv_capacity_aggregate)
     admission = Admission(

@@ -31,3 +31,9 @@
 - `k_total.py` — `kTotalDecider.solve` — 9-step dial {0, 256, ..., 2048} 에서 `t_PIM(k, N) ≤ t_proj` 를 만족하는 *최대* k 선택. 무 feasible 시 `over_budget=True` signal (admission escalation 트리거).
 - `admission.py` — `Admission.layer1` 이 RequestQueue 에서 KV capacity 허용 한도까지 req 를 모아 → balance (inter-AB · intra-A) → mfu_floor clamp → k_total 결정 → `MicroBatchSpec` 산출. ARCH §6.4 admission 표 정합.
 - `main_loop.py` — *(의미 변경)* `_handle` 의 `REQUEST_ARRIVAL` (RequestQueue push), `ADMISSION_TICK` (admission.layer1 호출 → 결과 spec 으로 InFlightWindow.admit → Dispatcher.tick) case body 채움. `SchedulerCore` 에 `request_queue` · `kv_accountant` · `admission` 멤버 + `_next_mb_id` allocator 추가.
+
+## Impl-4 — PIM Executor Emulator
+
+- `config.py` — *(변경)* PIM 관련 placeholder 3 개 추가. KV 캐시를 FP8 로 저장할지 FP16 로 저장할지 (모델 단위 시스템 설정), PIM 한 타일의 행 수 (RTL 합성으로 확정된 32 행), 그리고 8 GPU 가 같이 일할 때 추가로 드는 통신 시간을 보관합니다.
+- `pim_emulator.py` — 한 번의 PIM 어텐션 연산이 *얼마나 걸리는지* 알려주는 시간 계산기입니다. "지금 PIM 으로 쓰는 채널 수" 와 "이번 batch 의 KV row 합" 두 가지만 주면 op time 을 즉시 산출해 줍니다. 채널 수가 한 GPU 의 채널 수보다 크면 (= 8 GPU 협력) 통신 시간도 더해 줍니다. Ramulator2 가 외부에서 미리 계산해 둔 cycle 데이터를 JSON 으로 읽어 들이는 로더도 같이 보유합니다 (실데이터 ingest 는 Impl-10).
+- `dispatcher.py` — *(의미 변경)* PIM 노드 dispatch 시 *얼마나 걸릴지* 의 시간 산출 책임을 `pim_emulator` 에게 위임합니다. 이전엔 고정 lookup 한 값이었던 PIM op time 이, 이제 PIMExecutor 가 채널 수 · KV row 수 기반으로 계산해 돌려줍니다. 단 dispatch 시점에 그 두 정보가 어디서 오는지의 *진짜 흐름* 은 Impl-5 영역 — 지금은 config 의 placeholder 값을 그대로 씁니다.

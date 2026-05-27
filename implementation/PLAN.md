@@ -298,26 +298,32 @@ Impl-1~9 (dummy time model 위) 가 산출 *가능 / 불가능 / 스코프 외* 
 
 ---
 
-### Impl-4 — PIM Executor Emulator
+### Impl-4 — PIM Executor Emulator ✓ (commit pending)
+
+> **Signature divergence note.** PLAN 초기 signature `op_time(k_channels, N_decode, N_kv_avg)` 가 ARCH §3.1 (FSM cycle structure invariant) · §3.4 (KV-row sharding exact) 정확 반영 후 `op_time(k_channels, kv_rows_total)` 로 갱신 (§0 iterative discovery 정합). `dispatch` 메서드는 ARCH §3.5.2 (no separate synchronization mechanism) 정합으로 *전면 미구현* — PIMExecutor 는 stateless 시간 계산기, dispatch agent 아님 (dispatcher 가 직접 KERNEL_COMPLETION event push).
 
 **Implementation:**
-- [ ] `PIMExecutor.tile_time(regime)` — FP8 (compute-bound) / FP16 (load-bound) regime 분기 → tile-level cycle 산출
-- [ ] `PIMExecutor.op_time(k_channels, N_decode, N_kv_avg)` — SP-PIM aggregate (Q-replicate + KV-row sharding) → op-level time
-- [ ] `PIMExecutor.dispatch(node)` — blocking event 발사; completion timestamp = current + op_time
-- [ ] Ramulator2 cycle 데이터 loader (JSON / CSV ingest) — **loader 로직만 구현. 실제 Phase 0 Ramulator2 HBM4 추정 cycle 의 ingest 는 Impl-10 영역. Impl-4 단계의 dev/test 는 fixture dummy 데이터 사용 (§0.5 Numeric Value Policy 정합)**
-- [ ] SP-PIM cross-GPU lock-step cooperation overhead model (8 GPU broadcast latency) — **로직만, latency 값은 config placeholder dummy**
-- [ ] FSM determinism 보장 — jitter ±0, 동일 입력 → 동일 cycle count
+- [x] `PIMExecutor.tile_time()` — `config.model.kv_precision` 기반 regime lookup (FP8 / FP16). System-wide 결정 (ARCH §3.1 정합)
+- [x] `PIMExecutor.op_time(k_channels, kv_rows_total)` — SP-PIM aggregate (Q-replicate + KV-row sharding). 단일 ceil 산식 `ceil(kv_rows_total / (k × rtl_fsm_tile_rows)) × tile_time + broadcast` (ARCH §3.4 정합, Hermite identity 위 두 단계 ceil 과 수학적 등가). batch dim 무관 (ARCH §3.1 FSM cycle invariance)
+- [x] Ramulator2 cycle 데이터 loader (JSON minimal schema) — staticmethod `load_ramulator2_cycles(path)`. 5 malformed case fail-fast. **실 Ramulator2 HBM4 cycle ingest 는 Impl-10 영역. Impl-4 는 fixture dummy + schema 안전성만 (§0.5 정합)**
+- [x] SP-PIM cross-GPU lock-step cooperation overhead model — Binary `k > k_per_gpu_max` (= 256, ARCH §3.2 literal) 시 `pim_broadcast_latency_ns_cross_gpu` 가산. **값은 config placeholder dummy**
+- [x] FSM determinism — jitter ±0, pure function (ARCH §3.5.2 Computed Wait)
+- [x] `dispatcher.py` PIM branch — `pim_executor.op_time(k=k_max, rows=tile_rows)` placeholder default args 형식 wiring (진짜 signal flow 는 Impl-5)
 
-**Unit Tests:**
-- [ ] `PIMExecutor.tile_time` — FP8 vs FP16 regime 의 cycle ratio ≈ 2 (§3.1, §6.6 정합)
-- [ ] `PIMExecutor.op_time` — k_channels sweep 에서 monotonic 감소 (KV-row sharding 정합)
-- [ ] `PIMExecutor.op_time` — N_kv_avg sweep 에서 monotonic 증가 (KV 길이 비례)
-- [ ] `PIMExecutor.dispatch` — completion timestamp = current_time + op_time (deterministic)
-- [ ] Ramulator2 loader — fixture JSON / CSV 위에서 schema 검증 + cycle field round-trip
-- [ ] SP-PIM broadcast overhead — k_total = 2048 (cross-GPU) vs k_per_gpu = 256 (single-GPU only) 시간 차이가 broadcast latency 만큼
-- [ ] FSM determinism — 동일 입력 1000 회 호출 → bit-exact cycle count (jitter ±0)
+**Unit Tests:** (총 94 신규 passed; 기존 221 + 신규 94 = 315 — `implementation/plans/impl_4.md` 참조)
+- [x] `tile_time` — FP8 / FP16 regime cross-product lookup 정합 (`pim_executor_fp16` fixture 위 dataclasses.replace) + ratio 2× property (ARCH §6.6 placeholder)
+- [x] `op_time` — k_channels sweep monotonic 비증가 (cross-GPU 영역 broadcast 분리) + kv_rows_total sweep monotonic 비감소 + KV-row sharding ratio property (k 2× → per_channel 1/2)
+- [x] `op_time` — batch dim invariance (1) signature inspection (N_decode 부재 구조 강제) + (2) 행동 sweep parametrize (n_decode ∈ {1, 8, 64, 256, 1024, 4096}) bit-exact 동일 + (3) Hermite identity 100 random sample 위 단일 ceil ↔ 두 단계 ceil 수학 등가
+- [x] Broadcast overhead — k=256 vs k=257 boundary exact diff == `pim_broadcast_latency_ns_cross_gpu` + cross-GPU 영역 (512, 1024, 1536, 2048) constant + single-GPU 영역 (1, 32, 64, 128, 256) zero
+- [x] Ramulator2 loader — valid round-trip + 5 malformed (empty / non-list / missing field / wrong type regime · tile_cycle / negative cycle / duplicate regime / file not found / non-dict entry) fail-fast
+- [x] FSM determinism — 1000-call bit-exact + multi-instance bit-exact + RNG independence
+- [x] ARCH literal — §3.1 (tile_rows=32) · §3.2 (256 per-GPU) · §3.4 (2048 aggregate) · §6.6 (ratio 2×) · §5.1 (k=0 → 0.0)
+- [x] Cross-module: `k_total.solve` + real PIMExecutor.op_time bind (closure injection) — max feasible + only k=0 feasible + monotonic in kv_rows + dial stack-granularity + determinism 1000-call + **n_decode sweep invariance (Q12 cross-module 행동 검증)**
+- [x] Cross-module: dispatcher PIM branch wiring — `_op_time` ↔ `pim_executor.op_time` bit-exact + ARCH §3.5.2 Computed Wait timestamp 정합
+- [x] Meta-test signature divergence (PLAN-code 정합 lock-in) — op_time params bit-exact `{self, k_channels, kv_rows_total}` + no regime arg + no dispatch method + no clock/queue field
+- [x] Meta-test PLAN literal — `_EXPECTED_MODULES` 에 `pim_emulator` + ModelConfig.kv_precision · TimeConfig.rtl_fsm_tile_rows · pim_broadcast_latency_ns_cross_gpu 필드 정합 + PIMExecutor public method inventory bit-exact + pim_tile_time_ns 양 regime key
 
-**Acceptance:** FP8 / FP16 regime 분기 로직이 결정론적 (동일 입력 → 동일 regime 선택). Tile time 출력이 config `pim_tile_time` placeholder 와 정확 일치 (lookup 정합). FSM 결정론 — 동일 입력 1000 회 호출 → bit-exact cycle count. **정량 fidelity (Ramulator2 추정값과의 정합) 는 Impl-10 / Phase 3 영역으로 deferred (§0.5 Numeric Value Policy 정합).**
+**Acceptance:** ✓ FP8 / FP16 regime 분기 결정론 (kv_precision swap 정합). ✓ Tile time `==` config bit-exact (lookup 정합). ✓ FSM determinism 1000-call bit-exact + multi-instance. ✓ Cross-module integration (k_total ↔ PIMExecutor real injection). ✓ ARCH literal lock-in (§3.1 · §3.2 · §3.4 · §3.5.2 · §5.4 · §6.6). **정량 fidelity (Ramulator2 추정값 정합) 는 Impl-10 / Phase 3 영역 deferred (§0.5 정합).**
 
 ---
 

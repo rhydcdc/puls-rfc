@@ -9,6 +9,7 @@ class ModelConfig:
     num_heads: int
     num_kv_heads: int
     head_dim: int
+    kv_precision: str  # "FP8" | "FP16" — system-wide PIM regime selector (ARCH §3.1)
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,8 @@ class TimeConfig:
     pim_tile_time_ns: Mapping[str, float]
     nvlink_time_per_byte_ns: float
     rtl_fsm_cycle_per_tile: int
+    rtl_fsm_tile_rows: int                       # ARCH §3.1 "32-row tile FSM" — RTL 합성 확정값 (PLAN §0.5 예외)
+    pim_broadcast_latency_ns_cross_gpu: float    # SP-PIM cross-GPU lock-step broadcast overhead placeholder
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,7 @@ def default_dummy_config() -> Config:
             num_heads=64,
             num_kv_heads=8,
             head_dim=128,
+            kv_precision="FP8",
         ),
         hw=HWConfig(
             num_gpus_instance_a=8,
@@ -84,6 +88,8 @@ def default_dummy_config() -> Config:
             pim_tile_time_ns={"FP8": 1.0, "FP16": 2.0},
             nvlink_time_per_byte_ns=1.0,
             rtl_fsm_cycle_per_tile=1,
+            rtl_fsm_tile_rows=32,
+            pim_broadcast_latency_ns_cross_gpu=0.5,
         ),
         slo=SLOConfig(ttft_target_ms=100.0, tpot_target_ms=10.0),
         admission=AdmissionConfig(

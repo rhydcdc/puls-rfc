@@ -1,3 +1,5 @@
+import dataclasses
+
 import pytest
 
 from puls_sched.admission import Admission
@@ -9,6 +11,7 @@ from puls_sched.event_queue import EventQueue
 from puls_sched.idle_telemetry import IdleTelemetry
 from puls_sched.kv_accountant import KVAccountant
 from puls_sched.main_loop import SchedulerCore
+from puls_sched.pim_emulator import PIMExecutor
 from puls_sched.request_queue import RequestQueue
 from puls_sched.window import InFlightWindow
 
@@ -44,8 +47,27 @@ def window(dag):
 
 
 @pytest.fixture
-def dispatcher(dummy_config, clock, event_queue, dag):
-    return Dispatcher(config=dummy_config, clock=clock, queue=event_queue, dag=dag)
+def pim_executor(dummy_config):
+    return PIMExecutor(config=dummy_config)
+
+
+@pytest.fixture
+def pim_executor_fp16(dummy_config):
+    """Cross-product fixture — kv_precision="FP16" 변종 (Q1 system-wide regime)."""
+    model_fp16 = dataclasses.replace(dummy_config.model, kv_precision="FP16")
+    cfg_fp16 = dataclasses.replace(dummy_config, model=model_fp16)
+    return PIMExecutor(config=cfg_fp16)
+
+
+@pytest.fixture
+def dispatcher(dummy_config, clock, event_queue, dag, pim_executor):
+    return Dispatcher(
+        config=dummy_config,
+        clock=clock,
+        queue=event_queue,
+        dag=dag,
+        pim_executor=pim_executor,
+    )
 
 
 @pytest.fixture

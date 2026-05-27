@@ -192,7 +192,11 @@ def test_dispatch_pim_decode_attn_sets_busy_and_pushes_event(dispatcher: Dispatc
     dispatcher.dispatch_pim(decode)
     assert dispatcher.pim_busy is True
     assert decode.state is NodeState.RUNNING
-    expected_t = dispatcher.config.time.pim_tile_time_ns["FP8"]
+    # Impl-4: PIM op_time = pim_executor.op_time(k_max, tile_rows) (placeholder default args)
+    expected_t = dispatcher.pim_executor.op_time(
+        k_channels=dispatcher.config.admission.k_total_max,
+        kv_rows_total=dispatcher.config.time.rtl_fsm_tile_rows,
+    )
     assert dispatcher.queue.peek_timestamp() == expected_t
 
 
@@ -278,6 +282,45 @@ def test_invariant_dispatcher_dag_admit_evict_roundtrip(dispatcher: Dispatcher, 
         selected_ids.add(mb_id)
     assert 0 not in selected_ids
     assert selected_ids == {1, 2, 3}
+
+
+# =========================================================================
+# Impl-4 — PIM executor wiring (cross-module)
+# =========================================================================
+
+def test_dispatch_pim_op_time_via_pim_executor(dispatcher: Dispatcher):
+    """dispatcher._op_time(pim_node) bit-exact == pim_executor.op_time(...) with placeholder args."""
+    dispatcher.dag.add_micro_batch(0)
+    _mark_done(dispatcher, 0, NodeType.QKV)
+    dispatcher.refresh_ready()
+    decode = dispatcher.dag.get_node(0, NodeType.DECODE_ATTN)
+    expected = dispatcher.pim_executor.op_time(
+        k_channels=dispatcher.config.admission.k_total_max,
+        kv_rows_total=dispatcher.config.time.rtl_fsm_tile_rows,
+    )
+    assert dispatcher._op_time(decode) == expected
+
+
+def test_dispatch_pim_completion_timestamp_uses_pim_executor(dispatcher: Dispatcher):
+    """ARCH §3.5.2 Computed Wait — completion timestamp == clock.now + pim_executor.op_time(...)."""
+    dispatcher.dag.add_micro_batch(0)
+    _mark_done(dispatcher, 0, NodeType.QKV)
+    dispatcher.refresh_ready()
+    decode = dispatcher.dag.get_node(0, NodeType.DECODE_ATTN)
+    t0 = dispatcher.clock.now
+    dispatcher.dispatch_pim(decode)
+    pushed_timestamp = dispatcher.queue.peek_timestamp()
+    op_time = dispatcher.pim_executor.op_time(
+        k_channels=dispatcher.config.admission.k_total_max,
+        kv_rows_total=dispatcher.config.time.rtl_fsm_tile_rows,
+    )
+    assert pushed_timestamp == t0 + op_time
+
+
+def test_dispatcher_pim_executor_field_present(dispatcher: Dispatcher):
+    """Dispatcher dataclass field 에 pim_executor 존재."""
+    fields = Dispatcher.__dataclass_fields__
+    assert "pim_executor" in fields
 
 
 # =========================================================================
