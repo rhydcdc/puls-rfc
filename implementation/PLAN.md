@@ -6,6 +6,24 @@
 
 ---
 
+## Deliverables (Scope Anchor)
+
+본 RFC 의 산출은 **두 가지로 한정**:
+
+**D1. 동작하는 scheduler.** Event-driven DAG dispatch + adaptive admission + Instance A/B pipeline 이 임의 ctx × batch trace 위에서 *처리 시간 균형 잡힌 μ-batch 구성*으로 수렴. 검증 = §6.5 dispatch trace emergence + admission deadband 수렴 + F4 steady-state + invariant 0 위반 + determinism. → **Impl-9 acceptance (시뮬레이터 통과 조건)**.
+
+**D2. F1~F5 가속 source decomposition.** ARCHITECTURE §5.7 의 F1·F2·F3·F5 각 source 의 isolated cycle ratio 를 workload regime (ctx × batch) 격자 위에서 산출. F4 는 D1 의 전제 검증. → **Impl-10 (Phase 3 calibrated projection — GPU 실측 + PIM Ramulator2 추정)**.
+
+**산출하지 않음 (scope 외):**
+
+- Comparative baseline reimplementation (Sarathi-Serve · vLLM) 과의 배수 비교 — 사유: (i) pre-HW dummy time 위 reproduction 정합 판단 불가, (ii) Phase 3 후에도 PULS silicon 부재로 양방 실측 비교 불가능.
+- 절대 throughput · TTFT · TPOT · goodput · SLO per GPU — 사유: silicon 부재.
+- Silicon-validated PULS measurement — 사유: PULS fab 없음. Phase 3 후에도 PIM side 는 estimate (Ramulator2 + JEDEC spec scaling, 출처 라벨 동반).
+
+D1 과 D2 의 관계: D1 (배치 균형) 이 *전제* — staggering steady-state 가 안 잡히면 F2/F3 의 `max()` ratio 자체가 성립 안 함. D2 (가속 배수) 가 *산출* — 균형 위에서 각 source 가 얼마나 기여하는지의 분해.
+
+---
+
 ## 0. Completeness Definition
 
 스케줄러의 *완전한 module list* 는 사전 정의 불가. 이유:
@@ -21,10 +39,10 @@
 scheduler 가 **완성** 의 시점은 다음 5 조건 동시 충족:
 
 - **C1.** Synthetic 100-request trace 입력 → 모든 request 가 EOS 또는 max_tokens 도달로 종료
-- **C2.** Non-NaN · finite 한 TTFT · TPOT · throughput metric 출력
+- **C2.** Schema-valid 한 *구조적 산출* — §6.5 dispatch trace (Init/T1–T5) 재현 + adaptive admission deadband 수렴 trace + F1·F2·F3·F5 ablation cycle ratio 표. *Comparative baseline 미산출 (Deliverables 정합).*
 - **C3.** KV slot 누수 없음 — completion 후 capacity 회수 정상
 - **C4.** Invariant (I1–I5) 위반 0 회 over full trace
-- **C5.** Determinism — 동일 seed + trace → bit-exact metric
+- **C5.** Determinism — 동일 seed + trace → bit-exact 구조 산출
 
 본 5 조건은 Impl-9 (End-to-end Driver) 의 acceptance 와 동일. 이 시점 이후의 *추가* gap 은 plan 갱신으로 흡수 (iterative refinement). 사전에 모든 module 을 정의하려는 시도는 yagni · 과잉 abstraction risk.
 
@@ -79,8 +97,8 @@ Production scheduler (vLLM · Sarathi-Serve) 에 reference 없음. PIM tile time
 - **Impl-4** — PIM executor. Regime 분기 cross-product (FP8 · FP16) + FSM determinism N-run repeat + lookup 정합 (`tile_time` == `config.pim_tile_time[regime]`)
 - **Impl-5** — Instance A/B pipeline. Handoff shape validation (decode · prefill 양 case fixed-shape 강제) + L-layer iteration meta-count + steady-state cycle = max(A, B) round-trip
 - **Impl-6** — Trace replay + completion. KV slot 회수 round-trip (admit ↔ release) + trace replay multi-seed determinism + completion 검출 boundary
-- **Impl-7** — Baseline scheduler. PIM path 비활성화 grep meta-test + 동일 framework reproducibility (PULS · baseline 양자)
-- **Impl-8** — Evaluator. Metric 정의 round-trip + SLO boundary parametrize (TTFT · TPOT) + idle fraction 정의 충돌 0
+- **Impl-7** — (Removed) Comparative baseline reimplementation scope 외 (Deliverables 정합)
+- **Impl-8** — Evaluator. Dispatch trace 캡처 + admission 수렴 trace + F1~F5 cycle ratio decomposition schema 정합. *절대 metric (TTFT · TPOT) 미산출 (Deliverables 정합)*
 - **Impl-9** — End-to-end driver. §0 C1–C5 acceptance 각각 별도 test + full trace replay bit-exact determinism
 - **Impl-10** — Sensitivity sweep. Sweep grid coverage meta-test (ctx × batch 누락 0) + ablation flag round-trip + F1·F2·F3·F5 isolation 검증
 
@@ -89,6 +107,30 @@ Production scheduler (vLLM · Sarathi-Serve) 에 reference 없음. PIM tile time
 ### MODULES.md 갱신 (Impl-N 별 공통 reminder)
 
 각 Impl 의 commit 직전 (Self-review 동시 영역) 에 `implementation/MODULES.md` 의 해당 Impl 섹션을 갱신 — 그 Impl 에서 신설 또는 변경된 모듈의 한 줄 역할 설명 추가/수정. 신설 모듈이 없는 Impl (skeleton 에 logic 만 채우는 경우) 도 기존 모듈의 한 줄 설명 갱신 필수 (예: Impl-2 의 `main_loop.py` 는 skeleton → 실 dispatcher 로 의미 변경, `dispatcher.py` 신설 — MODULES.md 에 반영).
+
+### Pre-HW 산출 영역 정의 (Deliverables 정합)
+
+Impl-1~9 (dummy time model 위) 가 산출 *가능 / 불가능 / 스코프 외* 항목:
+
+**가능 (research artifact, D1 검증 자산):**
+
+- §6.5 dispatch trace emergence (back-fill at T3 등 — priority dequeue + DAG 자연 산출)
+- Adaptive admission deadband 수렴/발산 trace (control loop 안정성)
+- F1·F2·F3·F5 ablation 시 cycle 식 ratio 변화 패턴 (구조 검증)
+- F4 steady-state 도달 (μ-batch staggering 자기-동기화)
+- Invariant I1~I5 위반 0, determinism, KV 누수 0 (engineering hygiene)
+
+**불가능 (Impl-10 calibrated projection 후에도, silicon 부재):**
+
+- TTFT · TPOT · throughput · goodput · SLO per GPU 절대값
+- Silicon-validated PULS measurement
+
+**스코프 외 (애초에 산출 시도 안 함, Deliverables 정합):**
+
+- ~~PULS vs Sarathi/vLLM 배수 비교~~ — Comparative baseline reimplementation 본 RFC scope 외
+- 사유: (i) pre-HW dummy time 위 reproduction 정합 판단 기준 부재, (ii) Phase 3 후에도 PULS silicon 부재로 양방 실측 비교 불가능
+
+본 inventory 가 D1 (Impl-9 시뮬레이터 통과) 과 D2 (Impl-10 F1~F5 decomposition) 의 검증 자산 한도를 lock-in.
 
 ---
 
@@ -102,12 +144,13 @@ Production scheduler (vLLM · Sarathi-Serve) 에 reference 없음. PIM tile time
 - k_total decision (PIM-side dial, §5.1)
 - Instance A/B inter-instance pipeline dispatch (§3.4 · §5.2)
 - PIM executor emulator (Ramulator2 cycle wrapping)
-- Baseline scheduler reimplementation (continuous batching · chunked prefill)
-- Trace replayer + evaluator + metric collection
+- Trace replayer + structural evaluator (dispatch trace · 수렴 trace · F1~F5 ratio)
 - End-to-end driver + request lifecycle + KV accounting (§0 완전성 충족용)
 
 ### 1.2 Out of Scope
 
+- **Comparative baseline scheduler reimplementation (Sarathi-Serve · vLLM).** 사유: (i) pre-HW dummy time 위 reproduction 정합 판단 기준 부재, (ii) Phase 3 calibrated projection 후에도 PULS silicon 부재로 양방 실측 비교 불가능, (iii) RFC deliverable 을 *D1 (동작하는 scheduler) + D2 (F1~F5 source decomposition)* 으로 한정 — comparative axis 미포함 (Deliverables 정합).
+- **절대 metric (TTFT · TPOT · throughput · goodput · SLO per GPU).** 사유: silicon 부재로 anchored absolute time 산출 불가.
 - KV page → 물리 채널 매핑 (page allocator 영역)
 - Channel-row sharding 정책 결정 (deploy-time architectural decision, §3.3)
 - Kernel launch · CUDA stream · weight streaming (model executor + driver)
@@ -138,8 +181,7 @@ Production scheduler (vLLM · Sarathi-Serve) 에 reference 없음. PIM tile time
 | `forward_pass` | L-layer iteration loop per token; layer_state 관리 | §3.4 (L × cycle = forward pass) |
 | `completion` | EOS / max_tokens 검출 + KV slot 회수 + completion timestamp 기록 | (production scheduler convention) |
 | `trace` | Long-ctx production trace + 1M-class benchmark dataset feed | §8 |
-| `baseline/` | vLLM-style continuous batching + Sarathi-Serve-style chunked prefill (no-PIM 비교군) | — |
-| `eval` | TTFT · TPOT · throughput · goodput · idle fraction · PIM utilization | §6.7 |
+| `eval` | Dispatch trace 캡처 + admission 수렴 trace + F1~F5 cycle ratio decomposition + idle fraction + PIM utilization. *절대 metric (TTFT · TPOT · throughput · goodput) 미산출 (Deliverables 정합)* | §6.7 |
 | `run` | Outer driver loop · initialization · 모듈 wiring · termination | (entry point) |
 
 구현 언어는 Python 권장 — production scheduler reference (vLLM · Sarathi-Serve) 와 정합. 최종 결정은 Impl-1 진입 시.
@@ -197,62 +239,62 @@ Production scheduler (vLLM · Sarathi-Serve) 에 reference 없음. PIM tile time
 
 ---
 
-### Impl-2 — Invariants + DAG Dispatcher
+### Impl-2 — Invariants + DAG Dispatcher ✓ (commit `a09a2c1`)
 
 **Implementation:**
-- [ ] `Invariants.check_I1` — prefill-attn(X) 가 QKV(X) 완료 후만 ready
-- [ ] `Invariants.check_I2` — decode-attn(X) 가 QKV(X) 완료 후만 ready
-- [ ] `Invariants.check_I3` — O-proj(X) 가 prefill-attn(X) ∧ decode-attn(X) 둘 다 완료 후만 ready
-- [ ] `Invariants.check_I4` — 시점 t 에 GPU GEMM/attention op 1 개만 active
-- [ ] `Invariants.check_I5` — 시점 t 에 PIM decode-attn op 1 개만 active (multi-head · multi-request batching 은 op 내부 자유)
-- [ ] `Dispatcher.refresh_ready` — 모든 precedence done 인 미실행 노드 집합 산출
-- [ ] `Dispatcher.pick_gpu` — priority dequeue: O-proj > prefill-attn > QKV. Tie-break: oldest μ-batch first
-- [ ] `Dispatcher.pick_pim` — PIM ready set 에서 oldest μ-batch
-- [ ] `Dispatcher.dispatch_gpu` / `dispatch_pim` — executor 호출 + node state → running
-- [ ] Look-ahead / back-fill emergence — 명시 정책 없이 priority dequeue 의 자연 산출 (§6.5 trace 정합)
+- [x] `Invariants.check_I1` — prefill-attn(X) 가 QKV(X) 완료 후만 ready
+- [x] `Invariants.check_I2` — decode-attn(X) 가 QKV(X) 완료 후만 ready
+- [x] `Invariants.check_I3` — O-proj(X) 가 prefill-attn(X) ∧ decode-attn(X) 둘 다 완료 후만 ready
+- [x] `Invariants.check_I4` — 시점 t 에 GPU GEMM/attention op 1 개만 active
+- [x] `Invariants.check_I5` — 시점 t 에 PIM decode-attn op 1 개만 active (multi-head · multi-request batching 은 op 내부 자유)
+- [x] `Dispatcher.refresh_ready` — 모든 precedence done 인 미실행 노드 집합 산출
+- [x] `Dispatcher.pick_gpu` — priority dequeue: O-proj > prefill-attn > QKV. Tie-break: oldest μ-batch first
+- [x] `Dispatcher.pick_pim` — PIM ready set 에서 oldest μ-batch
+- [x] `Dispatcher.dispatch_gpu` / `dispatch_pim` — executor 호출 + node state → running
+- [x] Look-ahead / back-fill emergence — 명시 정책 없이 priority dequeue 의 자연 산출 (§6.5 trace 정합)
 
-**Unit Tests:**
-- [ ] I1 — QKV(X) done = False 상태에서 prefill-attn(X) dispatch 시도 시 차단
-- [ ] I2 — QKV(X) done = False 상태에서 decode-attn(X) dispatch 시도 시 차단
-- [ ] I3 — prefill 또는 decode 둘 중 하나만 done 일 때 O-proj 차단; 둘 다 done 일 때만 ready
-- [ ] I4 — GPU 활성 op 1 개 상태에서 두 번째 GPU op dispatch 시도 시 차단
-- [ ] I5 — PIM 활성 op 1 개 상태에서 두 번째 PIM decode-attn dispatch 시도 시 차단
-- [ ] Priority — O-proj / prefill-attn / QKV 모두 ready 일 때 O-proj 선택
-- [ ] Tie-break — 동일 priority 다중 μ-batch ready 일 때 oldest μ-batch 선택
-- [ ] §6.5 trace fixture — {P, M, N} 3 μ-batch 구성 + deterministic op time 입력 → Init / T1–T5 dispatch 시퀀스 재현
+**Unit Tests:** (총 47 신규 passed; 기존 60 + 신규 47 = 107 — `implementation/plans/impl_2.md` 참조)
+- [x] I1 — QKV(X) done = False 상태에서 prefill-attn(X) dispatch 시도 시 차단 (PENDING/READY/RUNNING 3 case parametrize)
+- [x] I2 — QKV(X) done = False 상태에서 decode-attn(X) dispatch 시도 시 차단 (3 case parametrize)
+- [x] I3 — prefill 또는 decode 둘 중 하나만 done 일 때 O-proj 차단; 둘 다 done 일 때만 ready (prefill 미완 3 + decode 미완 3 + both 미완 1 case)
+- [x] I4 — GPU 활성 op 1 개 상태에서 두 번째 GPU op dispatch 시도 시 차단
+- [x] I5 — PIM 활성 op 1 개 상태에서 두 번째 PIM decode-attn dispatch 시도 시 차단
+- [x] Priority — O-proj / prefill-attn / QKV 모두 ready 일 때 O-proj 선택 + boundary parametrize (O-proj 부재 → prefill, prefill 부재 → QKV, all 부재 → None)
+- [x] Tie-break — 동일 priority 다중 μ-batch ready 일 때 oldest μ-batch 선택 (GPU·PIM 양 case)
+- [x] §6.5 trace fixture — {P, M, N} 3 μ-batch 구성 + deterministic op time (PIM=3.0 > GPU=1.0, ratio property 보존) → Init / T1–T5 dispatch 시퀀스 bit-exact 재현
 
-**Acceptance:** I1–I5 위반 0 회 over 100 μ-batch synthetic stress trace. §6.5 dispatch trace (Init / T1–T5) 재현.
+**Acceptance:** ✓ I1–I5 위반 0 회 over 100 μ-batch synthetic stress trace. ✓ §6.5 dispatch trace (Init / T1–T5) 재현.
 
 ---
 
 ### Impl-3 — Admission Controller + k_total Decision + Request Queue + KV Accounting
 
 **Implementation:**
-- [ ] `RequestQueue` — waiting queue; FIFO admission; bounded queue overflow policy (reject 또는 backpressure)
-- [ ] `KVAccountant` — aggregate KV slot capacity 추적; `admit(req)` 시 `kv_demand ≤ remaining` 검증; completion 시 `release(req)` 회수
-- [ ] `IdleTelemetry` — GPU · PIM idle fraction per-iteration 누적; instance A · B 별 분리 측정
-- [ ] `Deadband` — ctx-tiered static lookup (short 2k–8k · mid ~32k · long 128k–1M; §6.4 표 정합)
-- [ ] `Admission.layer1` — μ-batch composition 결정: prefill chunk 토큰 수, decode batch size, N. Candidate pool = `RequestQueue`. 자원 제약 = `KVAccountant`
-- [ ] `Admission.mfu_floor` — `N ≥ N_sat` (FFN GEMM saturating knee) 강제
-- [ ] `Admission.balance_inter_AB` — `A_cycle` vs `B_cycle` 차이 기반 prefill chunk admit 조정
-- [ ] `Admission.balance_intra_A` — GPU vs PIM idle fraction 기반 decode / prefill chunk admit 조정
-- [ ] `kTotalDecider.solve(t_proj, t_PIM_fn, N_decode)` — `max k_total s.t. t_PIM(k_total, N_decode) ≤ t_proj`; **k_total ∈ {0, 256, 512, ..., 2048}** (aggregate, 8 GPU lock-step 전제, 9-step dial); per-GPU `n × 32, n ∈ {0..8}` → aggregate `k_total = 8 × n × 32`
-- [ ] `kTotalDecider.over_budget_handler` — `t_PIM(2048) > t_proj` 진입 시 admission layer 1 escalation (decode 축소 또는 prefill chunk 추가)
+- [x] `RequestQueue` — waiting queue; FIFO admission; bounded queue overflow policy (reject 또는 backpressure)
+- [x] `KVAccountant` — aggregate KV slot capacity 추적; `admit(req)` 시 `kv_demand ≤ remaining` 검증; completion 시 `release(req)` 회수
+- [x] `IdleTelemetry` — GPU · PIM idle fraction per-iteration 누적; instance A · B 별 분리 측정 *(Impl-3: 단일 instance; A·B 분리는 Impl-5)*
+- [x] `Deadband` — ctx-tiered static lookup (short 2k–8k · mid ~32k · long 128k–1M; §6.4 표 정합)
+- [x] `Admission.layer1` — μ-batch composition 결정: prefill chunk 토큰 수, decode batch size, N. Candidate pool = `RequestQueue`. 자원 제약 = `KVAccountant`
+- [x] `Admission.mfu_floor` — `N ≥ N_sat` (FFN GEMM saturating knee) 강제
+- [x] `Admission.balance_inter_AB` — `A_cycle` vs `B_cycle` 차이 기반 prefill chunk admit 조정
+- [x] `Admission.balance_intra_A` — GPU vs PIM idle fraction 기반 decode / prefill chunk admit 조정
+- [x] `kTotalDecider.solve(t_proj, t_PIM_fn, N_decode)` — `max k_total s.t. t_PIM(k_total, N_decode) ≤ t_proj`; **k_total ∈ {0, 256, 512, ..., 2048}** (aggregate, 8 GPU lock-step 전제, 9-step dial); per-GPU `n × 32, n ∈ {0..8}` → aggregate `k_total = 8 × n × 32`
+- [x] `kTotalDecider.over_budget_handler` — `t_PIM(2048) > t_proj` 진입 시 admission layer 1 escalation *(KTotalResult.over_budget flag 로 caller 에 escalation signal 전달; admission.layer1 이 spec.over_budget 으로 propagate. 자발적 escalation loop 은 Impl-9 driver 영역)*
 
-**Unit Tests:**
-- [ ] `RequestQueue` — FIFO 동작; bounded queue overflow handling (overflow 시 reject 또는 backpressure signal)
-- [ ] `KVAccountant` — capacity 초과 admit 시 reject; completion 후 `release` 호출 시 capacity 정상 회수
-- [ ] `IdleTelemetry` — 합성 event sequence (활성 / idle 구간 명시) 위에서 idle fraction 계산값 정확
-- [ ] `Deadband` — 각 ctx tier (short / mid / long) lookup 의 deterministic 출력
-- [ ] `Admission.layer1` — 동일 input → 동일 N · chunk size 출력 (reproducibility)
-- [ ] `Admission.mfu_floor` — `N < N_sat` 입력 시 N_sat 으로 clamp 또는 reject
-- [ ] `Admission.balance_inter_AB` — A_cycle > B_cycle 시 prefill chunk admit 증가 방향
-- [ ] `Admission.balance_intra_A` — GPU idle > θ_high 시 decode admit 증가; PIM idle > θ_high 시 prefill chunk admit 증가
-- [ ] `kTotalDecider.solve` — 9-step k_total 영역에서 max k 선택 정확성; 동일 입력 → 동일 출력
-- [ ] `kTotalDecider.over_budget_handler` — `t_PIM(2048) > t_proj` 시 escalation signal 발사 검증
-- [ ] Stack-granularity 검증 — `k_total mod 256 = 0` (per-GPU n × 32 with same n across 8 GPUs)
+**Unit Tests:** (총 114 신규 passed; 기존 107 + 신규 114 = 221 — `implementation/plans/impl_3.md` 참조)
+- [x] `RequestQueue` — FIFO 동작; bounded queue overflow handling (overflow 시 reject 또는 backpressure signal)
+- [x] `KVAccountant` — capacity 초과 admit 시 reject; completion 후 `release` 호출 시 capacity 정상 회수
+- [x] `IdleTelemetry` — 합성 event sequence (활성 / idle 구간 명시) 위에서 idle fraction 계산값 정확
+- [x] `Deadband` — 각 ctx tier (short / mid / long) lookup 의 deterministic 출력
+- [x] `Admission.layer1` — 동일 input → 동일 N · chunk size 출력 (reproducibility)
+- [x] `Admission.mfu_floor` — `N < N_sat` 입력 시 N_sat 으로 clamp 또는 reject
+- [x] `Admission.balance_inter_AB` — A_cycle > B_cycle 시 prefill chunk admit 증가 방향
+- [x] `Admission.balance_intra_A` — GPU idle > θ_high 시 decode admit 증가; PIM idle > θ_high 시 prefill chunk admit 증가
+- [x] `kTotalDecider.solve` — 9-step k_total 영역에서 max k 선택 정확성; 동일 입력 → 동일 출력
+- [x] `kTotalDecider.over_budget_handler` — `t_PIM(2048) > t_proj` 시 escalation signal 발사 검증
+- [x] Stack-granularity 검증 — `k_total mod 256 = 0` (per-GPU n × 32 with same n across 8 GPUs)
 
-**Acceptance:** Balanced regime 에서 idle fraction 이 deadband 내 oscillation 없이 수렴. `kTotalDecider` 출력이 결정론적. KV capacity overflow / underflow 발생 0 회.
+**Acceptance:** ✓ Balanced regime 에서 idle fraction 이 deadband 내 oscillation 없이 수렴 (multi-iter convergence test). ✓ `kTotalDecider` 출력 결정론 (1000-call bit-exact). ✓ KV capacity overflow / underflow 0 회 (단독 stress + admission↔mock completion cross-module roundtrip).
 
 ---
 
@@ -331,48 +373,37 @@ Production scheduler (vLLM · Sarathi-Serve) 에 reference 없음. PIM tile time
 
 ---
 
-### Impl-7 — Baseline Scheduler Reimplementation
+### Impl-7 — (Removed)
 
-**Implementation:**
-- [ ] `baseline/continuous_batching` — vLLM-style: iteration-level, prefill-priority, no chunked prefill, no PIM
-- [ ] `baseline/chunked_prefill` — Sarathi-Serve-style: mixed batch primitive, prefill chunk + decode 공존, no PIM
-- [ ] 두 baseline 모두 동일 framework + 동일 time model 위에서 동작
-- [ ] PIM dispatch path 비활성화 (decode-attn → GPU attention kernel route)
+**Status:** Removed from plan scope. 사유: §1.2 Out of Scope — comparative baseline scheduler reimplementation (Sarathi-Serve · vLLM) 본 RFC deliverable 외 (Deliverables 정합).
 
-**Unit Tests:**
-- [ ] `continuous_batching` — prefill ready 일 때 decode 후순위 동작 검증
-- [ ] `continuous_batching` — chunked prefill 미적용 (full prefill block-and-execute)
-- [ ] `chunked_prefill` — chunk size 결정 + mixed batch 구성 (prefill chunk + decode 공존)
-- [ ] PIM dispatch path 비활성화 — decode-attn 가 GPU attention kernel 경로 사용
-- [ ] 공통 framework reproducibility — 동일 trace · 동일 time model · 동일 seed → bit-exact metric
-
-**Acceptance:** 원 구현 (vLLM · Sarathi-Serve) 의 published metric (TTFT · TPOT · throughput) 과 정성 일치.
+본 slot 은 Impl-8 / Impl-9 / Impl-10 번호 추적성 유지 위해 stub 으로 유지 — 번호 재배치 안 함.
 
 ---
 
-### Impl-8 — Evaluator + Metric Collection
+### Impl-8 — Structural Evaluator (Dispatch Trace + Convergence + F1~F5 Decomposition)
+
+> **Deliverables 정합.** 본 phase 는 D1 (Impl-9 시뮬레이터 통과) 의 *증거 산출* + D2 (Impl-10 calibrated projection) 의 *schema 골격*. 절대 metric (TTFT · TPOT · throughput · goodput) 은 §1.2 Out of Scope.
 
 **Implementation:**
-- [ ] `Evaluator.ttft` — per-request TTFT 산출
-- [ ] `Evaluator.tpot` — per-token TPOT (decode 영역)
-- [ ] `Evaluator.throughput` — tokens/s · requests/s
-- [ ] `Evaluator.goodput` — SLO-attainment-weighted throughput (TTFT · TPOT SLO 동시 만족 비율)
+- [ ] `Evaluator.dispatch_trace` — §6.5 Init/T1~T5 sequence 캡처 (event timestamp + dispatch 노드 + DAG state)
+- [ ] `Evaluator.admission_convergence` — deadband 위 idle fraction 시간 series (oscillation / 수렴 판정 입력)
 - [ ] `Evaluator.idle_fraction` — Instance A · B 별, GPU · PIM 별
 - [ ] `Evaluator.pim_utilization` — aggregate channel-time utilization
 - [ ] `Evaluator.pipeline_efficiency` — `max(A, B) / (A + B)` ratio
-- [ ] `Evaluator.report` — 표 + 분포 출력 (PULS vs baseline 동일 형식)
+- [ ] `Evaluator.acceleration_decomposition` — F1·F2·F3·F5 각 source isolated cycle ratio 표 (workload regime 격자 위 — D2 schema 골격)
+- [ ] `Evaluator.report` — 표 + 분포 출력 (PULS 단독 구조 산출, comparative 없음)
 
 **Unit Tests:**
-- [ ] `Evaluator.ttft` — synthetic request 위에서 TTFT = (first token time − arrival time) 정확
-- [ ] `Evaluator.tpot` — decode token 간 평균 간격 정확
-- [ ] `Evaluator.throughput` — total tokens / total elapsed 정확
-- [ ] `Evaluator.goodput` — SLO 만족 (TTFT · TPOT 둘 다 SLO 안) 비율 정확
+- [ ] `Evaluator.dispatch_trace` — §6.5 fixture (P, M, N 3 μ-batch) 입력 시 Init/T1~T5 sequence 정확 재현
+- [ ] `Evaluator.admission_convergence` — 합성 oscillation / 수렴 trace 입력 시 판정 정확
 - [ ] `Evaluator.idle_fraction` — Instance / executor 별 idle fraction 정확
 - [ ] `Evaluator.pim_utilization` — `Σ k_total · dt / (k_max · total_time)` 정확
 - [ ] `Evaluator.pipeline_efficiency` — A_cycle · B_cycle 입력에서 `max / (A + B)` 정확
-- [ ] Reproducibility — 동일 seed + 동일 trace + 동일 scheduler → bit-exact metric
+- [ ] `Evaluator.acceleration_decomposition` — F1/F2/F3/F5 각 ablation flag on/off 시 cycle ratio 계산 정합 (구조 검증)
+- [ ] Reproducibility — 동일 seed + 동일 trace + 동일 scheduler → bit-exact 구조 산출
 
-**Acceptance:** PULS / baseline schedulers 의 metric 출력이 동일 schema; reproducibility 성립.
+**Acceptance:** PULS scheduler 의 구조 산출 (dispatch trace · 수렴 trace · F1~F5 decomposition) schema 정합 + reproducibility 성립. *Comparative baseline 미산출 (Deliverables · §1.2 정합).*
 
 ---
 
@@ -397,25 +428,32 @@ Production scheduler (vLLM · Sarathi-Serve) 에 reference 없음. PIM tile time
 **Acceptance — Completeness Acceptance Test (§0):**
 
 - [ ] **C1.** Synthetic 100-request trace → 모든 request 가 EOS 또는 max_tokens 도달로 종료
-- [ ] **C2.** Non-NaN · finite 한 TTFT · TPOT · throughput metric 출력
+- [ ] **C2.** Schema-valid 한 *구조적 산출* — §6.5 dispatch trace (Init/T1–T5) 재현 + adaptive admission deadband 수렴 trace + F1·F2·F3·F5 ablation cycle ratio 표. *Comparative baseline 미산출 (Deliverables 정합).*
 - [ ] **C3.** KV slot 누수 없음 — completion 후 capacity 회수 정상 (`kv_accountant.remaining` 이 trace 종료 시 initial capacity 와 일치)
 - [ ] **C4.** Invariant (I1–I5) 위반 0 회 over full trace
-- [ ] **C5.** Determinism — 동일 seed + trace → bit-exact metric
+- [ ] **C5.** Determinism — 동일 seed + trace → bit-exact 구조 산출
 
 **이 phase 의 5 acceptance 동시 충족 = scheduler runnable.** 이후 추가 발견되는 gap 은 plan 갱신 영역.
 
 ---
 
-### Impl-10 — Sensitivity Sweep (Phase 3 영역)
+### Impl-10 — F1~F5 Calibrated Projection (Phase 3 영역, D2 산출)
 
-> **Hardware 필요 시점.** Impl-1~Impl-9 은 spec-based 잠정 GPU op time 으로 동작 가능 (hardware 0 개). 본 phase 부터 **랩실 hardware (블랙웰 8 GPU) 실측 `t_proj · t_FFN · t_attn_GPU` 값으로 교체 필요** — 가속 배수 · latency 절대값 의 최종 claim 근거. 코드 영향 없음 (`gpu_executor` lookup table 만 교체).
+> **Calibrated Projection Phase.** Impl-1~9 의 dummy time model 을 calibrated input 으로 교체 → F1·F2·F3·F5 각 source 의 가속 ratio 를 workload regime 격자 위에서 산출 (D2 deliverable). *Silicon-validated PULS measurement 아님* — PULS 실리콘 부재로 PIM side 는 Ramulator2 추정 (JEDEC spec scaling, `ramulator2_hbm4_estimated_jedec_spec` 라벨 동반) 유지. GPU side 만 lab 블랙웰 8 GPU 실측. 코드 영향 없음 (`gpu_executor` · `pim_executor` lookup table 만 교체). *Comparative baseline 산출 없음 — F1~F5 자체의 ratio 가 deliverable (Deliverables 정합).*
+
+**Calibration source:**
+
+- GPU side (`t_proj` · `t_FFN` · `t_attn_GPU`): lab 블랙웰 8 GPU 실측
+- PIM side (`t_PIM` · SP-PIM aggregate · broadcast overhead): Ramulator2 추정 ingest (출처 라벨)
+- NVLink: 블랙웰 SXM 실측 또는 spec 인용
 
 **Implementation:**
 - [ ] Workload sweep — ctx ∈ {2k, 8k, 32k, 128k, 512k, 1M} × batch ∈ {16, 64, 128, 256}
 - [ ] k_total sweep — fixed k_total 대조군 + adaptive k_total 비교
-- [ ] Chunk size sweep — Sarathi-Serve 권고치 ± 영역
+- [ ] Chunk size sweep — PULS 내부 admission 의 chunk 결정 sensitivity (외부 reference 없음)
 - [ ] Deadband width sweep — ctx-tiered lookup vs static 비교
 - [ ] F1·F2·F3·F5 가속 source 별 ablation 기여도 분해 + F4 (steady-state 전제) 충족 검증
+- [ ] D2 산출 — F1~F5 cycle ratio 표 (workload regime 격자 cell 별)
 
 **Unit Tests:**
 - [ ] Sweep grid coverage — ctx × batch 격자 모든 셀 실행 확인 (누락 0)
@@ -424,8 +462,9 @@ Production scheduler (vLLM · Sarathi-Serve) 에 reference 없음. PIM tile time
 - [ ] F3 ablation — Single-instance fallback (A·B fusion) 시 steady-state cycle = `A_cycle + B_cycle`
 - [ ] F5 ablation — Channel-independent scheduling 비활성화 (lock-step max-KV wait) 시 straggler bubble 복원
 - [ ] F4 검증 — F2·F3 활성화 + μ-batch staggering 활성화 시 steady-state regime 도달 (F4 는 별도 기여가 아닌 전제 충족 확인)
+- [ ] 출처 라벨 round-trip — calibrated input 의 `source` 필드 (`lab_blackwell_measured` · `ramulator2_hbm4_estimated_jedec_spec` · `nvlink4_sxm_spec`) 가 D2 보고서까지 보존
 
-**Acceptance:** §5.7 가속 source 표 의 F1·F2·F3·F5 각 source 의 isolated 측정값 정성 정합. F4 steady-state 전제 충족.
+**Acceptance:** §5.7 F1·F2·F3·F5 각 source 의 isolated cycle ratio 가 calibrated input 위 workload regime 격자에서 산출. F4 steady-state 전제 충족. *Comparative baseline 미산출 — D2 deliverable 단독 (Deliverables 정합).*
 
 ---
 
@@ -439,8 +478,7 @@ Production scheduler (vLLM · Sarathi-Serve) 에 reference 없음. PIM tile time
 | **Integration** | Invariant 위반 0 회 | Synthetic 100 μ-batch stress trace + assertion 강제 |
 | **E2E** | **End-to-end runnable** | **§0 Completeness Acceptance Test (C1–C5) — Impl-9 acceptance 와 일치** |
 | **Calibration** | Time model fidelity | **Impl-10 / Phase 3 영역. Impl-1~9 의 validation scope 에서 제외 (§0.5 Numeric Value Policy 정합) — Phase 0 추정값과의 정량 일치 검증 금지** |
-| **Reference** | Baseline reimpl 정확성 | 원 구현 (vLLM · Sarathi-Serve) published metric 과 정성 spot-check |
-| **Reproducibility** | Metric determinism | 동일 seed + 동일 trace + 동일 scheduler → bit-exact metric |
+| **Reproducibility** | 구조 산출 determinism | 동일 seed + 동일 trace + 동일 scheduler → bit-exact 구조 산출 (dispatch trace · 수렴 trace · F1~F5 ratio) |
 
 각 layer 는 독립 — unit test 통과가 integration 보장 아니며, integration 통과가 E2E runnable 보장 아님. CI 영역에선 unit · integration · E2E 자동화; calibration · reference 는 manual gate.
 
@@ -450,10 +488,11 @@ Production scheduler (vLLM · Sarathi-Serve) 에 reference 없음. PIM tile time
 
 - **OI1. SP-PIM cross-GPU cooperation 시간 model.** Ramulator2 single-stack scope → 2048-channel lock-step timing 추가 모델링 필요. Impl-4 의 broadcast overhead 항목.
 - **OI2. ~~GPU op time 의 잠정/확정 분리~~ → §0.5 Numeric Value Policy 로 흡수.** Impl-1~9 는 dummy placeholder 만 사용 (spec-based 잠정값 포함 금지). 실측 / 추정값 주입은 Impl-10 단일 시점. 예외 = RTL FSM cycle 단독 (회로 합성 확정값, config 하드코딩 OK).
-- **OI3. Baseline reimpl 의 정확성 보증.** 원 구현 코드 reading + spot-check; bit-exact reproduction 은 목표 아님 — published metric 정성 일치만 요구.
+- **OI3. Comparative baseline reimplementation scope 제외.** Pre-HW dummy time 위 reproduction 정합 판단 불가 + Phase 3 calibrated projection 후에도 PULS silicon 부재로 양방 실측 비교 불가능. RFC deliverable 을 *D1 (동작하는 scheduler) + D2 (F1~F5 source decomposition)* 으로 정의 (Deliverables · §1.2 정합). Comparative axis 미포함.
 - **OI4. Deadband σ 측정 불가.** Self-authored framework 에 hardware jitter model 부재 → balanced regime 정성 거동만 측정 (§6.4 disclosure 정합).
 - **OI5. 구현 언어 미결.** Python 권장 (vLLM · Sarathi-Serve 정합) 이나 simulation throughput 영역에서 Rust / Go 대안 검토 가능. Impl-1 진입 시 결정.
 - **OI6. 추가 module 발견 가능성.** §0 의 iterative discovery 원칙 — Impl-9 E2E acceptance 실행 시 추가 누락 노출 가능. 본 plan 은 *시작점* 이지 final spec 아님. Gap 노출 시 plan 갱신으로 흡수.
+- **OI7. Phase 3 의 silicon validation 부재 disclosure.** Impl-10 후에도 PULS 자체 실리콘 부재로 PIM side (`t_PIM` · SP-PIM aggregate · broadcast overhead) 는 Ramulator2 추정 유지 (`ramulator2_hbm4_estimated_jedec_spec` 라벨). D2 산출은 *calibrated projection* 이지 silicon-validated measurement 아님. README/ARCHITECTURE 의 "will be measured in Phase 3" 류 문구는 "will be projected with stated provenance" 로 정정 필요 (별도 follow-up commit 영역; PLAN.md 자체에는 framing 반영 완료).
 
 ---
 

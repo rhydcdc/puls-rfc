@@ -11,14 +11,18 @@ property 보존 — 절대값 무의미, ordering 정합만 사용.
 
 import dataclasses
 
+from puls_sched.admission import Admission
 from puls_sched.clock import Clock
 from puls_sched.config import default_dummy_config
 from puls_sched.dag import DAG
 from puls_sched.dispatcher import Dispatcher
 from puls_sched.event import Event, EventType
 from puls_sched.event_queue import EventQueue
+from puls_sched.idle_telemetry import IdleTelemetry
+from puls_sched.kv_accountant import KVAccountant
 from puls_sched.main_loop import SchedulerCore
 from puls_sched.node import NodeState, NodeType
+from puls_sched.request_queue import RequestQueue
 from puls_sched.window import InFlightWindow
 
 
@@ -35,9 +39,16 @@ def _make_trace_fixture():
     dag = DAG()
     window = InFlightWindow(dag)
     dispatcher = Dispatcher(config=config, clock=clock, queue=queue, dag=dag)
+    request_queue = RequestQueue(capacity=config.admission.request_queue_capacity)
+    kv_accountant = KVAccountant(capacity=config.admission.kv_capacity_aggregate)
+    admission = Admission(
+        admission_cfg=config.admission, request_queue=request_queue,
+        kv_accountant=kv_accountant, idle_telemetry=IdleTelemetry(),
+    )
     core = SchedulerCore(
         config=config, clock=clock, queue=queue, dag=dag,
         window=window, dispatcher=dispatcher,
+        request_queue=request_queue, kv_accountant=kv_accountant, admission=admission,
     )
 
     for mb_id in (0, 1, 2):

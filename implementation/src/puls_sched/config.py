@@ -34,11 +34,26 @@ class SLOConfig:
 
 
 @dataclass(frozen=True)
+class AdmissionConfig:
+    n_sat: int
+    kv_capacity_aggregate: int
+    ctx_tier_short_max: int
+    ctx_tier_mid_max: int
+    deadband_width: Mapping[str, float]
+    idle_theta_low: float
+    idle_theta_high: float
+    request_queue_capacity: int
+    k_total_step: int
+    k_total_max: int
+
+
+@dataclass(frozen=True)
 class Config:
     model: ModelConfig
     hw: HWConfig
     time: TimeConfig
     slo: SLOConfig
+    admission: AdmissionConfig
     seed: int
 
 
@@ -71,5 +86,17 @@ def default_dummy_config() -> Config:
             rtl_fsm_cycle_per_tile=1,
         ),
         slo=SLOConfig(ttft_target_ms=100.0, tpot_target_ms=10.0),
+        admission=AdmissionConfig(
+            n_sat=16,
+            kv_capacity_aggregate=1_000_000,
+            ctx_tier_short_max=8_000,
+            ctx_tier_mid_max=32_000,
+            deadband_width={"short": 1.0, "mid": 2.0, "long": 3.0},
+            idle_theta_low=0.1,
+            idle_theta_high=0.3,
+            request_queue_capacity=1024,
+            k_total_step=256,
+            k_total_max=2048,
+        ),
         seed=42,
     )

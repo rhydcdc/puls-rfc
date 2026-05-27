@@ -1,11 +1,14 @@
 from dataclasses import dataclass
 
+from puls_sched.admission import Admission, MicroBatchSpec
 from puls_sched.clock import Clock
 from puls_sched.config import Config
 from puls_sched.dag import DAG
 from puls_sched.dispatcher import Dispatcher
 from puls_sched.event import Event, EventType
 from puls_sched.event_queue import EventQueue
+from puls_sched.kv_accountant import KVAccountant
+from puls_sched.request_queue import RequestQueue
 from puls_sched.window import InFlightWindow
 
 
@@ -17,6 +20,10 @@ class SchedulerCore:
     dag: DAG
     window: InFlightWindow
     dispatcher: Dispatcher
+    request_queue: RequestQueue
+    kv_accountant: KVAccountant
+    admission: Admission
+    _next_mb_id: int = 0
 
     def step(self) -> bool:
         if len(self.queue) == 0:
@@ -31,9 +38,24 @@ class SchedulerCore:
                 self.dispatcher.on_completion(event)
                 self.dispatcher.tick()
             case EventType.REQUEST_ARRIVAL:
-                pass
+                req = event.payload["request"]
+                self.request_queue.push(req)
             case EventType.ADMISSION_TICK:
-                pass
+                spec = self._invoke_admission(event)
+                if spec is None:
+                    return
+                mb_id = self._next_mb_id
+                self._next_mb_id += 1
+                self.window.admit(mb_id)
+                self.dispatcher.tick()
+
+    def _invoke_admission(self, event: Event) -> MicroBatchSpec | None:
+        t_proj = event.payload.get("t_proj", 0.0)
+        t_pim_fn = event.payload.get("t_pim_fn", lambda k, n: 0.0)
+        a_cycle = event.payload.get("a_cycle", 0.0)
+        b_cycle = event.payload.get("b_cycle", 0.0)
+        ctx_tokens = event.payload.get("ctx_tokens", 0)
+        return self.admission.layer1(t_proj, t_pim_fn, a_cycle, b_cycle, ctx_tokens)
 
     def run_until_empty(self) -> int:
         n = 0

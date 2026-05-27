@@ -1,7 +1,11 @@
+import inspect
 from pathlib import Path
 
 import puls_sched
+from puls_sched.config import AdmissionConfig, default_dummy_config
 from puls_sched.dag import DAG
+from puls_sched.event import EventType
+from puls_sched.main_loop import SchedulerCore
 from puls_sched.node import NodeType
 from puls_sched.request import RequestState
 
@@ -20,6 +24,29 @@ _EXPECTED_MODULES = {
     "main_loop",
     "invariants",
     "dispatcher",
+    # Impl-3
+    "request_queue",
+    "kv_accountant",
+    "idle_telemetry",
+    "deadband",
+    "k_total",
+    "admission",
+}
+
+
+_EXPECTED_K_TOTAL_DIAL = (0, 256, 512, 768, 1024, 1280, 1536, 1792, 2048)
+
+_EXPECTED_ADMISSION_FIELDS = {
+    "n_sat",
+    "kv_capacity_aggregate",
+    "ctx_tier_short_max",
+    "ctx_tier_mid_max",
+    "deadband_width",
+    "idle_theta_low",
+    "idle_theta_high",
+    "request_queue_capacity",
+    "k_total_step",
+    "k_total_max",
 }
 
 
@@ -60,3 +87,29 @@ def test_meta_dag_precedence_matches_plan():
         NodeType.DECODE_ATTN: {NodeType.QKV},                               # I2
         NodeType.O_PROJ: {NodeType.PREFILL_ATTN, NodeType.DECODE_ATTN},     # I3
     }
+
+
+def test_meta_k_total_dial_matches_plan_literal():
+    """PLAN.md §4 Impl-3 의 k_total dial {0, 256, ..., 2048} (9-step) 정합."""
+    cfg = default_dummy_config().admission
+    dial = tuple(range(0, cfg.k_total_max + 1, cfg.k_total_step))
+    assert dial == _EXPECTED_K_TOTAL_DIAL
+
+
+def test_meta_admission_config_fields_match_plan_inventory():
+    """AdmissionConfig 의 필드 set 이 PLAN.md §4 Impl-3 placeholder 목록 정합."""
+    actual = set(AdmissionConfig.__dataclass_fields__.keys())
+    assert actual == _EXPECTED_ADMISSION_FIELDS, (
+        f"AdmissionConfig field mismatch — "
+        f"extra: {actual - _EXPECTED_ADMISSION_FIELDS}, "
+        f"missing: {_EXPECTED_ADMISSION_FIELDS - actual}"
+    )
+
+
+def test_meta_main_loop_handles_all_event_types():
+    """SchedulerCore._handle 의 match case 가 EventType 전수 cover."""
+    source = inspect.getsource(SchedulerCore._handle)
+    for etype in EventType:
+        assert f"EventType.{etype.name}" in source, (
+            f"_handle missing case for {etype.name}"
+        )
