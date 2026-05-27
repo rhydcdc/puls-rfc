@@ -18,6 +18,8 @@ _EXPECTED_MODULES = {
     "event_queue",
     "window",
     "main_loop",
+    "invariants",
+    "dispatcher",
 }
 
 

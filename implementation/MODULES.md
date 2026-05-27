@@ -10,7 +10,13 @@
 - `micro_batch.py` — 같이 처리될 여러 요청을 하나의 μ-batch 로 묶고, 그 안에서 prefill chunk 와 decode token 을 분리해 들고 있습니다.
 - `node.py` — DAG 한 노드의 정보 (작업 종류 · 어느 μ-batch 의 작업인지 · 지금 어떤 상태인지) 를 표현합니다.
 - `dag.py` — μ-batch 가 들어오면 그 안의 작업 4 개 (QKV · prefill-attn · decode-attn · O-proj) 와 그들 사이의 선후 관계 (I1·I2·I3) 를 자동으로 만들어 줍니다.
-- `event.py` — 미래 시점에 일어날 일 (커널 완료 · 요청 도착 · admission tick) 한 건을 표현합니다.
-- `event_queue.py` — 일어날 일들을 시각 순서대로 줄 세워 두고, 다음에 일어날 일을 꺼낼 때마다 시계를 그 시각으로 맞춥니다.
+- `event.py` — 미래 시점에 울릴 *알람* 한 건. 언제 (timestamp) 무슨 일이 (커널 완료 · 요청 도착 · admission tick) 벌어질지만 적어둡니다. 알람 받고 무엇을 할지의 *내용물* 은 `main_loop._handle` 영역.
+- `event_queue.py` — 알람들을 시각 순서대로 줄 세워 두고, 다음 알람을 꺼낼 때마다 시계를 그 알람의 시각으로 맞춥니다 (= 시간 점프).
 - `window.py` — 현재 처리 중인 μ-batch 3 개만 들고 있다가, 새 μ-batch 가 들어오면 가장 오래된 것을 자동으로 내보냅니다.
-- `main_loop.py` — 큐에서 다음 이벤트를 꺼내 처리하는 메인 루프. 어떻게 처리할지의 *내용물* 은 Impl-2 부터 채워집니다.
+- `main_loop.py` — 큐에서 다음 알람을 꺼내 처리하는 메인 루프. 알람을 받았을 때 무엇을 할지의 *내용물* 은 Impl-2 부터 채워집니다.
+
+## Impl-2 — Invariants + DAG Dispatcher
+
+- `invariants.py` — 스케줄러가 절대 어기면 안 되는 5 규칙 (I1·I2·I3 = 작업 선후 관계 / I4·I5 = GPU·PIM 자원이 동시에 한 일만 수행) 위반을 잡아내는 검사 함수들입니다. 위반 시 에러를 던져 dispatch 를 차단합니다.
+- `dispatcher.py` — DAG 를 보고 *지금 시작 가능한 노드들* (선행 작업 다 끝난 노드들) 을 골라낸 뒤, 우선순위 (O-proj > prefill-attn > QKV) 와 자원별 (GPU / PIM) 큐로 나눠서 한 번에 한 노드씩 보냅니다. GPU·PIM 자원이 지금 일하고 있는지의 상태도 들고 있습니다.
+- `main_loop.py` — *(의미 변경)* Impl-1 의 빈 skeleton 에서, KERNEL_COMPLETION 알람을 받으면 dispatcher 에게 *작업 완료* 를 알리고 dispatcher 가 다음 작업을 보내도록 위임하는 실 루프가 되었습니다.

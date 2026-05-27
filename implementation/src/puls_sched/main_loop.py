@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from puls_sched.clock import Clock
 from puls_sched.config import Config
 from puls_sched.dag import DAG
+from puls_sched.dispatcher import Dispatcher
 from puls_sched.event import Event, EventType
 from puls_sched.event_queue import EventQueue
 from puls_sched.window import InFlightWindow
@@ -15,6 +16,7 @@ class SchedulerCore:
     queue: EventQueue
     dag: DAG
     window: InFlightWindow
+    dispatcher: Dispatcher
 
     def step(self) -> bool:
         if len(self.queue) == 0:
@@ -26,7 +28,8 @@ class SchedulerCore:
     def _handle(self, event: Event) -> None:
         match event.type:
             case EventType.KERNEL_COMPLETION:
-                pass
+                self.dispatcher.on_completion(event)
+                self.dispatcher.tick()
             case EventType.REQUEST_ARRIVAL:
                 pass
             case EventType.ADMISSION_TICK:
