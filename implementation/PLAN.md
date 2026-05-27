@@ -55,7 +55,7 @@ scheduler 가 **완성** 의 시점은 다음 5 조건 동시 충족:
 Impl-1~9 는 로직 · 알고리즘 · 자료구조 · invariant 강제 의 구현 영역. 정량 수치 의존 금지.
 
 - **금지** — Phase 0 산출 추정값 의 직접 사용 / 하드코딩 / acceptance 기준화:
-  - η_HBM (HBM 실효 대역폭 비율)
+  - η_HBM (HBM 실효 대역폭 비율) — *Impl-10 핵심 calibration parameter*. External (HBM↔GPU bus) 의 실효 비율 ~0.7~0.8 (bus protocol · RAS/CAS · cache miss overhead amortized). Internal (PIM in-die) 의 실효 비율 ~1.0 (bus 부재). **F1 · Aux2 가속의 *분리할 수 없는* multiplicative factor** — (a) internal BW > external BW (×3~4) × (b) η_internal/η_external (×1.33) 의 compound 영역. Impl-10 의 closed-form 산식에 직접 진입 (§4 Impl-10 산식 영역)
   - NVLink 실측 BW
   - KV length variance 통계값
   - FFN N_sat (saturating knee)
@@ -466,34 +466,79 @@ Impl-1~9 (dummy time model 위) 가 산출 *가능 / 불가능 / 스코프 외* 
 
 ---
 
-### Impl-10 — F1~F5 Calibrated Projection (Phase 3 영역, D2 산출)
+### Impl-10 — F1~F5 + Aux1·Aux2 Calibrated Projection (Phase 3 영역, D2 산출)
 
-> **Calibrated Projection Phase.** Impl-1~9 의 dummy time model 을 calibrated input 으로 교체 → F1·F2·F3·F5 각 source 의 가속 ratio 를 workload regime 격자 위에서 산출 (D2 deliverable). *Silicon-validated PULS measurement 아님* — PULS 실리콘 부재로 PIM side 는 Ramulator2 추정 (JEDEC spec scaling, `ramulator2_hbm4_estimated_jedec_spec` 라벨 동반) 유지. GPU side 만 lab 블랙웰 8 GPU 실측. 코드 영향 없음 (`gpu_executor` · `pim_executor` lookup table 만 교체). *Comparative baseline 산출 없음 — F1~F5 자체의 ratio 가 deliverable (Deliverables 정합).*
+> **Calibrated Projection Phase.** Impl-1~9 의 dummy time model 을 calibrated input 으로 교체 → F1·F2·F3·F5 + Aux1·Aux2 각 source 의 가속 ratio 를 workload regime 격자 위에서 산출 (D2 deliverable, 총 7 source — ARCH §5.7 정합). *Silicon-validated PULS measurement 아님* — PULS 실리콘 부재로 PIM side 는 Ramulator2 추정 (JEDEC spec scaling, `ramulator2_hbm4_estimated_jedec_spec` 라벨 동반) 유지. GPU side 는 **whitepaper spec 만으로도 D2 산출 가능** (lab 블랙웰 8 GPU 실측은 *refinement* 영역, *blocker 아님* — 본 phase 의 *spec-first* 정합). 코드 영향 없음 (`gpu_executor` · `pim_executor` lookup table 만 교체). *Comparative baseline 산출 없음 — F1~F5 + Aux1·Aux2 자체의 ratio 가 deliverable (Deliverables 정합).*
 
-**Calibration source:**
+#### Calibration Input Source (4 source, spec-first)
 
-- GPU side (`t_proj` · `t_FFN` · `t_attn_GPU`): lab 블랙웰 8 GPU 실측
-- PIM side (`t_PIM` · SP-PIM aggregate · broadcast overhead): Ramulator2 추정 ingest (출처 라벨)
-- NVLink: 블랙웰 SXM 실측 또는 spec 인용
+| Source | 항목 | 출처 라벨 |
+|---|---|---|
+| (1) Blackwell whitepaper | HBM3e peak BW (per stack × 8) · NVLink 5.0 BW · FP8/FP16 tensor core peak FLOPS · L2 cache spec | `blackwell_whitepaper_spec` |
+| (2) Ramulator2 HBM4 spec | PIM internal BW (per-channel × 2048 aggregate) · per-channel compute throughput · row buffer timing | `ramulator2_hbm4_estimated_jedec_spec` |
+| (3) Model spec (Llama-3 70B 알려진) | L=80 · hidden=8192 · heads=64 · GQA=8 · head_dim=128 · weight bytes per layer | `llama3_70b_published_spec` |
+| (4) Trace (Impl-6 산출 보유) | KV length distribution · arrival rate (longctx_longbench + Poisson(λ)) | `longbench_longctx_poisson` |
 
-**Implementation:**
+추가 (보강 영역, *optional*):
+- η_HBM (external 실효 BW 비율 ~0.7~0.8) — whitepaper 부재. 출처 3 옵션 중 택1: (a) academic GPU memory micro-benchmark 논문 · (b) NVIDIA Nsight Compute kernel-level analysis report · (c) conservative estimate (0.75 ± 0.05 sensitivity sweep). 출처 라벨 동반 (`gpu_memory_benchmark_paper_X` 등)
+- lab Blackwell 8 GPU 실측 (`lab_blackwell_measured`) — *refinement only*, D2 산출 자체는 spec 만으로 가능. 실측 보유 시 ratio 정확도 ±10% → ±2% 수준으로 좁힘 (qualitative correctness 는 spec 만으로 충분)
+
+#### Closed-form Formulas (산식 — overhead 추정 불필요)
+
+> **Overhead amortization 정합** — HBM/DRAM transaction 오버헤드 (RAS · CAS · bus protocol) 는 cold-start 영역 단발성. Long stream / row buffer hit 위에선 amortized → *constant η_HBM* multiplicative factor 한 개로 충분. *Per-transaction overhead 별도 모델링 불필요*.
+
+**Aux1 — Mixed Batching (arithmetic intensity 상승):**
+```
+saving_per_layer = weight_bytes / (HBM_external_BW × η_HBM_external)
+   ↑ weight streaming 한 번 절감 (separate prefill+decode batch 대비 mixed batch 의 weight reuse)
+```
+
+**Aux2 — Bus Traffic Reduction (KV cache HBM↔GPU 절감, Long-ctx 영역 dominant):**
+```
+Without PIM (GPU decode-attn):
+    time_KV = bytes_KV / (HBM_external_BW × η_HBM_external)     # ~75% 효율
+
+With PIM:
+    time_PIM_internal = bytes_KV_per_channel / (PIM_internal_BW × η_HBM_internal)   # ~100% 효율, internal BW × 3~4
+    time_result_to_GPU = bytes_result / (HBM_external_BW × η_HBM_external)
+
+saving = time_KV - (time_PIM_internal + time_result_to_GPU)
+   ↑ (a) bytes 절감 + (b) 남은 bytes 의 internal BW × 100% 효율 처리 — 두 영역 모두 반영
+```
+
+**F1 — SP-PIM vs GPU attention (compound factor):**
+```
+t_attn_GPU ≈ KV_bytes / (HBM_external_BW × η_HBM_external) + GPU_compute_time
+t_attn_PIM ≈ KV_bytes / (PIM_internal_BW × η_HBM_internal) + FSM_cycle_time
+F1_ratio = t_attn_GPU / t_attn_PIM
+   ↑ Long-ctx 일수록 memory-bound dominant → BW + η 의 multiplicative compound 영역
+```
+
+F2·F3·F5 는 Impl-8 evaluator.acceleration_decomposition() 의 산식 그대로 — `a + b` vs `max(a, b)` 영역.
+
+#### Implementation:
 - [ ] Workload sweep — ctx ∈ {2k, 8k, 32k, 128k, 512k, 1M} × batch ∈ {16, 64, 128, 256}
 - [ ] k_total sweep — fixed k_total 대조군 + adaptive k_total 비교
 - [ ] Chunk size sweep — PULS 내부 admission 의 chunk 결정 sensitivity (외부 reference 없음)
 - [ ] Deadband width sweep — ctx-tiered lookup vs static 비교
 - [ ] F1·F2·F3·F5 가속 source 별 ablation 기여도 분해 + F4 (steady-state 전제) 충족 검증
-- [ ] D2 산출 — F1~F5 cycle ratio 표 (workload regime 격자 cell 별)
+- [ ] Aux1·Aux2 closed-form 산출 (bytes-saved / bandwidth 영역, 위 산식 직접)
+- [ ] D2 산출 — F1~F5 + Aux1·Aux2 cycle ratio 표 (workload regime 격자 cell 별, 7 source)
 
-**Unit Tests:**
+#### Unit Tests:
 - [ ] Sweep grid coverage — ctx × batch 격자 모든 셀 실행 확인 (누락 0)
 - [ ] F1 ablation — SP-PIM 비활성화 (GPU attention kernel route) 시 가속 source disappear
 - [ ] F2 ablation — Double-buffering 비활성화 (μ-batch 직렬 강제) 시 `A_cycle = t_proj + t_attn`
 - [ ] F3 ablation — Single-instance fallback (A·B fusion) 시 steady-state cycle = `A_cycle + B_cycle`
 - [ ] F5 ablation — Channel-independent scheduling 비활성화 (lock-step max-KV wait) 시 straggler bubble 복원
 - [ ] F4 검증 — F2·F3 활성화 + μ-batch staggering 활성화 시 steady-state regime 도달 (F4 는 별도 기여가 아닌 전제 충족 확인)
-- [ ] 출처 라벨 round-trip — calibrated input 의 `source` 필드 (`lab_blackwell_measured` · `ramulator2_hbm4_estimated_jedec_spec` · `nvlink4_sxm_spec`) 가 D2 보고서까지 보존
+- [ ] Aux1 — mixed vs separate batch 위 weight bytes 절감 산식 정합
+- [ ] Aux2 — KV bytes 절감 + internal BW × η_internal 의 compound 산식 정합 (long-ctx 위 dominant 검증)
+- [ ] η_HBM sensitivity sweep — η_HBM_external ∈ {0.70, 0.75, 0.80} 위 F1 · Aux2 ratio 의 monotonic 의존 확인
+- [ ] 출처 라벨 round-trip — 4 calibrated input source label (`blackwell_whitepaper_spec` · `ramulator2_hbm4_estimated_jedec_spec` · `llama3_70b_published_spec` · `longbench_longctx_poisson` + optional `lab_blackwell_measured` · η_HBM 출처) 이 D2 보고서까지 보존
 
-**Acceptance:** §5.7 F1·F2·F3·F5 각 source 의 isolated cycle ratio 가 calibrated input 위 workload regime 격자에서 산출. F4 steady-state 전제 충족. *Comparative baseline 미산출 — D2 deliverable 단독 (Deliverables 정합).*
+#### Acceptance:
+§5.7 F1·F2·F3·F5 + Aux1·Aux2 각 source 의 isolated cycle ratio 가 calibrated input 위 workload regime 격자에서 산출. F4 steady-state 전제 충족. *Whitepaper + Ramulator2 + model spec + trace 의 4 source 만으로 D2 산출 — lab 실측은 refinement (선택 영역)*. *Comparative baseline 미산출 — D2 deliverable 단독 (Deliverables 정합).*
 
 ---
 
@@ -522,6 +567,8 @@ Impl-1~9 (dummy time model 위) 가 산출 *가능 / 불가능 / 스코프 외* 
 - **OI5. 구현 언어 미결.** Python 권장 (vLLM · Sarathi-Serve 정합) 이나 simulation throughput 영역에서 Rust / Go 대안 검토 가능. Impl-1 진입 시 결정.
 - **OI6. 추가 module 발견 가능성.** §0 의 iterative discovery 원칙 — Impl-9 E2E acceptance 실행 시 추가 누락 노출 가능. 본 plan 은 *시작점* 이지 final spec 아님. Gap 노출 시 plan 갱신으로 흡수.
 - **OI7. Phase 3 의 silicon validation 부재 disclosure.** Impl-10 후에도 PULS 자체 실리콘 부재로 PIM side (`t_PIM` · SP-PIM aggregate · broadcast overhead) 는 Ramulator2 추정 유지 (`ramulator2_hbm4_estimated_jedec_spec` 라벨). D2 산출은 *calibrated projection* 이지 silicon-validated measurement 아님. README/ARCHITECTURE 의 "will be measured in Phase 3" 류 문구는 "will be projected with stated provenance" 로 정정 필요 (별도 follow-up commit 영역; PLAN.md 자체에는 framing 반영 완료).
+- **OI8. Impl-10 의 lab Blackwell 실측 의존성 (spec-first 정합).** Impl-10 D2 산출은 *whitepaper + Ramulator2 + 모델 spec + trace* 의 4 source 만으로 가능 — *lab Blackwell 8 GPU 실측은 refinement (선택 영역), blocker 아님.* 사유: (i) D2 = *ratio* 산출 (절대 metric 아님) → 분자/분모 동일 출처 (whitepaper spec) 위 일관 → ratio robust, (ii) F2 · F3 산식이 `(a+b) / max(a,b)` 형태 → 절대값 영향 0, 균형 여부만 dominant, (iii) F5 = trace 의 KV variance dominant → PIM tile time 절대값 무관, (iv) F1 · Aux1 · Aux2 의 BW 비교는 spec 만으로 closed-form 산출 (§4 Impl-10 산식 영역). Lab 실측이 있으면 정확도 ±10% → ±2% 로 좁힘 (qualitative correctness 는 spec 만으로 충분). 따라서 *Impl-10 진입 = lab 접근 가용성에 blocked 아님*. Lab 실측은 *후속 refinement commit* 으로 처리 가능.
+- **OI9. η_HBM 출처 결정 (Impl-10 진입 시).** η_HBM_external (~0.7~0.8) 은 NVIDIA whitepaper 에 *명시 안 됨* (peak BW 만 광고). 3 출처 옵션: (a) academic GPU memory micro-benchmark 논문 (가장 정확) — (b) NVIDIA Nsight Compute kernel-level analysis report (공개 자료) — (c) conservative estimate (0.75 ± 0.05 sensitivity sweep + 출처 라벨 동반). 선택은 Impl-10 진입 시점에 — 어느 옵션이든 PLAN §0.5 *출처 라벨 동반* 으로 정직한 disclosure 보장. η_HBM_internal (~1.0) 은 RTL FSM cycle 정확 산출 영역 (확정값 영역).
 
 ---
 
