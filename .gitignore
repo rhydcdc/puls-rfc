@@ -29,6 +29,10 @@ implementation/plans/
 # Local report drafts (markdown synthesized into README; not separately published)
 implementation/reports/
 
+# Top-level PLAN/MODULES docs (Korean working notes; English versions to be published later)
+implementation/PLAN.md
+implementation/MODULES.md
+
 # Claude Code per-user permission overrides (env-specific paths)
 .claude/settings.local.json
 
