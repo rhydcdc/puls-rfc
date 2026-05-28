@@ -214,6 +214,7 @@ Directly serves as the implementation basis for the *"PIM completion time precom
 - **Only channel = HBM** — PIM resides on the HBM4 logic die, the GPU on a separate die; no direct P2P link.
 - **Write → Read protocol** — PIM **writes** the result O to a designated address in HBM → the GPU **reads** that address exactly on time via computed wait.
 - **Natural emergence of GPU-side conformance** — Data passing between GPU-internal kernels uses the same scheme (via global memory) → no separate DMA engine · doorbell mechanism required.
+- **PIM-GPU TSV bandwidth contention margin** — Since PIM (internal HBM logic die) and Instance A GPU share HBM TSV bandwidth, simultaneous full-load operations can throttle each other. A 10% conservative time margin (`PIM_SLACK_SAFETY_MARGIN = 0.9`) is applied when computing GPU prefill chunk size from predicted PIM decode-attn time, preventing contention. Calibrated value to be refined in Stage 2 / Impl-11.
 
 ## 4. Op Partitioning
 
@@ -235,14 +236,12 @@ Only decode attention simultaneously satisfies these 3 conditions → the PIM sc
 
 ## 5. Scheduler Integration
 
-### 5.1 Phase-aware Channel Split
+### 5.1 Phase-aware Channel Activation
 
-At the entry of each μ-batch step, the scheduler determines the SP-PIM aggregate channel count k_total. Max k_total = 2048 across Instance A's 8 GPUs.
+Instance A's SP-PIM aggregate channel count is fixed at k_total = 2048. PIM activates whenever decode-attn work exists, naturally overlapping with the HBM idle headroom of Instance A's GPU compute-bound stages (QKV · prefill_attn · O-proj) per O3 + §3.5.3. Because PIM is sequence-parallel across channels (§3.4), at any moment a single μ-batch's decode-attn occupies all 2048 channels — no channel-level partitioning across concurrent μ-batches is needed (Hermite identity on per-channel tile counts equates partition vs serialize). Residual TSV contention is conservatively absorbed by the 10% margin `PIM_SLACK_SAFETY_MARGIN = 0.9` — no fine-grained channel knob (Impl-10-pre-2).
 
-- **Attention step** — In a mixed batch, prefill chunk tokens are handled by the GPU attention kernel and decode tokens by SP-PIM *concurrently*. If the batch contains decode tokens, k_total = 2048 is activated (a single attention op cooperates in lock-step over 2048 channels). For a pure-prefill batch, k_total = 0.
-- **Projection step (QKV / O-proj / FFN)** — No PIM work in the same μ-batch. However, under intra-instance double-buffering (§5.6) in which PIM pre-processes the next μ-batch's decode attention, k_total is activated during the projection window — aligned with P5's *compute-bound timing activation* principle. k_total is not binary but a continuous stack-granular dial (per-GPU n × 32, n ∈ {0..8}) — in regions where projection is fully compute-bound, k_total = 2048 (upper bound); when MFU saturation falls short or additional GPU-side BW is required, it is partially withdrawn (P4).
-
-This split can be changed at step entry via a single toggle command, and due to channel-level independence does not conflict with the GPU-side command stream.
+- **Attention step** — In a mixed batch, prefill chunk tokens go to the GPU attention kernel and decode tokens to SP-PIM *concurrently*. With decode tokens present, all 2048 channels run a single lock-step op. For a pure-prefill batch (no decode rows), PIM op_time = 0.
+- **Projection step (QKV / O-proj / FFN)** — No same-μ-batch PIM work. Under intra-instance double-buffering (§5.6), PIM processes the *next* μ-batch's decode-attn during the projection window — aligned with P5's compute-bound timing activation.
 
 ### 5.2 Fixed-shape Handoff to Instance B
 
@@ -404,8 +403,8 @@ Adaptive admission's primary objective = balancing the two instances of the inte
 |---|---|---|---|
 | Inter-AB (primary) | `A_cycle > B_cycle` (B idle) | A-bound (long-ctx) | admission ↓ effect limited (the PIM attention component of `A_cycle` depends on KV length) — B idle naturally accepted |
 | Inter-AB (primary) | `A_cycle < B_cycle` (A idle) | B-bound (short-ctx + low batch) | admit prefill chunk → `A_cycle` increases, balance restored |
-| Intra-A (secondary) | GPU idle > `θ_high`, PIM busy | PIM-dominant inside Instance A | admit additional decode → fill PIM window |
-| Intra-A (secondary) | PIM idle > `θ_high`, GPU busy | GPU-dominant inside Instance A | admit prefill chunk → fill GPU window |
+| Intra-A (secondary) | GPU idle > `θ_high`, PIM busy | PIM-dominant inside Instance A | admit prefill chunk → fill GPU window (utilize idle GPU with PREFILL_ATTN concurrent with PIM decode-attn) |
+| Intra-A (secondary) | PIM idle > `θ_high`, GPU busy | GPU-dominant inside Instance A | admit additional decode → fill PIM window (utilize idle PIM with decode-attn concurrent with GPU projection) |
 | — | Both layers below `θ_low` | balanced | maintain current admission |
 | — | Both layers idle | underloaded | enlarge μ-batch size or accelerate wait tokens |
 

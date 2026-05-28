@@ -62,7 +62,7 @@ def _make_scheduler_core(kv_capacity: int = 1_000_000):
 
 def _admission_event():
     return Event(timestamp=0.0, type=EventType.ADMISSION_TICK,
-                 payload={"t_proj": 1.0, "t_pim_fn": lambda k, n: 0.5,
+                 payload={"t_proj": 1.0, "t_pim_fn": lambda n: 0.5,
                           "a_cycle": 1.0, "b_cycle": 1.0, "ctx_tokens": 1000})
 
 
@@ -218,10 +218,10 @@ def test_completion_does_not_corrupt_other_mbs():
     core._handle(_admission_event())
     mb1_id = core._next_mb_id - 1
     mb1 = core.dispatcher.micro_batches[mb1_id]
-    before_kv = mb1.k_total, mb1.kv_rows_total, mb1.current_layer_index
+    before_kv = mb1.kv_rows_total, mb1.current_layer_index
     # mb_0 finalize
     _drive_until_done(core, mb0_id)
-    after_kv = mb1.k_total, mb1.kv_rows_total, mb1.current_layer_index
+    after_kv = mb1.kv_rows_total, mb1.current_layer_index
     assert before_kv == after_kv
 
 

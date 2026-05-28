@@ -32,7 +32,7 @@ def test_ablation_f1_off_dispatcher_uses_fallback(config_f1_disabled):
     pim = PIMExecutor(config=config_f1_disabled)
     d = Dispatcher(config=config_f1_disabled, clock=clock, queue=queue, dag=dag, pim_executor=pim)
     dag.add_micro_batch(0)
-    d.register(MicroBatch(id=0, k_total=2048, kv_rows_total=32, kv_rows_lockstep=32))
+    d.register(MicroBatch(id=0, kv_rows_total=32, kv_rows_lockstep=32))
     decode_node = dag.get_node(0, NodeType.DECODE_ATTN)
     op_time = d._op_time(decode_node)
     assert op_time == config_f1_disabled.time.gpu_op_time_us["decode_attn_fallback"]
@@ -46,7 +46,7 @@ def test_ablation_f1_off_resource_label_remains_pim(config_f1_disabled):
     pim = PIMExecutor(config=config_f1_disabled)
     d = Dispatcher(config=config_f1_disabled, clock=clock, queue=queue, dag=dag, pim_executor=pim)
     dag.add_micro_batch(0)
-    d.register(MicroBatch(id=0, k_total=2048, kv_rows_total=32, kv_rows_lockstep=32))
+    d.register(MicroBatch(id=0, kv_rows_total=32, kv_rows_lockstep=32))
 
     captured = []
     d.on_dispatch(lambda e: captured.append(e))
@@ -72,11 +72,11 @@ def test_ablation_f1_default_uses_real_pim(dummy_config):
     pim = PIMExecutor(config=dummy_config)
     d = Dispatcher(config=dummy_config, clock=clock, queue=queue, dag=dag, pim_executor=pim)
     dag.add_micro_batch(0)
-    d.register(MicroBatch(id=0, k_total=2048, kv_rows_total=32, kv_rows_lockstep=32))
+    d.register(MicroBatch(id=0, kv_rows_total=32, kv_rows_lockstep=32))
     decode = dag.get_node(0, NodeType.DECODE_ATTN)
     op_time = d._op_time(decode)
     # 정상 PIM path = pim_executor.op_time 산출값
-    expected = pim.op_time(k_channels=2048, kv_rows_total=32, kv_rows_lockstep=32)
+    expected = pim.op_time(kv_rows_total=32, kv_rows_lockstep=32)
     assert op_time == expected
 
 
@@ -159,7 +159,7 @@ def test_ablation_f5_off_pim_uses_lockstep(config_f5_disabled):
     tile_rows = config_f5_disabled.time.rtl_fsm_tile_rows
     tile_time = config_f5_disabled.time.pim_tile_time_ns["FP8"]
     kv_lockstep = 8192
-    op_time = pim.op_time(k_channels=k, kv_rows_total=999999, kv_rows_lockstep=kv_lockstep)
+    op_time = pim.op_time(kv_rows_total=999999, kv_rows_lockstep=kv_lockstep)
     # F5 비활성화 → kv_rows_total 무시, kv_rows_lockstep 사용
     expected_tiles = math.ceil(kv_lockstep / (k * tile_rows))
     expected = expected_tiles * tile_time  # broadcast=0 (k <= k_per_gpu_max는 false, k=2048>k_per_gpu_max=256 → +broadcast)
@@ -172,7 +172,7 @@ def test_ablation_f5_off_lockstep_zero_raises(config_f5_disabled):
     """f5_disabled=True + kv_rows_lockstep=0 → ValueError."""
     pim = PIMExecutor(config=config_f5_disabled)
     with pytest.raises(ValueError, match="F5 ablation requires kv_rows_lockstep > 0"):
-        pim.op_time(k_channels=2048, kv_rows_total=1000, kv_rows_lockstep=0)
+        pim.op_time(kv_rows_total=1000, kv_rows_lockstep=0)
 
 
 def test_ablation_f5_default_uses_kv_rows_total(dummy_config):
@@ -182,7 +182,7 @@ def test_ablation_f5_default_uses_kv_rows_total(dummy_config):
     tile_rows = dummy_config.time.rtl_fsm_tile_rows
     tile_time = dummy_config.time.pim_tile_time_ns["FP8"]
     kv_rows_total = 1000
-    op_time = pim.op_time(k_channels=k, kv_rows_total=kv_rows_total, kv_rows_lockstep=999999)
+    op_time = pim.op_time(kv_rows_total=kv_rows_total, kv_rows_lockstep=999999)
     # F5 활성화 → kv_rows_lockstep 무시
     expected_tiles = math.ceil(kv_rows_total / (k * tile_rows))
     expected = expected_tiles * tile_time + dummy_config.time.pim_broadcast_latency_ns_cross_gpu
@@ -198,8 +198,8 @@ def test_ablation_f5_lockstep_inflates_compared_to_total(dummy_config):
         ablation=dataclasses.replace(dummy_config.ablation, f5_disabled=True),
     ))
     k = 2048
-    t_on = pim_on.op_time(k_channels=k, kv_rows_total=11000, kv_rows_lockstep=20000)
-    t_off = pim_off.op_time(k_channels=k, kv_rows_total=11000, kv_rows_lockstep=20000)
+    t_on = pim_on.op_time(kv_rows_total=11000, kv_rows_lockstep=20000)
+    t_off = pim_off.op_time(kv_rows_total=11000, kv_rows_lockstep=20000)
     assert t_off >= t_on  # F5 off 의 effective work ≥ F5 on
 
 

@@ -81,7 +81,7 @@ def test_dispatch_pim_records_pim_instance_a(dummy_config, clock, event_queue, d
     qkv_node.transition_to(NodeState.READY)
     qkv_node.transition_to(NodeState.RUNNING)
     qkv_node.transition_to(NodeState.DONE)
-    mb = MicroBatch(id=0, k_total=256, kv_rows_total=100)
+    mb = MicroBatch(id=0, kv_rows_total=100)
     d.register(mb)
     decode_node = dag.get_node(0, NodeType.DECODE_ATTN)
     decode_node.transition_to(NodeState.READY)
@@ -168,10 +168,10 @@ def test_balance_intra_A_activates_via_dispatch_chain(dummy_config):
     node = dag.get_node(0, NodeType.QKV)
     node.transition_to(NodeState.READY)
     d.dispatch_gpu(node)
-    # balance_intra_A — pim_idle > theta_high AND gpu_idle <= theta_high → prefill_chunk + n_sat
+    # Impl-10-pre-2 — ARCH §6.4 invert: PIM idle > theta_high AND gpu_idle <= theta_high → decode + 1 (PIM 한테 일 더)
     new_chunk, new_decode = admission.balance_intra_A(prefill_chunk_tokens=100, decode_request_count=4)
-    assert new_chunk == 100 + cfg.admission.n_sat   # PIM HIGH idle → chunk 증가
-    assert new_decode == 4                            # GPU LOW idle → decode 변경 없음
+    assert new_chunk == 100         # prefill 변경 0 (GPU 가 busy 상태)
+    assert new_decode == 5          # PIM HIGH idle → decode + 1 (PIM 한테 일 추가)
 
 
 # ---- Determinism ----

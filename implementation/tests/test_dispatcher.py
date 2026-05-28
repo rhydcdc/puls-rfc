@@ -16,13 +16,11 @@ def _mark_done(dispatcher: Dispatcher, mb_id: int, *ntypes: NodeType) -> None:
 
 
 def _register_pim_mb(dispatcher: Dispatcher, mb_id: int) -> MicroBatch:
-    """Impl-5 — PIM dispatch 위 MicroBatch register helper. backward-compat 위해
-    Impl-4 의 placeholder default args (k_total_max=2048, rtl_fsm_tile_rows=32) 와
-    동일 lookup 값 사용 → expected timestamp 변경 0.
+    """Impl-5 — PIM dispatch 위 MicroBatch register helper.
+    Impl-10-pre-2 — k_total knob 폐기 위 mb 에 kv_rows_total 만 (k_aggregate PIMExecutor 위 derived).
     """
     mb = MicroBatch(
         id=mb_id,
-        k_total=dispatcher.config.admission.k_total_max,
         kv_rows_total=dispatcher.config.time.rtl_fsm_tile_rows,
     )
     dispatcher.register(mb)
@@ -210,7 +208,6 @@ def test_dispatch_pim_decode_attn_sets_busy_and_pushes_event(dispatcher: Dispatc
     assert decode.state is NodeState.RUNNING
     # Impl-4: PIM op_time = pim_executor.op_time(k_max, tile_rows) (placeholder default args)
     expected_t = dispatcher.pim_executor.op_time(
-        k_channels=dispatcher.config.admission.k_total_max,
         kv_rows_total=dispatcher.config.time.rtl_fsm_tile_rows,
     )
     assert dispatcher.queue.peek_timestamp() == expected_t
@@ -313,7 +310,6 @@ def test_dispatch_pim_op_time_via_pim_executor(dispatcher: Dispatcher):
     dispatcher.refresh_ready()
     decode = dispatcher.dag.get_node(0, NodeType.DECODE_ATTN)
     expected = dispatcher.pim_executor.op_time(
-        k_channels=dispatcher.config.admission.k_total_max,
         kv_rows_total=dispatcher.config.time.rtl_fsm_tile_rows,
     )
     assert dispatcher._op_time(decode) == expected
@@ -330,7 +326,6 @@ def test_dispatch_pim_completion_timestamp_uses_pim_executor(dispatcher: Dispatc
     dispatcher.dispatch_pim(decode)
     pushed_timestamp = dispatcher.queue.peek_timestamp()
     op_time = dispatcher.pim_executor.op_time(
-        k_channels=dispatcher.config.admission.k_total_max,
         kv_rows_total=dispatcher.config.time.rtl_fsm_tile_rows,
     )
     assert pushed_timestamp == t0 + op_time
@@ -377,20 +372,20 @@ def test_stress_100_micro_batch_no_invariant_violation(scheduler_core):
 # =========================================================================
 
 def test_dispatcher_register_micro_batch(dispatcher):
-    mb = MicroBatch(id=42, k_total=512, kv_rows_total=1000)
+    mb = MicroBatch(id=42, kv_rows_total=1000)
     dispatcher.register(mb)
     assert dispatcher.micro_batches[42] is mb
 
 
 def test_dispatcher_register_duplicate_raises(dispatcher):
-    mb = MicroBatch(id=42, k_total=512, kv_rows_total=1000)
+    mb = MicroBatch(id=42, kv_rows_total=1000)
     dispatcher.register(mb)
     with pytest.raises(RuntimeError, match="already registered"):
         dispatcher.register(mb)
 
 
 def test_dispatcher_unregister_micro_batch(dispatcher):
-    mb = MicroBatch(id=42, k_total=512, kv_rows_total=1000)
+    mb = MicroBatch(id=42, kv_rows_total=1000)
     dispatcher.register(mb)
     dispatcher.unregister(42)
     assert 42 not in dispatcher.micro_batches
@@ -402,21 +397,21 @@ def test_dispatcher_unregister_unknown_raises(dispatcher):
 
 
 def test_dispatch_pim_uses_real_signal_flow(dispatcher):
-    """O4.1 해소 — dispatch_pim event timestamp 가 mb.k_total · mb.kv_rows_total 위 op_time."""
+    """dispatch_pim event timestamp 가 mb.kv_rows_total 위 op_time (k_aggregate PIMExecutor 위 derived)."""
     dispatcher.dag.add_micro_batch(0)
-    mb = MicroBatch(id=0, k_total=2048, kv_rows_total=10000)
+    mb = MicroBatch(id=0, kv_rows_total=10000)
     dispatcher.register(mb)
     _mark_done(dispatcher, 0, NodeType.QKV)
     dispatcher.refresh_ready()
     decode = dispatcher.dag.get_node(0, NodeType.DECODE_ATTN)
     t0 = dispatcher.clock.now
     dispatcher.dispatch_pim(decode)
-    expected = t0 + dispatcher.pim_executor.op_time(k_channels=2048, kv_rows_total=10000)
+    expected = t0 + dispatcher.pim_executor.op_time(kv_rows_total=10000)
     assert dispatcher.queue.peek_timestamp() == expected
 
 
 def test_dispatch_pim_unregistered_raises(dispatcher):
-    """O4.1 negative — unregistered mb 의 PIM dispatch 시 raise."""
+    """negative — unregistered mb 의 PIM dispatch 시 raise."""
     dispatcher.dag.add_micro_batch(0)
     _mark_done(dispatcher, 0, NodeType.QKV)
     dispatcher.refresh_ready()
@@ -425,26 +420,13 @@ def test_dispatch_pim_unregistered_raises(dispatcher):
         dispatcher.dispatch_pim(decode)
 
 
-@pytest.mark.parametrize("k_total", [0, 256, 512, 768, 1024, 1280, 1536, 1792, 2048])
-def test_dispatch_pim_k_total_sweep(dispatcher, k_total):
-    """9-step k_total dial 위 _op_time 산식 정합."""
-    dispatcher.dag.add_micro_batch(0)
-    mb = MicroBatch(id=0, k_total=k_total, kv_rows_total=10000)
-    dispatcher.register(mb)
-    _mark_done(dispatcher, 0, NodeType.QKV)
-    dispatcher.refresh_ready()
-    decode = dispatcher.dag.get_node(0, NodeType.DECODE_ATTN)
-    expected = dispatcher.pim_executor.op_time(k_channels=k_total, kv_rows_total=10000)
-    assert dispatcher._op_time(decode) == expected
-
-
 @pytest.mark.parametrize("kv_rows", [0, 100, 10000, 1_000_000])
 def test_dispatch_pim_kv_rows_total_sweep(dispatcher, kv_rows):
     dispatcher.dag.add_micro_batch(0)
-    mb = MicroBatch(id=0, k_total=2048, kv_rows_total=kv_rows)
+    mb = MicroBatch(id=0, kv_rows_total=kv_rows)
     dispatcher.register(mb)
     _mark_done(dispatcher, 0, NodeType.QKV)
     dispatcher.refresh_ready()
     decode = dispatcher.dag.get_node(0, NodeType.DECODE_ATTN)
-    expected = dispatcher.pim_executor.op_time(k_channels=2048, kv_rows_total=kv_rows)
+    expected = dispatcher.pim_executor.op_time(kv_rows_total=kv_rows)
     assert dispatcher._op_time(decode) == expected

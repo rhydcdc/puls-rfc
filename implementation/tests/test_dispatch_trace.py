@@ -65,11 +65,9 @@ def _make_trace_fixture():
     )
 
     for mb_id in (0, 1, 2):
-        # Impl-5 — PIM dispatch signal flow. backward-compat 위해 Impl-4 placeholder
-        # 와 동일 lookup 값 (k_total=2048, kv_rows_total=32) → trace timing 영향 0.
+        # PIM dispatch signal flow. Impl-10-pre-2 — k_total knob 폐기.
         dispatcher.register(MicroBatch(
             id=mb_id,
-            k_total=config.admission.k_total_max,
             kv_rows_total=config.time.rtl_fsm_tile_rows,
         ))
         window.admit(mb_id)

@@ -140,16 +140,6 @@ def test_admission_tick_converts_spec_to_micro_batch(scheduler_core):
     assert mb.id == 0
 
 
-def test_admission_tick_micro_batch_carries_k_total(scheduler_core):
-    """등록된 mb.k_total == spec.k_total (signal flow)."""
-    scheduler_core.request_queue.push(_make_req(0, kv_length=50))
-    scheduler_core._handle(Event(timestamp=0.0, type=EventType.ADMISSION_TICK, payload={}))
-    mb = scheduler_core.dispatcher.micro_batches[0]
-    # k_total 은 admission 의 결정 — 정확값은 admission.layer1 산출이지만, *0 이상 + 다이얼 내* invariant
-    assert mb.k_total >= 0
-    assert mb.k_total <= scheduler_core.config.admission.k_total_max
-
-
 def test_admission_tick_micro_batch_carries_kv_rows_total(scheduler_core):
     """등록된 mb.kv_rows_total == Σ kv_length over admitted reqs."""
     scheduler_core.request_queue.push(_make_req(0, kv_length=100))

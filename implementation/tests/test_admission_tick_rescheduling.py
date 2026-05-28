@@ -14,7 +14,7 @@ def _admission_event(timestamp: float = 0.0) -> Event:
         timestamp=timestamp,
         type=EventType.ADMISSION_TICK,
         payload={
-            "t_proj": 0.0, "t_pim_fn": lambda k, n: 0.0,
+            "t_proj": 0.0, "t_pim_fn": lambda n: 0.0,
             "a_cycle": 0.0, "b_cycle": 0.0, "ctx_tokens": 0,
         },
     )

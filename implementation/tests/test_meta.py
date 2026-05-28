@@ -37,7 +37,6 @@ _EXPECTED_MODULES = {
     "kv_accountant",
     "idle_telemetry",
     "deadband",
-    "k_total",
     "admission",
     # Impl-4
     "pim_emulator",
@@ -57,8 +56,6 @@ _EXPECTED_MODULES = {
 }
 
 
-_EXPECTED_K_TOTAL_DIAL = (0, 256, 512, 768, 1024, 1280, 1536, 1792, 2048)
-
 _EXPECTED_ADMISSION_FIELDS = {
     "n_sat",
     "kv_capacity_aggregate",
@@ -68,10 +65,12 @@ _EXPECTED_ADMISSION_FIELDS = {
     "idle_theta_low",
     "idle_theta_high",
     "request_queue_capacity",
-    "k_total_step",
-    "k_total_max",
     # Impl-9 — ADMISSION_TICK self-rescheduling cadence (Q1)
     "tick_interval_us",
+    # Impl-10-pre-2 (O9.1) — Hybrid Chunk Size Policy base
+    "prefill_chunk_default",
+    # Impl-10-pre-2 (B option) — PIM-GPU TSV BW contention margin (ARCH §3.5.3)
+    "pim_slack_safety_margin",
 }
 
 
@@ -112,13 +111,6 @@ def test_meta_dag_precedence_matches_plan():
         NodeType.DECODE_ATTN: {NodeType.QKV},                               # I2
         NodeType.O_PROJ: {NodeType.PREFILL_ATTN, NodeType.DECODE_ATTN},     # I3
     }
-
-
-def test_meta_k_total_dial_matches_plan_literal():
-    """PLAN.md §4 Impl-3 의 k_total dial {0, 256, ..., 2048} (9-step) 정합."""
-    cfg = default_dummy_config().admission
-    dial = tuple(range(0, cfg.k_total_max + 1, cfg.k_total_step))
-    assert dial == _EXPECTED_K_TOTAL_DIAL
 
 
 def test_meta_admission_config_fields_match_plan_inventory():
@@ -187,9 +179,16 @@ def test_meta_pim_tile_time_dict_has_both_regimes():
 def test_meta_micro_batch_has_impl5_fields():
     """MicroBatch 의 Impl-5 신규 3 필드 존재 + int."""
     fields = MicroBatch.__dataclass_fields__
-    for name in ("k_total", "kv_rows_total", "current_layer_index"):
+    for name in ("kv_rows_total", "current_layer_index"):
         assert name in fields
         assert fields[name].type is int
+
+
+def test_meta_micro_batch_has_prefill_chunk_budget_field():
+    """Impl-10-pre-2 (B option) — MicroBatch.prefill_chunk_budget int field."""
+    fields = MicroBatch.__dataclass_fields__
+    assert "prefill_chunk_budget" in fields
+    assert fields["prefill_chunk_budget"].type is int
 
 
 def test_meta_micro_batch_spec_has_kv_rows_total_field():
@@ -262,6 +261,21 @@ def test_meta_request_has_impl6_lifecycle_fields():
     assert "completion_time" in fields
     assert fields["max_tokens"].type is int
     assert fields["decoded_count"].type is int
+
+
+def test_meta_request_has_prefill_processed_field():
+    """Impl-10-pre-2 (O9.1) — Request.prefill_processed field 신설 + int."""
+    from puls_sched.request import Request
+    fields = Request.__dataclass_fields__
+    assert "prefill_processed" in fields
+    assert fields["prefill_processed"].type is int
+
+
+def test_meta_time_config_has_gpu_op_time_per_token_us():
+    """Impl-10-pre-2 (O9.1) — TimeConfig.gpu_op_time_per_token_us 신설 + float."""
+    fields = TimeConfig.__dataclass_fields__
+    assert "gpu_op_time_per_token_us" in fields
+    assert fields["gpu_op_time_per_token_us"].type is float
 
 
 def test_meta_trace_entry_fields():
@@ -382,7 +396,7 @@ def test_meta_dispatch_event_fields():
     """DispatchEvent schema lock-in — 6 field."""
     from puls_sched.evaluator import DispatchEvent
     assert set(DispatchEvent.__dataclass_fields__.keys()) == {
-        "timestamp", "micro_batch_id", "node_type", "resource", "k_total", "dag_state_snapshot",
+        "timestamp", "micro_batch_id", "node_type", "resource", "dag_state_snapshot",
     }
 
 
@@ -391,7 +405,7 @@ def test_meta_admission_snapshot_fields():
     from puls_sched.evaluator import AdmissionSnapshot
     assert set(AdmissionSnapshot.__dataclass_fields__.keys()) == {
         "timestamp", "gpu_idle_fraction", "pim_idle_fraction",
-        "a_cycle", "b_cycle", "ctx_tokens", "spec_admitted", "n", "k_total",
+        "a_cycle", "b_cycle", "ctx_tokens", "spec_admitted", "n",
     }
 
 

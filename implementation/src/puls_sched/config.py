@@ -28,6 +28,7 @@ class TimeConfig:
     rtl_fsm_cycle_per_tile: int
     rtl_fsm_tile_rows: int                       # ARCH §3.1 "32-row tile FSM" — RTL 합성 확정값 (PLAN §0.5 예외)
     pim_broadcast_latency_ns_cross_gpu: float    # SP-PIM cross-GPU lock-step broadcast overhead placeholder
+    gpu_op_time_per_token_us: float = 0.01       # Impl-10-pre-2 — PREFILL_ATTN chunk-scaled op_time placeholder. Stage 2 calibrated
 
 
 @dataclass(frozen=True)
@@ -46,9 +47,9 @@ class AdmissionConfig:
     idle_theta_low: float
     idle_theta_high: float
     request_queue_capacity: int
-    k_total_step: int
-    k_total_max: int
-    tick_interval_us: float = 10.0   # Impl-9 Q1 — ADMISSION_TICK self-rescheduling cadence placeholder. PLAN §0.5 dummy
+    tick_interval_us: float = 10.0           # Impl-9 Q1 — ADMISSION_TICK self-rescheduling cadence placeholder. PLAN §0.5 dummy
+    prefill_chunk_default: int = 512         # Impl-10-pre-2 — Hybrid Chunk Size Policy base (Sarathi/vLLM 시중 표준). Cold start fallback
+    pim_slack_safety_margin: float = 0.9     # Impl-10-pre-2 (B option) — PIM-GPU TSV BW contention 위 10% conservative margin (ARCH §3.5.3)
 
 
 @dataclass(frozen=True)
@@ -122,8 +123,6 @@ def default_dummy_config() -> Config:
             idle_theta_low=0.1,
             idle_theta_high=0.3,
             request_queue_capacity=1024,
-            k_total_step=256,
-            k_total_max=2048,
         ),
         ablation=AblationConfig(),
         seed=42,

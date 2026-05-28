@@ -54,23 +54,24 @@ def test_balance_inter_ctx_tier_short_outside_mid_inside(admission, admission_co
 
 # --- balance_intra_A ---
 
-def test_balance_intra_gpu_idle_admits_decode(admission, idle_telemetry):
-    # GPU idle high, PIM busy
+def test_balance_intra_gpu_idle_admits_prefill(admission, admission_config, idle_telemetry):
+    """Impl-10-pre-2 — ARCH §6.4 invert: GPU idle → prefill chunk admit (idle GPU 활용)."""
     idle_telemetry.reset(0.0)
     idle_telemetry.record_active("PIM", 0.0, 10.0)
     # gpu_idle = 1.0, pim_idle = 0.0; θ_high = 0.3
     prefill, decode = admission.balance_intra_A(0, decode_request_count=2)
-    assert prefill == 0
-    assert decode == 3
+    assert prefill == admission_config.n_sat   # GPU 한테 일 더 줌 (prefill chunk)
+    assert decode == 2                          # decode 변경 0
 
 
-def test_balance_intra_pim_idle_admits_prefill(admission, admission_config, idle_telemetry):
+def test_balance_intra_pim_idle_admits_decode(admission, idle_telemetry):
+    """Impl-10-pre-2 — ARCH §6.4 invert: PIM idle → decode admit (idle PIM 활용)."""
     idle_telemetry.reset(0.0)
     idle_telemetry.record_active("GPU", 0.0, 10.0)
     # gpu_idle=0, pim_idle=1.0
     prefill, decode = admission.balance_intra_A(0, decode_request_count=2)
-    assert prefill == admission_config.n_sat
-    assert decode == 2
+    assert prefill == 0                         # prefill chunk 변경 0
+    assert decode == 3                          # PIM 한테 일 더 줌 (decode)
 
 
 def test_balance_intra_both_below_theta_no_change(admission, idle_telemetry):
@@ -96,7 +97,7 @@ def test_balance_intra_both_above_theta_no_change(admission, idle_telemetry):
 
 def test_layer1_empty_queue_returns_none(admission):
     spec = admission.layer1(
-        t_proj=100.0, t_pim_fn=lambda k, n: 0.0,
+        t_proj=100.0, t_pim_fn=lambda n: 0.0,
         a_cycle=10.0, b_cycle=10.0, ctx_tokens=100,
     )
     assert spec is None
@@ -106,7 +107,7 @@ def test_layer1_admits_decode_within_kv_capacity(admission, request_queue):
     for i in range(3):
         request_queue.push(_make_req(i, kv_length=100))
     spec = admission.layer1(
-        t_proj=1e9, t_pim_fn=lambda k, n: 0.0,
+        t_proj=1e9, t_pim_fn=lambda n: 0.0,
         a_cycle=10.0, b_cycle=10.0, ctx_tokens=100,
     )
     assert spec is not None
@@ -127,7 +128,7 @@ def test_layer1_stops_at_kv_capacity(request_queue, kv_accountant, admission_con
     for i in range(3):
         request_queue.push(_make_req(i, kv_length=500))
     spec = adm.layer1(
-        t_proj=1e9, t_pim_fn=lambda k, n: 0.0,
+        t_proj=1e9, t_pim_fn=lambda n: 0.0,
         a_cycle=10.0, b_cycle=10.0, ctx_tokens=100,
     )
     assert spec is not None
@@ -138,32 +139,19 @@ def test_layer1_stops_at_kv_capacity(request_queue, kv_accountant, admission_con
 def test_layer1_returns_microbatch_spec(admission, request_queue):
     request_queue.push(_make_req(0))
     spec = admission.layer1(
-        t_proj=1e9, t_pim_fn=lambda k, n: 0.0,
+        t_proj=1e9, t_pim_fn=lambda n: 0.0,
         a_cycle=10.0, b_cycle=10.0, ctx_tokens=100,
     )
     assert isinstance(spec, MicroBatchSpec)
     assert spec.prefill_chunk_tokens >= 0
     assert isinstance(spec.decode_requests, tuple)
     assert spec.n >= 0
-    assert spec.k_total >= 0
-    assert spec.over_budget in (True, False)
-
-
-def test_layer1_over_budget_flag_propagates(admission, request_queue):
-    request_queue.push(_make_req(0))
-    spec = admission.layer1(
-        t_proj=1.0, t_pim_fn=lambda k, n: 1e9,
-        a_cycle=10.0, b_cycle=10.0, ctx_tokens=100,
-    )
-    assert spec is not None
-    assert spec.over_budget is True
-    assert spec.k_total == 0
 
 
 def test_layer1_mfu_floor_applied(admission, admission_config, request_queue):
     request_queue.push(_make_req(0))
     spec = admission.layer1(
-        t_proj=1e9, t_pim_fn=lambda k, n: 0.0,
+        t_proj=1e9, t_pim_fn=lambda n: 0.0,
         a_cycle=10.0, b_cycle=10.0, ctx_tokens=100,
     )
     assert spec.n == admission_config.n_sat
@@ -174,7 +162,7 @@ def test_layer1_kv_admit_release_roundtrip(admission, request_queue, kv_accounta
     for i in range(3):
         request_queue.push(_make_req(i, kv_length=100))
     spec = admission.layer1(
-        t_proj=1e9, t_pim_fn=lambda k, n: 0.0,
+        t_proj=1e9, t_pim_fn=lambda n: 0.0,
         a_cycle=10.0, b_cycle=10.0, ctx_tokens=100,
     )
     assert kv_accountant.remaining == initial - 300
@@ -188,7 +176,7 @@ def test_layer1_dispatcher_roundtrip(admission, request_queue, window, dispatche
     from puls_sched.node import NodeState, NodeType
     request_queue.push(_make_req(0))
     spec = admission.layer1(
-        t_proj=1e9, t_pim_fn=lambda k, n: 0.0,
+        t_proj=1e9, t_pim_fn=lambda n: 0.0,
         a_cycle=10.0, b_cycle=10.0, ctx_tokens=100,
     )
     assert spec is not None
@@ -213,7 +201,7 @@ def test_layer1_determinism_same_inputs_same_spec(admission_config, idle_telemet
         for i in range(3):
             rq.push(_make_req(i, kv_length=100))
         return adm.layer1(
-            t_proj=1e9, t_pim_fn=lambda k, n: float(k) * 0.5,
+            t_proj=1e9, t_pim_fn=lambda n: float(n) * 0.5,
             a_cycle=10.0, b_cycle=10.0, ctx_tokens=100,
         )
 
@@ -240,13 +228,13 @@ def test_layer1_multi_iteration_converges_in_deadband(admission_config, idle_tel
     for it in range(10):
         rq.push(_make_req(it, kv_length=10))
         spec = adm.layer1(
-            t_proj=1e9, t_pim_fn=lambda k, n: 0.0,
+            t_proj=1e9, t_pim_fn=lambda n: 0.0,
             a_cycle=10.0, b_cycle=10.0, ctx_tokens=100,
         )
         seq.append(spec.prefill_chunk_tokens)
 
-    # All zero (balanced, in-band from start) — no oscillation
-    assert seq == [0] * 10
+    # Impl-10-pre-2 — Hybrid base = prefill_chunk_default (512). Balanced 영역 위 base 유지.
+    assert seq == [admission_config.prefill_chunk_default] * 10
 
 
 def test_layer1_out_of_band_then_returns_to_band(admission_config, idle_telemetry):
@@ -262,16 +250,17 @@ def test_layer1_out_of_band_then_returns_to_band(admission_config, idle_telemetr
 
     rq.push(_make_req(0, kv_length=10))
     spec1 = adm.layer1(
-        t_proj=1e9, t_pim_fn=lambda k, n: 0.0,
+        t_proj=1e9, t_pim_fn=lambda n: 0.0,
         a_cycle=5.0, b_cycle=10.0, ctx_tokens=100,
     )
     rq.push(_make_req(1, kv_length=10))
     spec2 = adm.layer1(
-        t_proj=1e9, t_pim_fn=lambda k, n: 0.0,
+        t_proj=1e9, t_pim_fn=lambda n: 0.0,
         a_cycle=10.0, b_cycle=10.0, ctx_tokens=100,
     )
-    assert spec1.prefill_chunk_tokens == admission_config.n_sat  # out-of-band: increased
-    assert spec2.prefill_chunk_tokens == 0                       # in-band: no change
+    # Impl-10-pre-2 — Hybrid base = prefill_chunk_default. balance 가 adjustment 위 합산.
+    assert spec1.prefill_chunk_tokens == admission_config.prefill_chunk_default + admission_config.n_sat  # out-of-band: base + n_sat
+    assert spec2.prefill_chunk_tokens == admission_config.prefill_chunk_default                            # in-band: base 만
 
 
 # =========================================================================
@@ -291,7 +280,7 @@ def test_admission_kv_rows_total_sums_decode_reqs(admission, request_queue):
     request_queue.push(_make_req(1, kv_length=250))
     request_queue.push(_make_req(2, kv_length=75))
     spec = admission.layer1(
-        t_proj=1e9, t_pim_fn=lambda k, n: 0.0,
+        t_proj=1e9, t_pim_fn=lambda n: 0.0,
         a_cycle=10.0, b_cycle=10.0, ctx_tokens=100,
     )
     assert spec is not None
@@ -302,7 +291,7 @@ def test_admission_kv_rows_total_sums_decode_reqs(admission, request_queue):
 def test_admission_kv_rows_total_zero_if_no_decode(admission):
     """Empty queue → spec None (기존 동작 보존)."""
     spec = admission.layer1(
-        t_proj=1e9, t_pim_fn=lambda k, n: 0.0,
+        t_proj=1e9, t_pim_fn=lambda n: 0.0,
         a_cycle=10.0, b_cycle=10.0, ctx_tokens=100,
     )
     assert spec is None
@@ -322,7 +311,7 @@ def test_admission_kv_rows_total_monotonic_with_req_count(admission_config, idle
         for i in range(n_reqs):
             rq.push(_make_req(i, kv_length=50))
         spec = adm.layer1(
-            t_proj=1e9, t_pim_fn=lambda k, n: 0.0,
+            t_proj=1e9, t_pim_fn=lambda n: 0.0,
             a_cycle=10.0, b_cycle=10.0, ctx_tokens=100,
         )
         assert spec.kv_rows_total >= prev

@@ -73,7 +73,7 @@ def test_stress_instance_resource_interleaved_gpu_pim(instance_a, dummy_config):
 def test_stress_dispatcher_register_unregister_20_round_trip(dispatcher):
     """20 회 register → 20 회 unregister round-trip → micro_batches == {}."""
     for i in range(20):
-        dispatcher.register(MicroBatch(id=i, k_total=256, kv_rows_total=100))
+        dispatcher.register(MicroBatch(id=i, kv_rows_total=100))
     assert len(dispatcher.micro_batches) == 20
     for i in range(20):
         dispatcher.unregister(i)
@@ -83,7 +83,7 @@ def test_stress_dispatcher_register_unregister_20_round_trip(dispatcher):
 def test_stress_dispatcher_register_partial_unregister(dispatcher):
     """30 register, 10 unregister → 정확히 20 remaining (잘못된 mb evicted 0)."""
     for i in range(30):
-        dispatcher.register(MicroBatch(id=i, k_total=256, kv_rows_total=100))
+        dispatcher.register(MicroBatch(id=i, kv_rows_total=100))
     for i in range(10):
         dispatcher.unregister(i)
     remaining = set(dispatcher.micro_batches.keys())
@@ -93,10 +93,10 @@ def test_stress_dispatcher_register_partial_unregister(dispatcher):
 def test_stress_dispatcher_register_double_raise_among_20(dispatcher):
     """20 mb register 도중 중복 id → raise (invariant 강제)."""
     for i in range(20):
-        dispatcher.register(MicroBatch(id=i, k_total=256, kv_rows_total=100))
+        dispatcher.register(MicroBatch(id=i, kv_rows_total=100))
     # 21 번째: 기존 id 와 중복
     with pytest.raises(RuntimeError, match="already registered"):
-        dispatcher.register(MicroBatch(id=5, k_total=256, kv_rows_total=100))
+        dispatcher.register(MicroBatch(id=5, kv_rows_total=100))
     # 기존 20 보존 invariant
     assert len(dispatcher.micro_batches) == 20
 
@@ -202,7 +202,7 @@ def test_stress_pipeline_invariant_violation_zero(
     for step in range(20):
         op = rng.choice(["register", "unregister", "nvlink", "cycle", "advance"])
         if op == "register":
-            mb = MicroBatch(id=next_mb_id, k_total=256, kv_rows_total=100)
+            mb = MicroBatch(id=next_mb_id, kv_rows_total=100)
             dispatcher.register(mb)
             registered_ids.add(next_mb_id)
             mbs_for_advance.append(mb)

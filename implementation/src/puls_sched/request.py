@@ -29,6 +29,8 @@ class Request:
     max_tokens: int = 0
     decoded_count: int = 0
     completion_time: float | None = None
+    # ---- Impl-10-pre-2 (O9.1) — prefill chunking position tracker ----
+    prefill_processed: int = 0
 
     def transition_to(self, new_state: RequestState) -> None:
         if new_state not in _VALID_TRANSITIONS[self.state]:

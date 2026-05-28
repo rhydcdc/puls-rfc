@@ -50,10 +50,9 @@ def scheduler_core_l1():
 
 
 def _register_mb(scheduler_core, mb_id: int) -> None:
-    """Impl-5 — PIM dispatch signal flow. backward-compat (k=k_total_max, rows=tile_rows)."""
+    """PIM dispatch signal flow. Impl-10-pre-2 — k_total knob 폐기, kv_rows_total 만 운반."""
     scheduler_core.dispatcher.register(MicroBatch(
         id=mb_id,
-        k_total=scheduler_core.config.admission.k_total_max,
         kv_rows_total=scheduler_core.config.time.rtl_fsm_tile_rows,
     ))
 

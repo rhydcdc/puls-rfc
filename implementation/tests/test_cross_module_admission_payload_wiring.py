@@ -16,8 +16,8 @@ from puls_sched.run import Run
 
 # ---- _compose_admission_payload — 5 key 모두 산출 ----
 
-def test_compose_payload_returns_five_keys(tmp_path):
-    """_compose_admission_payload 가 5 개 key 모두 반환 (schema lock-in)."""
+def test_compose_payload_returns_six_keys(tmp_path):
+    """_compose_admission_payload 가 6 개 key 모두 반환 (Impl-10-pre-2 — gpu_op_time_per_token_us 추가)."""
     run = Run.init(
         config_module="puls_sched.config:default_dummy_config",
         trace_path_or_synthetic="synthetic:5",
@@ -27,6 +27,7 @@ def test_compose_payload_returns_five_keys(tmp_path):
     payload = run.scheduler._compose_admission_payload()
     assert set(payload.keys()) == {
         "t_proj", "t_pim_fn", "a_cycle", "b_cycle", "ctx_tokens",
+        "gpu_op_time_per_token_us",   # Impl-10-pre-2 (B option) — PIM-time-driven adaptive chunk
     }
 
 
@@ -92,36 +93,42 @@ def test_a_cycle_grows_after_dispatches(tmp_path):
         output_dir=tmp_path,
         seed=42,
     )
-    # 첫 compose — 진행 전 0
-    p0 = run.scheduler._compose_admission_payload()
-    assert p0["a_cycle"] == 0.0
-    # 진행
-    for _ in range(50):
+    # (B) — accumulated active_duration 직접 검증 (delta 영역의 _compose 자동 fire trap 회피).
+    for _ in range(5000):
         if not run.scheduler.step():
             break
-    # 두 번째 compose — delta > 0 (gpu/pim 활동 누적)
-    p1 = run.scheduler._compose_admission_payload()
-    assert p1["a_cycle"] > 0.0, (
-        f"a_cycle = {p1['a_cycle']} (dispatch 누적 후에도 0 — (B) wiring 결손)"
+    tel = run.scheduler.admission.idle_telemetry
+    accumulated_a = (
+        tel.active_duration("gpu_instance_a") + tel.active_duration("pim_instance_a")
+    )
+    assert accumulated_a > 0.0, (
+        f"Instance A active = {accumulated_a} "
+        f"(5000 step 후에도 0 — (B) wiring 결손)"
     )
 
 
 def test_b_cycle_grows_after_layer_cycles(tmp_path):
-    """(B) b_cycle = gpu_instance_b delta — InstancePipeline.dispatch 호출 후 > 0."""
+    """(B) b_cycle source = IdleTelemetry.active_duration("gpu_instance_b") — InstancePipeline.dispatch
+    호출 후 누적. 본 test 위 *누적 영역 직접 검증* (delta 영역 위 _compose 자동 fire 갱신 영역의 trap 회피).
+
+    Impl-10-pre-2 — prefill chunking 위 L-cycle event count 증가 (mixed batch 영역).
+    충분 step 영역 후 첫 O_PROJ 완료 → instance_pipeline.dispatch → gpu_instance_b 영역의 누적.
+    """
     run = Run.init(
         config_module="puls_sched.config:default_dummy_config",
         trace_path_or_synthetic="synthetic:10",
         output_dir=tmp_path,
         seed=42,
     )
-    run.scheduler._compose_admission_payload()  # snapshot reset
-    # 진행 — layer cycle 누적
-    for _ in range(200):
+    # 진행 — layer cycle 누적 (L=80 × 4 node 영역 위 충분 step)
+    for _ in range(10000):
         if not run.scheduler.step():
             break
-    payload = run.scheduler._compose_admission_payload()
-    assert payload["b_cycle"] > 0.0, (
-        f"b_cycle = {payload['b_cycle']} (layer cycle 후에도 0 — (A) wiring 결손)"
+    tel = run.scheduler.admission.idle_telemetry
+    accumulated_b = tel.active_duration("gpu_instance_b")
+    assert accumulated_b > 0.0, (
+        f"gpu_instance_b active_duration = {accumulated_b} "
+        f"(10000 step 후에도 0 — (A) wiring 결손 또는 dispatch chain 영역 결손)"
     )
 
 

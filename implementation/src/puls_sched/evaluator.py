@@ -8,7 +8,7 @@ Comparative baseline 미산출 (Sarathi · vLLM).*
 - dispatch_trace — §6.5 Init/T1~T5 sequence event log
 - admission_convergence — §6.4 deadband 위 idle fraction 시간 series 위 oscillation / 수렴 판정
 - idle_fraction — Instance A scope (GPU · PIM 2 자원, per-instance A/B split 은 Impl-9 — O8.1)
-- pim_utilization — Σ k_total · dt / (k_max · total_time) aggregate channel-time
+- pim_utilization — PIM busy time fraction (Impl-10-pre-2: k_total knob 폐기 위 단순 time fraction)
 - pipeline_efficiency — max(A, B) / (A + B) ratio
 - acceleration_decomposition — F1·F2·F3·F5 cycle ratio direction 표 (D2 schema 골격, F4 미포함)
 - report — Python dict + markdown 표 (PULS 단독, Comparative baseline 없음)
@@ -34,14 +34,13 @@ class DispatchEvent:
     """Dispatcher hook 가 fire 하는 dispatch 시점 event snapshot.
 
     ARCH §6.5 Init/T1~T5 trace 의 *one row* — timestamp · 어느 mb 의 어느 노드가 어디로 dispatch.
-    k_total 은 PIM dispatch 시 mb.k_total, GPU dispatch 시 0 (의미 없는 default).
+    Impl-10-pre-2 — k_total field 폐기 (sequence-parallel PIM 위 channel knob 제거, k 영원 k_max).
     """
 
     timestamp: float
     micro_batch_id: int
     node_type: NodeType
     resource: str                                       # "GPU" | "PIM"
-    k_total: int                                        # PIM dispatch 시 mb.k_total. GPU 분기 시 0
     dag_state_snapshot: dict                            # {mb_id: {node_type_name: state_name}} — defensive copy
 
 
@@ -61,7 +60,6 @@ class AdmissionSnapshot:
     ctx_tokens: int
     spec_admitted: bool
     n: int
-    k_total: int
 
 
 @dataclass(frozen=True)
@@ -124,24 +122,23 @@ class Evaluator:
     idle_telemetry: IdleTelemetry                       # post-hoc snapshot 영역 (D1 hybrid)
     _dispatch_events: list[DispatchEvent] = field(default_factory=list)
     _admission_snapshots: list[AdmissionSnapshot] = field(default_factory=list)
-    _pim_k_dt_accum: float = 0.0                        # Σ k_total · dt 누적 (pim_utilization 산출 위)
+    _pim_busy_accum: float = 0.0                        # Σ pim_busy_dt 누적 (pim_utilization 산출 위)
     _pim_last_dispatch_t: float | None = None
-    _pim_last_k: int = 0
 
     # ------------------------------------------------------------------------
     # D1 hybrid — hook callback (dispatcher / SchedulerCore 에서 fire)
     # ------------------------------------------------------------------------
 
     def record_dispatch(self, event: DispatchEvent) -> None:
-        """Dispatcher.on_dispatch 가 fire 하면 호출. Series 누적 + PIM utilization 입력."""
+        """Dispatcher.on_dispatch 가 fire 하면 호출. Series 누적 + PIM utilization 입력.
+
+        Impl-10-pre-2 — k_total knob 폐기 위 PIM utilization 산식 단순화 (k_max · time → time fraction).
+        """
         self._dispatch_events.append(event)
         if event.resource == "PIM":
-            # 직전 PIM dispatch 의 (k, dt) 누적 — 이번 dispatch 가 직전의 *완료 시점* 을 시사
             if self._pim_last_dispatch_t is not None:
-                dt = event.timestamp - self._pim_last_dispatch_t
-                self._pim_k_dt_accum += self._pim_last_k * dt
+                self._pim_busy_accum += event.timestamp - self._pim_last_dispatch_t
             self._pim_last_dispatch_t = event.timestamp
-            self._pim_last_k = event.k_total
 
     def record_admission_tick(self, snapshot: AdmissionSnapshot) -> None:
         """SchedulerCore.on_admission_tick 가 fire 하면 호출. Series 누적."""
@@ -211,12 +208,10 @@ class Evaluator:
         }
 
     def pim_utilization(self) -> float:
-        """`Σ k_total · dt / (k_max · total_time)` aggregate channel-time utilization.
+        """PIM busy time fraction over window since first dispatch.
 
-        산식:
-        - k_max = config.admission.k_total_max (= 2048, ARCH §3.2 literal)
-        - total_time = clock.now - dispatch_events[0].timestamp (PIM 활동 시작 이후 window)
-        - Σ k · dt = self._pim_k_dt_accum (record_dispatch PIM 분기 누적)
+        Impl-10-pre-2 — k_total knob 폐기 위 산식 단순화: 임의 시점 PIM 은 모든 채널 점유
+        (sequence-parallel), 따라서 channel-weighted 영역 시간 fraction 으로 환원.
 
         Returns 0.0 if no PIM dispatch or zero window.
         *O8.2 carry-over* — 마지막 PIM dispatch 의 completion 미반영 (R1).
@@ -226,8 +221,7 @@ class Evaluator:
         total_time = self.clock.now - self._dispatch_events[0].timestamp
         if total_time <= 0:
             return 0.0
-        k_max = self.config.admission.k_total_max
-        return self._pim_k_dt_accum / (k_max * total_time)
+        return self._pim_busy_accum / total_time
 
     def pipeline_efficiency(self, a_cycle: float, b_cycle: float) -> float:
         """`max(A, B) / (A + B)` ratio. ARCH §3.4 inter-instance pipeline efficiency.

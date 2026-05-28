@@ -214,6 +214,7 @@ GPU 가 기존 DRAM 명령 (RD/WR) 의 **RFU (Reserved For Future use) bit 1 개
 - **유일한 채널 = HBM** — PIM 은 HBM4 logic die, GPU 는 별도 die 에 위치하여 직접 P2P 통신선 없음.
 - **Write → Read 프로토콜** — PIM 이 결과 O 를 HBM 의 정해진 주소에 **write** → GPU 가 computed wait 로 정시에 그 주소를 **read**.
 - **GPU 측 정합 자연 산출** — GPU 내부 kernel 간 데이터 전달도 동일 방식 (global memory 경유) → 별도 DMA 엔진 · doorbell 메커니즘 불요.
+- **PIM-GPU TSV 대역폭 contention 마진** — PIM (HBM4 logic die 내부) 과 Instance A GPU 가 HBM TSV 대역폭 공유로, 동시 full-load 동작 시 상호 throttling 가능. PIM decode-attn 예측 시간 위 GPU prefill chunk 산출 시 10% conservative 시간 마진 (`PIM_SLACK_SAFETY_MARGIN = 0.9`) 적용 → contention 방지. Stage 2 / Impl-11 위 calibrated 값 refinement.
 
 ## 4. Op Partitioning
 
@@ -235,14 +236,12 @@ Decode attention 만 이 3 조건을 동시 충족 → PIM scope 가 substrate �
 
 ## 5. Scheduler Integration
 
-### 5.1 Phase-aware Channel Split
+### 5.1 Phase-aware Channel Activation
 
-스케줄러는 μ-batch 의 각 step 진입 시점에 SP-PIM aggregate 채널 수 k_total 을 결정한다. Instance A 8 GPU 합계 최대 k_total = 2048.
+Instance A 의 SP-PIM aggregate 채널 수는 k_total = 2048 으로 고정. PIM 은 decode-attn 일이 존재하는 한 *항상* 가동되어, Instance A GPU 의 compute-bound 영역 (QKV · prefill_attn · O-proj) 의 HBM idle 헤드룸 위에 자연 overlap (O3 + §3.5.3). Sequence-parallel 성질 위 임의 시점 한 mb 의 decode-attn 이 모든 채널 점유 — 채널 분할 micromanagement 불필요 (Hermite identity 위 partition·serialize 동치). 잔여 TSV contention 은 10% margin `PIM_SLACK_SAFETY_MARGIN = 0.9` 으로 보수 흡수 — channel knob 부재 (Impl-10-pre-2).
 
-- **Attention step** — Mixed batch 의 prefill chunk 토큰은 GPU attention kernel 이, decode 토큰은 SP-PIM 이 *동시 처리*. 배치에 decode 토큰이 있으면 k_total = 2048 활성화 (단일 attention op 이 2048 채널 lock-step 협력). Pure prefill 배치라면 k_total = 0.
-- **Projection step (QKV / O-proj / FFN)** — 같은 μ-batch 의 PIM 작업 없음. 단, 다음 μ-batch 의 decode attention 을 PIM 이 선처리하는 intra-instance double-buffering (§5.6) 시 k_total 을 projection 구간에 활성화 — P5 의 *compute-bound timing 활성화* 원칙 정합. k_total 은 binary 가 아니라 스택 단위 (per-GPU n × 32, n ∈ {0..8}) 연속 dial — projection 이 fully compute-bound 인 영역에선 k_total = 2048 (상한), MFU saturation 미달 또는 GPU 측 추가 BW 필요 시 부분 환원 (P4).
-
-이 분할은 step 진입 시 단일 토글 명령으로 변경 가능하며, 채널 단위 독립성으로 인해 GPU 측 명령 스트림과 충돌하지 않는다.
+- **Attention step** — Mixed batch 의 prefill chunk 토큰은 GPU attention kernel 이, decode 토큰은 SP-PIM 이 *동시 처리*. decode 토큰 존재 시 2048 채널 lock-step 단일 op. Pure prefill 배치 (decode rows 0) 는 PIM op_time = 0.
+- **Projection step (QKV / O-proj / FFN)** — 같은 mb 의 PIM 작업 없음. Intra-instance double-buffering (§5.6) 위 *다음 mb* 의 decode-attn 이 projection 구간에 자연 overlap — P5 compute-bound timing 활성화 원칙 정합.
 
 ### 5.2 Fixed-shape Handoff to Instance B
 
@@ -404,8 +403,8 @@ Adaptive admission 의 1차 objective = inter-instance pipeline cycle `max(A_cyc
 |---|---|---|---|
 | Inter-AB (1차) | `A_cycle > B_cycle` (B idle) | A-bound (long-ctx) | admission ↓ 효과 제한적 (`A_cycle` 의 PIM attention 부분이 KV 길이 의존) — B idle 자연 수용 |
 | Inter-AB (1차) | `A_cycle < B_cycle` (A idle) | B-bound (short-ctx + low batch) | prefill chunk admit → `A_cycle` 증가, 균형 회복 |
-| Intra-A (2차) | GPU idle > `θ_high`, PIM busy | Instance A 내부 PIM 우세 | decode 추가 admit → PIM 윈도우 채움 |
-| Intra-A (2차) | PIM idle > `θ_high`, GPU busy | Instance A 내부 GPU 우세 | prefill chunk admit → GPU 윈도우 채움 |
+| Intra-A (2차) | GPU idle > `θ_high`, PIM busy | Instance A 내부 PIM 우세 | prefill chunk admit → GPU 윈도우 채움 (idle GPU 를 PREFILL_ATTN 으로 활용, PIM decode-attn 과 동시) |
+| Intra-A (2차) | PIM idle > `θ_high`, GPU busy | Instance A 내부 GPU 우세 | decode 추가 admit → PIM 윈도우 채움 (idle PIM 을 decode-attn 으로 활용, GPU projection 과 동시) |
 | — | 양 layer 모두 `θ_low` 이하 | balanced | 현재 admission 유지 |
 | — | 양 layer 모두 idle | underloaded | μ-batch 크기 확대 또는 wait 토큰 가속 |
 

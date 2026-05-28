@@ -83,40 +83,25 @@ def test_admission_to_dispatch_pim_op_time_chain(scheduler_core):
     scheduler_core.dispatcher.refresh_ready()
     decode = scheduler_core.dag.get_node(0, NodeType.DECODE_ATTN)
     op_time = scheduler_core.dispatcher._op_time(decode)
-    expected = scheduler_core.dispatcher.pim_executor.op_time(
-        k_channels=mb.k_total, kv_rows_total=expected_kv,
-    )
+    expected = scheduler_core.dispatcher.pim_executor.op_time(kv_rows_total=expected_kv)
     assert op_time == expected
 
 
-def test_pim_op_time_uses_admitted_spec_not_placeholder(scheduler_core):
-    """Impl-4 placeholder 잔존 reject — mb.k_total 이 placeholder (2048) 아닌 admission 산출 값."""
-    scheduler_core.request_queue.push(_make_req(0, kv_length=10))
-    scheduler_core._handle(Event(timestamp=0.0, type=EventType.ADMISSION_TICK, payload={}))
-    mb = scheduler_core.dispatcher.micro_batches[0]
-    # admission 의 산출이 placeholder 와 다른 영역에 도달하는지 — *최소한 admission 결정* 임을 검증
-    # (정확값은 admission.layer1 산식)
-    assert isinstance(mb.k_total, int)
-    assert mb.k_total >= 0
-
-
 def test_multiple_micro_batches_independent_signal_flow(dispatcher):
-    """3 mb 가 서로 다른 (k_total, kv_rows_total) → 각 mb 의 자신 spec 으로 op_time 산출."""
+    """3 mb 가 서로 다른 kv_rows_total → 각 mb 의 자신 spec 으로 op_time 산출."""
     from puls_sched.micro_batch import MicroBatch
-    specs = [(256, 100), (1024, 5000), (2048, 50000)]
-    for i, (k, rows) in enumerate(specs):
+    specs = [100, 5000, 50000]
+    for i, rows in enumerate(specs):
         dispatcher.dag.add_micro_batch(i)
-        dispatcher.register(MicroBatch(id=i, k_total=k, kv_rows_total=rows))
-    # 각 mb 의 op_time 산출
-    for i, (k, rows) in enumerate(specs):
-        # QKV → DONE forcing path
+        dispatcher.register(MicroBatch(id=i, kv_rows_total=rows))
+    for i, rows in enumerate(specs):
         qkv = dispatcher.dag.get_node(i, NodeType.QKV)
         for s in (NodeState.READY, NodeState.RUNNING, NodeState.DONE):
             if qkv.state is not s:
                 qkv.transition_to(s)
         dispatcher.refresh_ready()
         decode = dispatcher.dag.get_node(i, NodeType.DECODE_ATTN)
-        expected = dispatcher.pim_executor.op_time(k_channels=k, kv_rows_total=rows)
+        expected = dispatcher.pim_executor.op_time(kv_rows_total=rows)
         assert dispatcher._op_time(decode) == expected
 
 
@@ -181,9 +166,7 @@ def test_cross_module_pipeline_chain_deterministic_1000_iter():
         core.request_queue.push(_make_req(1, kv_length=200))
         core._handle(Event(timestamp=0.0, type=EventType.ADMISSION_TICK, payload={}))
         mb = core.dispatcher.micro_batches[0]
-        op_t = core.dispatcher.pim_executor.op_time(
-            k_channels=mb.k_total, kv_rows_total=mb.kv_rows_total,
-        )
+        op_t = core.dispatcher.pim_executor.op_time(kv_rows_total=mb.kv_rows_total)
         op_times.append(op_t)
     assert all(t == op_times[0] for t in op_times)
 
@@ -195,15 +178,11 @@ def test_cross_module_chain_seed_independence(seed):
     core.request_queue.push(_make_req(0, kv_length=100))
     core._handle(Event(timestamp=0.0, type=EventType.ADMISSION_TICK, payload={}))
     mb = core.dispatcher.micro_batches[0]
-    op_t = core.dispatcher.pim_executor.op_time(
-        k_channels=mb.k_total, kv_rows_total=mb.kv_rows_total,
-    )
+    op_t = core.dispatcher.pim_executor.op_time(kv_rows_total=mb.kv_rows_total)
     # seed 변경 영향 0 — reference 와 동일
     core_ref = _fresh_core(seed=42)
     core_ref.request_queue.push(_make_req(0, kv_length=100))
     core_ref._handle(Event(timestamp=0.0, type=EventType.ADMISSION_TICK, payload={}))
     mb_ref = core_ref.dispatcher.micro_batches[0]
-    op_t_ref = core_ref.dispatcher.pim_executor.op_time(
-        k_channels=mb_ref.k_total, kv_rows_total=mb_ref.kv_rows_total,
-    )
+    op_t_ref = core_ref.dispatcher.pim_executor.op_time(kv_rows_total=mb_ref.kv_rows_total)
     assert op_t == op_t_ref

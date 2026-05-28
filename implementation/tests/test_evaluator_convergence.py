@@ -9,7 +9,7 @@ def _snap(t, a, b, ctx=4000):
     return AdmissionSnapshot(
         timestamp=t, gpu_idle_fraction=0.0, pim_idle_fraction=0.0,
         a_cycle=a, b_cycle=b, ctx_tokens=ctx,
-        spec_admitted=True, n=1, k_total=256,
+        spec_admitted=True, n=1,
     )
 
 
@@ -93,7 +93,7 @@ def test_convergence_admitted_vs_not_admitted_both_captured(evaluator):
         snap = AdmissionSnapshot(
             timestamp=float(i), gpu_idle_fraction=0.0, pim_idle_fraction=0.0,
             a_cycle=100.0, b_cycle=100.0, ctx_tokens=4000,
-            spec_admitted=admitted, n=1 if admitted else 0, k_total=256 if admitted else 0,
+            spec_admitted=admitted, n=1 if admitted else 0,
         )
         evaluator.record_admission_tick(snap)
     v = evaluator.admission_convergence()

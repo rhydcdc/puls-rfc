@@ -66,7 +66,7 @@ def _build_stress_core(config=None):
 def _dispatch_n_mbs(core, n):
     """N mb 위 단순 QKV → PREFILL_ATTN/DECODE_ATTN → O_PROJ chain dispatch."""
     for mb_id in range(n):
-        core.dispatcher.register(MicroBatch(id=mb_id, k_total=2048, kv_rows_total=32, kv_rows_lockstep=32))
+        core.dispatcher.register(MicroBatch(id=mb_id, kv_rows_total=32, kv_rows_lockstep=32))
         core.dag.add_micro_batch(mb_id)
         # Manual full chain
         for ntype, resource, busy_field in [

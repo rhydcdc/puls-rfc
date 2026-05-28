@@ -27,7 +27,7 @@ def test_evaluator_dispatch_trace_empty(evaluator):
 def test_evaluator_dispatch_trace_single_event(evaluator):
     ev = DispatchEvent(
         timestamp=1.0, micro_batch_id=0, node_type=NodeType.QKV,
-        resource="GPU", k_total=0, dag_state_snapshot={},
+        resource="GPU", dag_state_snapshot={},
     )
     evaluator.record_dispatch(ev)
     trace = evaluator.dispatch_trace()
@@ -39,7 +39,7 @@ def test_evaluator_dispatch_trace_immutable_snapshot(evaluator):
     """반환 tuple immutable + DispatchEvent frozen → mutation 시 raise."""
     ev = DispatchEvent(
         timestamp=1.0, micro_batch_id=0, node_type=NodeType.QKV,
-        resource="GPU", k_total=0, dag_state_snapshot={},
+        resource="GPU", dag_state_snapshot={},
     )
     evaluator.record_dispatch(ev)
     trace = evaluator.dispatch_trace()
@@ -67,7 +67,7 @@ def test_evaluator_admission_convergence_all_in_band(evaluator, dummy_config):
         snap = AdmissionSnapshot(
             timestamp=float(i), gpu_idle_fraction=0.2, pim_idle_fraction=0.2,
             a_cycle=10.0, b_cycle=10.0 + width * 0.5,  # diff < width
-            ctx_tokens=4000, spec_admitted=True, n=1, k_total=256,
+            ctx_tokens=4000, spec_admitted=True, n=1,
         )
         evaluator.record_admission_tick(snap)
     v = evaluator.admission_convergence()
@@ -85,7 +85,7 @@ def test_evaluator_admission_convergence_sin_wave_oscillating(evaluator):
         snap = AdmissionSnapshot(
             timestamp=float(i), gpu_idle_fraction=0.2, pim_idle_fraction=0.2,
             a_cycle=100.0 + sign * 50.0, b_cycle=100.0,
-            ctx_tokens=4000, spec_admitted=True, n=1, k_total=256,
+            ctx_tokens=4000, spec_admitted=True, n=1,
         )
         evaluator.record_admission_tick(snap)
     v = evaluator.admission_convergence()
@@ -101,7 +101,7 @@ def test_evaluator_admission_convergence_monotonic_convergence(evaluator, dummy_
         snap = AdmissionSnapshot(
             timestamp=float(i), gpu_idle_fraction=0.2, pim_idle_fraction=0.2,
             a_cycle=100.0 + diff, b_cycle=100.0,
-            ctx_tokens=4000, spec_admitted=True, n=1, k_total=256,
+            ctx_tokens=4000, spec_admitted=True, n=1,
         )
         evaluator.record_admission_tick(snap)
     v = evaluator.admission_convergence()
@@ -115,7 +115,7 @@ def test_evaluator_admission_convergence_admitted_and_not_both_captured(evaluato
         snap = AdmissionSnapshot(
             timestamp=0.0, gpu_idle_fraction=0.0, pim_idle_fraction=0.0,
             a_cycle=1.0, b_cycle=1.0, ctx_tokens=4000,
-            spec_admitted=spec_admitted, n=1 if spec_admitted else 0, k_total=256 if spec_admitted else 0,
+            spec_admitted=spec_admitted, n=1 if spec_admitted else 0,
         )
         evaluator.record_admission_tick(snap)
     v = evaluator.admission_convergence()
@@ -155,24 +155,25 @@ def test_evaluator_pim_utilization_no_dispatch(evaluator):
 
 
 def test_evaluator_pim_utilization_formula(evaluator, clock):
-    """합성 PIM dispatch sequence 위 산식 정합 — Σ k·dt / (k_max · total_time)"""
-    # PIM dispatch at t=0 with k=1024, then at t=2.0 with k=2048
-    # Between t=0 and t=2.0: k=1024 active for dt=2.0 → contribution 1024 × 2.0 = 2048
-    # k_max=2048, total_time=2.0 (clock.now needs to be > 2.0)
+    """합성 PIM dispatch sequence 위 산식 정합 — PIM busy time / total window time.
+
+    Impl-10-pre-2 — k_total knob 폐기 위 PIM utilization = 단순 time fraction
+    (sequence-parallel PIM 위 임의 시점 한 mb 가 모든 채널 점유).
+
+    Setup: PIM dispatch at t=0, second dispatch at t=2.0, clock.now=2.0.
+    PIM busy span = 2.0 - 0.0 = 2.0. total_window = 2.0 - 0.0 = 2.0. utilization = 1.0.
+    """
     clock.advance_to(2.0)
     evaluator.record_dispatch(DispatchEvent(
         timestamp=0.0, micro_batch_id=0, node_type=NodeType.DECODE_ATTN,
-        resource="PIM", k_total=1024, dag_state_snapshot={},
+        resource="PIM", dag_state_snapshot={},
     ))
     evaluator.record_dispatch(DispatchEvent(
         timestamp=2.0, micro_batch_id=1, node_type=NodeType.DECODE_ATTN,
-        resource="PIM", k_total=2048, dag_state_snapshot={},
+        resource="PIM", dag_state_snapshot={},
     ))
-    # Σ k·dt = 1024 × 2.0 = 2048 (마지막 dispatch 의 dt 는 미반영 — O8.2 carry-over)
-    # k_max=2048, total_time = clock.now (2.0) - first dispatch (0.0) = 2.0
-    # utilization = 2048 / (2048 × 2.0) = 0.5
     util = evaluator.pim_utilization()
-    assert util == pytest.approx(0.5)
+    assert util == pytest.approx(1.0)
 
 
 # =========================================================================

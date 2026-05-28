@@ -74,14 +74,11 @@ class Dispatcher:
             return
         # Lazy import — dispatcher ↔ evaluator 순환 회피
         from puls_sched.evaluator import DispatchEvent
-        mb = self.micro_batches.get(node.micro_batch_id)
-        k_total = mb.k_total if mb is not None else 0
         event = DispatchEvent(
             timestamp=self.clock.now,
             micro_batch_id=node.micro_batch_id,
             node_type=node.type,
             resource=resource,
-            k_total=k_total,
             dag_state_snapshot=self._snapshot_dag_state(),
         )
         for cb in self._dispatch_callbacks:
@@ -123,10 +120,19 @@ class Dispatcher:
         return candidates[0][1] if candidates else None
 
     def _op_time(self, node: Node) -> float:
+        if node.type is NodeType.PREFILL_ATTN:
+            # Impl-10-pre-2 (O9.1) — chunk-scaled op_time. Decode-only mb (chunk=0) 위 기존 lookup 보존 (backward-compat).
+            mb = self.micro_batches.get(node.micro_batch_id)
+            if mb is not None:
+                chunk_tokens = sum(len(t) for t in mb.prefill_chunk.values())
+                if chunk_tokens > 0:
+                    return chunk_tokens * self.config.time.gpu_op_time_per_token_us
+            return self.config.time.gpu_op_time_us["prefill_attn"]
         if node.type in GPU_NODE_TYPES:
             return self.config.time.gpu_op_time_us[node.type.name.lower()]
-        # PIM (decode-attn). Impl-5 — 실 signal flow (MicroBatch.k_total · kv_rows_total).
+        # PIM (decode-attn). Impl-5 — 실 signal flow (MicroBatch.kv_rows_total).
         # Impl-8 F1 ablation — PIM dispatch path 유지 (I5 invariant 보존) + op_time 만 GPU fallback.
+        # Impl-10-pre-2 — k_channels 매개변수 폐기 (sequence-parallel PIM 위 k_total knob 제거).
         if self.config.ablation.f1_disabled:
             return self.config.time.gpu_op_time_us["decode_attn_fallback"]
         mb = self.micro_batches.get(node.micro_batch_id)
@@ -135,7 +141,6 @@ class Dispatcher:
                 f"PIM dispatch for unregistered MicroBatch {node.micro_batch_id}"
             )
         return self.pim_executor.op_time(
-            k_channels=mb.k_total,
             kv_rows_total=mb.kv_rows_total,
             kv_rows_lockstep=mb.kv_rows_lockstep,   # Impl-8 — F5 ablation 위. F5 활성화 path 위에선 pim_executor 가 사용 안 함
         )

@@ -67,7 +67,6 @@ def _make_trace_fixture_with_evaluator():
     for mb_id in (0, 1, 2):
         dispatcher.register(MicroBatch(
             id=mb_id,
-            k_total=config.admission.k_total_max,
             kv_rows_total=config.time.rtl_fsm_tile_rows,
         ))
         window.admit(mb_id)
@@ -211,30 +210,6 @@ def test_dispatch_trace_resource_label_pim_for_decode_attn():
     assert len(decode_events) > 0
     for e in decode_events:
         assert e.resource == "PIM"
-
-
-def test_dispatch_trace_pim_events_carry_k_total():
-    """PIM dispatch event 의 k_total == mb.k_total (산식 정합)."""
-    core, evaluator = _make_trace_fixture_with_evaluator()
-    core.run_until_empty()
-    events = evaluator.dispatch_trace()
-    pim_events = [e for e in events if e.resource == "PIM"]
-    for e in pim_events:
-        assert e.k_total > 0  # PIM dispatch 는 k_total 보유
-
-
-def test_dispatch_trace_gpu_events_k_total_zero():
-    """GPU dispatch event 의 k_total == 0 (GPU 분기 의미 없음)."""
-    core, evaluator = _make_trace_fixture_with_evaluator()
-    core.run_until_empty()
-    events = evaluator.dispatch_trace()
-    # GPU events 중 mb 가 등록되어 있으므로 mb.k_total 이 반환됨 (mb.k_total=2048)
-    # 단 의미적으로 "GPU 가 PIM channel 사용" 은 의미 0 — schema 만 lock-in
-    gpu_events = [e for e in events if e.resource == "GPU"]
-    # mb.k_total 자체는 2048 — _fire_dispatch 가 mb lookup. GPU/PIM 의미 분리는
-    # *test/caller 가 e.resource 로 판단* (schema lock-in 만, 값 자체는 mb.k_total)
-    for e in gpu_events:
-        assert e.k_total == 2048  # mb.k_total 의 자연 reflect (의미는 PIM 분기에서만)
 
 
 def test_dispatch_trace_bit_exact_replay():

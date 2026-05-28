@@ -33,12 +33,9 @@ def test_request_ids_union():
 
 
 # =========================================================================
-# Impl-5 — 신규 3 필드 (k_total · kv_rows_total · current_layer_index)
+# Impl-5 — 신규 필드 (kv_rows_total · current_layer_index).
+# Impl-10-pre-2 — k_total field 폐기 (sequence-parallel PIM 위 knob 제거).
 # =========================================================================
-
-def test_micro_batch_default_k_total_zero():
-    assert MicroBatch(id=0).k_total == 0
-
 
 def test_micro_batch_default_kv_rows_total_zero():
     assert MicroBatch(id=0).kv_rows_total == 0
@@ -49,16 +46,15 @@ def test_micro_batch_default_current_layer_index_zero():
 
 
 def test_micro_batch_explicit_field_roundtrip():
-    mb = MicroBatch(id=0, k_total=2048, kv_rows_total=10000, current_layer_index=5)
-    assert mb.k_total == 2048
+    mb = MicroBatch(id=0, kv_rows_total=10000, current_layer_index=5)
     assert mb.kv_rows_total == 10000
     assert mb.current_layer_index == 5
 
 
 def test_micro_batch_existing_methods_unchanged():
-    """Impl-5 신규 필드가 기존 메서드 시맨틱 영향 0 (regression)."""
+    """신규 필드가 기존 메서드 시맨틱 영향 0 (regression)."""
     mb = MicroBatch(
-        id=0, k_total=512, kv_rows_total=999,
+        id=0, kv_rows_total=999,
         prefill_chunk={1: [10]}, decode_tokens={2: 1},
     )
     assert mb.request_ids() == {1, 2}

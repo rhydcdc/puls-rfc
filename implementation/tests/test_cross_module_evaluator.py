@@ -63,7 +63,7 @@ def _build_full_core_with_evaluator(config=None):
 def test_chain_register_dispatch_record():
     """dispatcher.on_dispatch 등록 → dispatch_gpu 호출 → evaluator._dispatch_events 누적."""
     core, evaluator = _build_full_core_with_evaluator()
-    core.dispatcher.register(MicroBatch(id=0, k_total=2048, kv_rows_total=32, kv_rows_lockstep=32))
+    core.dispatcher.register(MicroBatch(id=0, kv_rows_total=32, kv_rows_lockstep=32))
     core.dag.add_micro_batch(0)
     qkv = core.dag.get_node(0, NodeType.QKV)
     qkv.transition_to(NodeState.READY)
@@ -96,7 +96,7 @@ def test_chain_multiple_callbacks_fire_in_order():
     core.dispatcher.on_dispatch(lambda e: call_log.append("first"))
     core.dispatcher.on_dispatch(lambda e: call_log.append("second"))
 
-    core.dispatcher.register(MicroBatch(id=0, k_total=2048, kv_rows_total=32, kv_rows_lockstep=32))
+    core.dispatcher.register(MicroBatch(id=0, kv_rows_total=32, kv_rows_lockstep=32))
     core.dag.add_micro_batch(0)
     qkv = core.dag.get_node(0, NodeType.QKV)
     qkv.transition_to(NodeState.READY)
@@ -162,7 +162,7 @@ def test_chain_evaluator_no_dispatch_state_mutation():
     # Run A — no evaluator
     core_a, _ = _build_full_core_with_evaluator(config)
     core_a.dispatcher._dispatch_callbacks.clear()  # clear evaluator hook
-    core_a.dispatcher.register(MicroBatch(id=0, k_total=2048, kv_rows_total=32, kv_rows_lockstep=32))
+    core_a.dispatcher.register(MicroBatch(id=0, kv_rows_total=32, kv_rows_lockstep=32))
     core_a.dag.add_micro_batch(0)
     qkv_a = core_a.dag.get_node(0, NodeType.QKV)
     qkv_a.transition_to(NodeState.READY)
@@ -171,7 +171,7 @@ def test_chain_evaluator_no_dispatch_state_mutation():
 
     # Run B — with evaluator
     core_b, _ = _build_full_core_with_evaluator(config)
-    core_b.dispatcher.register(MicroBatch(id=0, k_total=2048, kv_rows_total=32, kv_rows_lockstep=32))
+    core_b.dispatcher.register(MicroBatch(id=0, kv_rows_total=32, kv_rows_lockstep=32))
     core_b.dag.add_micro_batch(0)
     qkv_b = core_b.dag.get_node(0, NodeType.QKV)
     qkv_b.transition_to(NodeState.READY)
