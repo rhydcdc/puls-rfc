@@ -529,18 +529,18 @@ F2·F3·F5 는 Impl-8 evaluator.acceleration_decomposition() 의 산식 그대�
 
 **그룹 1 — Signal wiring (산식·알고리즘 완비, driving signal 만 활성):**
 
-- [ ] **O5.1 carry-over (Q7 영역)** — `ForwardPass.run()` 이 `instance_pipeline.dispatch` 위 실 NVLink event chain (A → handoff → B → handoff → A_next) 거치게 wiring. 현재 `LayerState.advance` 의 L 회 iteration + token decode signal trigger 만 보유 — Impl-9 acceptance 충족용 minimum. `InstancePipeline.dispatch()` method 자체 신설 필요 (현재 `steady_state_cycle` getter + `validate_handoff_shape` 만 보유). D2 의 F2 (double-buffering) · F3 (instance A/B) cycle 산식의 *event-time* 정합성 영역. ARCH §3.4 pipeline literal 정확 반영
-- [ ] **O8.1 carry-over (Q6 영역)** — `idle_telemetry.py` 를 `(gpu_a, pim_a, gpu_b)` 3-key 로 분리 + `Evaluator.idle_fraction` schema 갱신 (`gpu_instance_a` · `pim_instance_a` → 3-key). Instance B 의 GPU activity recording 지점 = O5.1 의 NVLink dispatch chain — 두 영역 *짝* 으로 해소. ARCH §6.4 admission balance 의 'inter-AB · intra-A' 두 축 정확 반영
-- [ ] **O8.2 신설 (Q6 보강)** — `idle_telemetry.record_active(resource, t_start, t_end)` 의 *호출 wiring*. 현재 src/ 어디서도 미호출 → `gpu_idle_fraction` · `pim_idle_fraction` 영원 0 → `Admission.balance_intra_A` 의 idle-driven 결정 영원 trivial. Wiring 지점: `Dispatcher.dispatch_gpu/dispatch_pim` 의 dispatch 시점 + `KERNEL_COMPLETION` handler 의 release 시점. 이 wiring 후 `Admission.balance_intra_A` 의 *진짜 활성*
+- [x] **O5.1 carry-over (Q7 영역)** — `ForwardPass.run()` 이 `instance_pipeline.dispatch` 위 실 NVLink event chain (A → handoff → B → handoff → A_next) 거치게 wiring. *완료* — commit `7cf1071` (Impl-10-pre-1). `InstancePipeline.dispatch()` method 신설 + ForwardPass + production hot path (main_loop._maybe_advance_forward_pass) 양 wiring.
+- [x] **O8.1 carry-over (Q6 영역)** — `idle_telemetry.py` 3-key 분리 + `Evaluator.idle_fraction` schema 갱신. *완료* — commit `7cf1071`. `gpu_instance_a` · `pim_instance_a` · `gpu_instance_b` 3-slot.
+- [x] **O8.2 신설 (Q6 보강)** — `idle_telemetry.record_active(resource, t_start, t_end)` 호출 wiring. *완료* — commit `7cf1071` 위 Dispatcher.dispatch_gpu/dispatch_pim 위 wiring 도입. **단 Stage 1 placeholder substrate 위 측정 분모 오염 영역 발견 → commit `5cb6347` 위 instance_pipeline 의 gpu_instance_b placeholder recording 폐기** (NVLink async hidden 의 ARCH §3.4 literal 정합 위 측정 substrate 부적합). balance_intra_A 영원 활성 회복.
 
 **그룹 2 — 코드 자체 구현 (Impl-9 미작성 영역, D2 의 Aux1 정확 산출 prereq):**
 
-- [ ] **O9.1 신설 — Prefill chunking dispatch** (Sarathi-Serve 영역의 chunked prefill 정합): Request 의 prompt_tokens (현재 placeholder list `[0] * N`) 를 admission 의 `prefill_chunk_tokens` 단위로 *chunk-by-chunk multi-iteration dispatch*. 필요 영역:
-  - `Request.prefill_processed: int` field 신설 (per-req prefill position 추적)
-  - `main_loop` 의 ADMISSION_TICK body 가 `spec.prefill_chunk_tokens > 0` 시 `MicroBatch.prefill_chunk` 영역 populate (현재 모든 req 가 `decode_tokens={req.id: 0}` 만 set)
-  - `Dispatcher.dispatch_gpu(prefill_attn)` 의 op_time = `chunk_size × gpu_op_time_per_token` (현재 dummy 1.0us 고정)
-  - `_maybe_advance_forward_pass` 의 prefill 완료 검출 → decode 전이 분기 (현재 1 cycle 만에 PENDING→PREFILL→DECODE 전이)
-- [ ] **O9.2 신설 — Mixed batching (Aux1 prereq)** — Same mb 영역에 prefill + decode 동시 dispatch. O9.1 의 prerequisite. `MicroBatch.prefill_chunk` + `MicroBatch.decode_tokens` 동시 populate + dispatcher 가 mixed dispatch 의 op_time 산식 정합 영역. ARCH §6.1 mixed batch 정합. D2 의 *Aux1 (weight streaming 1 회 절감, separate prefill+decode batch 대비)* 의 *진짜 산출* 영역 — 현재 모든 mb 가 pure-decode-only 라 Aux1 의 정량 ratio 산출 자체 불가
+- [x] **O9.1 신설 — Prefill chunking dispatch** (Sarathi-Serve 영역의 chunked prefill 정합). *완료* — commit `aad3c8e` (Impl-10-pre-2):
+  - `Request.prefill_processed: int` field 신설 ✓
+  - `main_loop` ADMISSION_TICK body 위 `MicroBatch.prefill_chunk` populate ✓ (Option A — TOTAL ÷ N 분배, ARCH §5.2 uniform-chunk)
+  - `Dispatcher.dispatch_gpu(prefill_attn)` op_time = `chunk_size × gpu_op_time_per_token_us` ✓ (decode-only mb 위 lookup fallback 보존)
+  - `_maybe_advance_forward_pass` 위 prefill 완료 검출 → PREFILL→DECODE 전이 ✓
+- [x] **O9.2 신설 — Mixed batching (Aux1 prereq)**. *완료* — commit `aad3c8e`. Same mb 위 prefill_chunk + decode_tokens 동시 populate (Q5 b 정합 — attention 영역 만 token-type 분기, QKV/O_PROJ 는 single bulk GEMM).
 
 #### Chunk Size Policy — Hybrid (Default base + adaptive adjustment)
 
@@ -584,8 +584,12 @@ run-time per ADMISSION_TICK:
 
 **Config 영역 신설:**
 
-- [ ] `AdmissionConfig.prefill_chunk_default: int` — placeholder, sweep 산출 후 결정. 시작값 512 (시중 표준 영역) 추천. *Impl-10 sweep 위 PULS 영역 의 적정값 산출 후 lock-in*.
-- [ ] `TimeConfig.gpu_op_time_per_token_us: float` — `dispatch_gpu(prefill_attn)` 의 op_time = `chunk_size × gpu_op_time_per_token_us` 산출 영역 (현재 dummy `gpu_op_time_us["prefill_attn"]=1.0` 고정). Impl-10 calibration 영역 (blackwell whitepaper spec).
+- [x] `AdmissionConfig.prefill_chunk_default: int = 512` ✓ — commit `aad3c8e`
+- [x] `AdmissionConfig.pim_slack_safety_margin: float = 0.9` ✓ — commit `aad3c8e` (ARCH §3.5.3 PIM-GPU TSV BW contention margin 신설)
+- [x] `TimeConfig.gpu_op_time_per_token_us: float = 0.01` ✓ — commit `aad3c8e`
+- [x] **k_total knob 완전 폐기** ✓ — commit `aad3c8e`. Sequence-parallel PIM 위 임의 시점 한 mb 가 모든 채널 점유 (Hermite identity 위 partition·serialize 동치) → channel allocation freedom 의 redundancy 확립. `k_total.py` 모듈 + `AdmissionConfig.k_total_step/k_total_max` + `MicroBatchSpec.k_total/over_budget` + `MicroBatch.k_total` + `DispatchEvent.k_total` + `AdmissionSnapshot.k_total` + `PIMExecutor.op_time(k_channels=...)` 매개변수 모두 제거. `PIMExecutor.k_aggregate` property 위 hw config 위 derived (= 2048).
+- [x] **balance_pim_slack 신설 (Cluster Z, B option)** ✓ — commit `aad3c8e`. `chunk_total = max(0, t_pim × pim_slack_safety_margin − t_proj) / gpu_op_time_per_token_us`. 사용자 의도 *"GPU 전체 cycle (QKV + PREFILL_ATTN + O_PROJ) ≈ t_pim × 0.9"* 정합. main_loop._populate_mb_phases 위 Option A 분배 (chunk_total // N_prefill).
+- [x] **balance_intra_A invert (ARCH §6.4 갱신)** ✓ — commit `aad3c8e`. GPU idle → prefill admit / PIM idle → decode admit (idle 자원에 일 추가, 사용자 logic 정합). 두 .md 모두 갱신.
 
 **Wiring + 구현 후 활성되는 산식·알고리즘 (Impl-9 영역 기존 완비):**
 
@@ -595,9 +599,35 @@ run-time per ADMISSION_TICK:
 
 **Regression + test 갱신:**
 
-- [ ] 그룹 1 wiring 후 Impl-8 lock-in test 갱신 — `test_evaluator.idle_fraction` 의 schema 정합 + `test_meta._EXPECTED_MODULES` 의 `idle_telemetry` field 수 갱신 + 기존 admission balance 검증 test (`test_admission` · `test_integration_admission`) 의 inter-AB key 정합 갱신
-- [ ] 그룹 2 구현 후 lifecycle test 갱신 — Request.state 전이 영역 (PREFILL phase 의 L_prefill cycle 이상 잔존), `test_acceptance_c1` 의 max_tokens·prefill_tokens 정합 갱신
-- [ ] Regression 검증 — Impl-9 acceptance C1~C5 (`test_acceptance_c1~c5_*`) 가 wiring + 구현 후에도 green 보존. 특히 C5 determinism 의 bit-exact 가 Instance B activity 의 새 event-time stream + prefill chunked dispatch 의 새 KERNEL_COMPLETION 추가에도 동일 seed 위 보존
+- [x] 그룹 1 wiring 후 lock-in test 갱신 ✓ — commit `7cf1071`. `test_evaluator.idle_fraction` 3-key schema + `test_meta._EXPECTED_MODULES` 갱신 + 신규 cluster R/S/T/W/X (39 신규 test).
+- [x] 그룹 2 + k_total knob 폐기 후 test 갱신 ✓ — commits `aad3c8e` + `5cb6347`. 신규 cluster P/Q/U/Z (49 신규 test) + test_meta lock-in 갱신 (AdmissionConfig fields, MicroBatch/MicroBatchSpec, DispatchEvent/AdmissionSnapshot, module inventory) + 삭제 (`k_total.py`, `test_k_total.py`, `test_cross_module_pim_kvtotal.py`, `test_meta_arch_signature_divergence.py`).
+- [x] Regression 검증 ✓ — Impl-9 acceptance C1~C5 모두 green 보존 (full suite exit 0 위 confirm). LongBench 10 trace end-to-end 완주 (17.8M ticks, convergence True).
+
+#### Acceptance Results (Stage 1 완료 lock-in)
+
+**Commit chain:** `7cf1071` (pre-1: signal wiring) → `aad3c8e` (pre-2: prefill chunking + 4 balance + k_total 폐기) → `5cb6347` (post-fix: 측정 분모 정상화).
+
+**검증 결과:**
+
+| 영역 | 결과 |
+|---|---|
+| Full regression (841 tests, 3 skipped Stage-2-deferred) | ✅ all green (background bjjjuytje · biqhdv1c3 · biibs9xss · bwwd9a3w8 exit 0) |
+| LongBench 10 trace end-to-end | ✅ 완주 (17.8M ticks, exit 0) |
+| convergence in_band | ✅ 97.50% (balance 작동 정합) |
+| balance_pim_slack 진정 산출 | ✅ kv_rows ≥ 100k 위 chunk 자동 확장 (산식 정합 — 산수 검증 완료) |
+| balance_intra_A 진정 활성 | ✅ post-fix 측정 정확화 위 asymmetric 분기 firing |
+| PIM utilization (long-ctx LongBench) | ✅ 87% busy (post-fix 측정 — pre-fix 위 측정 bug 위 3% 보고 영역의 정정) |
+
+**측정 분모 정상화 (commit `5cb6347`) 의 사유:**
+
+Stage 1 placeholder substrate (NVLink handoff time → `gpu_instance_b` recording) 위 `IdleTelemetry._window_end` 가 부풀어 *모든 slot* 의 idle_fraction 분모 오염 → balance_intra_A 의 asymmetric 분기 영원 fire 0 → 사용자 의도 4 balance mechanism 중 하나 (PIM idle → decode admit) 가 사실상 dead. ARCH §3.4 *"asynchronous transfer hidden"* literal 정합 위 NVLink 는 측정 substrate 부적합 — placeholder 폐기 위 분모 = clock.now 기준 정상화. Stage 2 calibration 위 실 Instance B FFN op_time substrate 도입 시점 gpu_instance_b 의 진정 active duration 재활성 영역.
+
+**Stage 1 vs Stage 2 영역 정합 lock-in:**
+
+- ✅ Stage 1 (본 commit chain) — 알고리즘 측면 사용자 의도 정합 + 4 balance mechanism 모두 진짜 활성 + ARCH §3.5.3 · §5.2 · §6.4 literal 정합
+- ⏳ Stage 2 (Impl-10 main) — real Blackwell calibration 위 t_pim/t_proj 비율 정합 + Instance B FFN op_time substrate 도입 + 정량 idle fraction 의 절대값 의미 영역
+
+> PLAN §0.5 Numeric Value Policy 정합 — Stage 1 위 dummy timing 의 idle 절대값 의미 0 (ratio property 만 보존). Algorithmic correctness 영역 통과 = Stage 1 acceptance.
 
 #### Implementation (Scope Reframing — adaptive scheduler 정합):
 
