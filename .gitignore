@@ -26,6 +26,9 @@ CLAUDE.md
 # Implementation plan documents (local working notes, code-only commits)
 implementation/plans/
 
+# Local report drafts (markdown synthesized into README; not separately published)
+implementation/reports/
+
 # Claude Code per-user permission overrides (env-specific paths)
 .claude/settings.local.json
 

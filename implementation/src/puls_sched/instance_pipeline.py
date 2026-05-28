@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from puls_sched.clock import Clock
-from puls_sched.config import Config
+from puls_sched.config import Config, compute_ffn_op_time_s
 from puls_sched.idle_telemetry import IdleTelemetry
 from puls_sched.instance import Instance
 from puls_sched.micro_batch import MicroBatch
@@ -83,23 +83,35 @@ class InstancePipeline:
         """단일 layer 의 A → handoff → B → handoff → A_next chain wiring (substrate).
 
         ARCH §3.4 (Pipeline Structure) + §5.2 (Fixed-shape Handoff) + §5.6 (Double-Buffering)
-        정합. Caller (ForwardPass.run) 가 매 layer 마다 호출 — Q6 (a) 결정.
+        정합. Caller (ForwardPass.run / SchedulerCore._maybe_advance_forward_pass) 가 매 layer
+        cycle 마다 호출.
 
         Effects:
         1. A → B handoff tensor 의 fixed-shape 검증 (ARCH §5.2)
+        2. **Instance B FFN op_time 산출** — α path Carry-1 해소 (Impl-10 main).
+           `compute_ffn_op_time_s(mb, cal, model)` = per-mb spec-derived (B200 FP16 × MFU +
+           Llama-3 70B SwiGLU 6 × batch × hidden × intermediate). 사용자 의도 *"각 trace 위
+           정확 산출"* 정합.
+        3. **`gpu_instance_b` active duration recording** — ARCH §6.4 inter-AB balance signal
+           substrate (IdleTelemetry 위 measurement 분모 정상).
 
-        Stage 1 영역 — Instance B FFN op_time substrate 영역 *placeholder 폐기* (Impl-10-pre-2 post-fix).
-        이전: NVLink handoff time 을 `gpu_instance_b` active 시간 으로 기록 → handoff_time 의 dummy 위
-        과대값 위 `IdleTelemetry._window_end` 가 부풀어 *모든 slot* (gpu_a · pim_a 포함) 의 idle_fraction
-        분모 오염 → balance_intra_A 가 사실상 dead. 본 placeholder 폐기 후 분모 = clock.now 기준
-        정상 → 4 balance mechanism 모두 진짜 활성. 진정 Instance B FFN op_time 은 Stage 2 calibration
-        시점 dispatcher event push 위 정상 wiring 영역 (ARCH §3.4 *"async hidden"* literal 정합).
+        clock · idle_telemetry 부재 시 (test 영역 fixture backward-compat) recording skip.
 
-        `clock` · `idle_telemetry` field 는 backward-compat (test_meta_instance_pipeline_class_fields lock-in)
-        + Stage 2 시점 재활용 위 유지.
+        Stage 2 unit convention — compute_ffn_op_time_s 반환 = seconds, clock = µs → × 1e6.
         """
         n_tokens = len(mb.decode_tokens) + sum(
             len(t) for t in mb.prefill_chunk.values()
         )
         # Fixed-shape handoff validation (ARCH §5.2)
         self.validate_handoff_shape(mb, (n_tokens, self.config.model.hidden))
+
+        # α path Carry-1 — Instance B FFN op_time substrate (Stage 2 Impl-10 main)
+        if self.clock is None or self.idle_telemetry is None:
+            return  # backward-compat (test fixture 영역)
+        ffn_op_time_us = compute_ffn_op_time_s(
+            mb, self.config.calibration, self.config.model,
+        ) * 1e6
+        if ffn_op_time_us > 0:
+            t_start = self.clock.now
+            t_end = t_start + ffn_op_time_us
+            self.idle_telemetry.record_active("gpu_instance_b", t_start, t_end)

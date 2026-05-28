@@ -85,11 +85,6 @@ def _make_pipeline_with_telemetry(cfg, clock, tel):
     )
 
 
-@pytest.mark.skip(
-    reason="Impl-10-pre-2 post-fix — Stage 1 placeholder substrate (NVLink handoff time → gpu_instance_b) "
-           "폐기 위 window_end 오염 제거. Stage 2 calibration 위 실 Instance B FFN op_time substrate "
-           "도입 시점 재활성 (gpu_instance_b 의 진정 active duration 측정)."
-)
 def test_dispatch_records_gpu_instance_b(dummy_config):
     """dispatch 호출 시 gpu_instance_b slot 에 activity 누적 (O8.1 substrate)."""
     clock = Clock()

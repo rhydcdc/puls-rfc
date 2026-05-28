@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional, TYPE_CHECKING
 
 from puls_sched.clock import Clock
-from puls_sched.config import Config
+from puls_sched.config import Config, compute_gpu_op_time_s
 from puls_sched.dag import DAG
 from puls_sched.event import Event, EventType
 from puls_sched.event_queue import EventQueue
@@ -120,30 +120,42 @@ class Dispatcher:
         return candidates[0][1] if candidates else None
 
     def _op_time(self, node: Node) -> float:
-        if node.type is NodeType.PREFILL_ATTN:
-            # Impl-10-pre-2 (O9.1) — chunk-scaled op_time. Decode-only mb (chunk=0) 위 기존 lookup 보존 (backward-compat).
-            mb = self.micro_batches.get(node.micro_batch_id)
-            if mb is not None:
-                chunk_tokens = sum(len(t) for t in mb.prefill_chunk.values())
-                if chunk_tokens > 0:
-                    return chunk_tokens * self.config.time.gpu_op_time_per_token_us
-            return self.config.time.gpu_op_time_us["prefill_attn"]
-        if node.type in GPU_NODE_TYPES:
-            return self.config.time.gpu_op_time_us[node.type.name.lower()]
-        # PIM (decode-attn). Impl-5 — 실 signal flow (MicroBatch.kv_rows_total).
-        # Impl-8 F1 ablation — PIM dispatch path 유지 (I5 invariant 보존) + op_time 만 GPU fallback.
-        # Impl-10-pre-2 — k_channels 매개변수 폐기 (sequence-parallel PIM 위 k_total knob 제거).
-        if self.config.ablation.f1_disabled:
-            return self.config.time.gpu_op_time_us["decode_attn_fallback"]
+        """Per-mb spec-derived op_time. Stage 1 fixed lookup 폐기 (Stage 2 Impl-10 main).
+
+        ARCH §3.5.2 *Computed Wait* literal 정합 + 사용자 의도 *"각 trace 위 정확 산출"*
+        정합. Stage 2 위:
+
+        - GPU 3 node (QKV, PREFILL_ATTN, O_PROJ) — `compute_gpu_op_time_s` per-mb 산출
+            (B200 FP16 peak × MFU + Llama-3 70B spec + per-mb batch + causal ctx)
+        - DECODE_ATTN — PIM 산출 (default) 또는 F1 ablation 위 GPU fallback reference
+            (gpu_op_time_us["decode_attn_fallback"], Impl-11 calibration 영역)
+        """
         mb = self.micro_batches.get(node.micro_batch_id)
+        if node.type in GPU_NODE_TYPES:
+            if mb is None:
+                # Stage 1 test fixture backward-compat — default mb 위 spec-derived 산출
+                # (production 영역 위 admission 이 mb register 영원 → 본 fallback 영원 사용 0).
+                # 사용자 framing 정합 — dummy lookup 영원 사용 영원, spec-derived 영원 보존.
+                from puls_sched.micro_batch import MicroBatch
+                mb = MicroBatch(id=node.micro_batch_id, decode_tokens={0: 0})
+            # Stage 2 — per-mb spec-derived (seconds → microseconds for clock unit)
+            return compute_gpu_op_time_s(node.type, mb, self.config.calibration, self.config.model) * 1e6
+        # PIM (decode-attn).
+        if self.config.ablation.f1_disabled:
+            # F1 ablation — GPU fallback reference (Impl-11 영역). DECODE_ATTN spec-derived 영원
+            # closed-form 산식 (Stage 2 위 Impl-11 deferred — reference 보존).
+            return self.config.time.gpu_op_time_us["decode_attn_fallback"]
         if mb is None:
             raise RuntimeError(
                 f"PIM dispatch for unregistered MicroBatch {node.micro_batch_id}"
             )
+        # Stage 2 unit convention — PIMExecutor.op_time() 반환 = ns, clock + GPU op_time = µs.
+        # Stage 1 dummy 영역 위 영원 unit mismatch (1.0 dummy 위 의미 0), Stage 2 calibrated
+        # 위 정정. PIM (ns) → µs 위 × 1e-3.
         return self.pim_executor.op_time(
             kv_rows_total=mb.kv_rows_total,
-            kv_rows_lockstep=mb.kv_rows_lockstep,   # Impl-8 — F5 ablation 위. F5 활성화 path 위에선 pim_executor 가 사용 안 함
-        )
+            kv_rows_lockstep=mb.kv_rows_lockstep,   # Impl-8 — F5 ablation 위
+        ) * 1e-3
 
     def dispatch_gpu(self, node: Node) -> None:
         check_I4(self.gpu_busy)

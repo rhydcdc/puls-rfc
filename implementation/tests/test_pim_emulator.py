@@ -43,8 +43,14 @@ def test_tile_time_fp16_lookup_matches_config(pim_executor_fp16, dummy_config):
 
 
 def test_tile_time_regime_ratio_property(pim_executor, pim_executor_fp16):
-    """ARCH §6.6 의 placeholder ratio 2× property. 값 자체는 dummy."""
-    assert pim_executor_fp16.tile_time() / pim_executor.tile_time() == 2.0
+    """ARCH §6.6 — FP16 (load-bound) 위 FP8 (compute-bound) 의 *roughly 2×* property.
+
+    Stage 1 dummy: ratio = 2.0 (= 2.0 / 1.0).
+    Stage 2 D5 calibrated: ratio = 1.918 (= 512 / 267).
+    ARCH §6.6 literal "roughly 2×" — 양 영역 정합 위 direction 검증.
+    """
+    ratio = pim_executor_fp16.tile_time() / pim_executor.tile_time()
+    assert 1.5 < ratio < 2.5, f"ARCH §6.6 'roughly 2×' property — got {ratio:.3f}"
 
 
 def test_tile_time_deterministic_1000_calls(pim_executor):
@@ -252,13 +258,13 @@ def test_arch_3_4_aggregate_channel_count(pim_executor, dummy_config):
     assert pim_executor.k_aggregate == 2048
 
 
-def test_arch_6_6_regime_ratio_in_dummy_placeholder(dummy_config):
-    """ARCH §6.6 'roughly 2×' placeholder ratio property. 값 자체 무의미, ordering 만."""
+def test_arch_6_6_regime_ratio_calibrated(dummy_config):
+    """ARCH §6.6 'roughly 2×' property. Stage 2 D5 calibrated: 512 / 267 = 1.918."""
     ratio = (
         dummy_config.time.pim_tile_time_ns["FP16"]
         / dummy_config.time.pim_tile_time_ns["FP8"]
     )
-    assert ratio == 2.0
+    assert 1.5 < ratio < 2.5, f"ARCH §6.6 'roughly 2×' — got {ratio:.3f}"
 
 
 def test_arch_5_1_pure_prefill_zero_rows(pim_executor):

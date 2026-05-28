@@ -31,9 +31,14 @@ def _kernel_completion_event(mb_id: int, node_type: NodeType, resource: str = "G
 
 def _setup_mb_with_decode_reqs(scheduler_core, n_reqs: int = 1, max_tokens: int = 5,
                                 kv_length: int = 100, start_id: int = 0) -> int:
-    """admit n_reqs → 1 mb 생성 + dag node 등록"""
+    """admit n_reqs → 1 mb 생성 + dag node 등록.
+
+    Stage 2 — prompt_tokens=[] (이미 prefill 완료 가정) → admission 위 decode-only mb 직접 산출.
+    원본 Stage 1 패턴 (prompt_tokens=[0]*5) 위 Stage 2 prefill chunking 위 *first cycle prefill,
+    second cycle decode* 영역 변화 — 본 test 의 lifecycle 의도 (decode signal 산출) 와 분리 위 정정.
+    """
     for i in range(n_reqs):
-        req = Request(id=start_id + i, prompt_tokens=[0] * 5, kv_length=kv_length,
+        req = Request(id=start_id + i, prompt_tokens=[], kv_length=kv_length,
                       max_tokens=max_tokens)
         scheduler_core.request_queue.push(req)
     scheduler_core._handle(_admission_event())
@@ -133,9 +138,9 @@ def test_layer_index_reset_after_token_signal(scheduler_core, dummy_config):
 
 def test_multiple_decode_reqs_independent_finalize(scheduler_core, dummy_config):
     """3 req — max_tokens={1, 5, 10}. 1 step 후 max=1 req 만 finalize"""
-    # mixed max_tokens per req → admit individually
+    # Stage 2 — prompt_tokens=[] 위 decode-only mb 직접 (prefill chunking 영향 분리)
     for i, mx in enumerate([1, 5, 10]):
-        r = Request(id=i, prompt_tokens=[0] * 5, kv_length=50, max_tokens=mx)
+        r = Request(id=i, prompt_tokens=[], kv_length=50, max_tokens=mx)
         scheduler_core.request_queue.push(r)
     scheduler_core._handle(_admission_event())
     mb_id = scheduler_core._next_mb_id - 1

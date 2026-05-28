@@ -14,8 +14,10 @@ Comparative baseline 미산출 (Sarathi · vLLM).*
 - report — Python dict + markdown 표 (PULS 단독, Comparative baseline 없음)
 """
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 
 from puls_sched.clock import Clock
 from puls_sched.config import Config
@@ -79,6 +81,69 @@ class AblationSource(Enum):
     F2 = "F2_DOUBLE_BUFFER"
     F3 = "F3_INSTANCE_AB"
     F5 = "F5_CHANNEL_INDEP"
+
+
+class AuxSource(Enum):
+    """Aux source ID — ARCH §5.7 정합 (Auxiliary). Stage 2 D2 deliverable.
+
+    Aux1 = mixed batching weight reuse (arithmetic intensity 상승)
+    Aux2 = bus traffic reduction (KV cache HBM↔GPU 절감, long-ctx dominant)
+    """
+
+    AUX1 = "AUX1_MIXED_BATCH_WEIGHT_REUSE"
+    AUX2 = "AUX2_BUS_TRAFFIC_REDUCTION"
+
+
+@dataclass(frozen=True)
+class AuxCell:
+    """Aux saving cell — closed-form 산출 + provenance label.
+
+    Stage 2 D2 (PLAN §4 Impl-10 main) — saving_per_layer ns + 80 layer aggregate.
+    Source: B200 + HBM4 projection + Llama-3 70B spec + η_HBM (D1) + PIM tile (D5).
+    """
+
+    source: AuxSource
+    saving_per_layer_ns: float
+    saving_total_80_layer_ns: float
+    provenance_label: str
+
+
+@dataclass(frozen=True)
+class F3ClosedFormResult:
+    """F3 closed-form ratio — α path 위 closed-form 산출.
+
+    a_cycle = max(t_proj, t_attn) — Instance A 내부 double-buffering (§5.6)
+    b_cycle = t_FFN — Instance B (α path Carry-1 해소 후)
+    F3 = max(a, b) / (a + b)
+    """
+
+    ctx_tokens: int
+    prefill_chunk: int
+    t_qkv_us: float
+    t_prefill_attn_us: float
+    t_o_proj_us: float
+    t_proj_us: float
+    t_attn_us: float
+    a_cycle_us: float
+    b_cycle_us: float
+    f3_ratio: float
+    provenance: str = "f3_closed_form_alpha_path"
+
+
+@dataclass(frozen=True)
+class F5TraceGroundedResult:
+    """F5 trace-grounded ratio — λ=3.40 첫 10 req KV 분포 위.
+
+    ratio = ceil(sum_KV / (k × tile_rows)) / ceil(max_KV × N / (k × tile_rows))
+    """
+
+    n_requests: int
+    sum_kv: int
+    max_kv: int
+    tiles_channel_independent: int
+    tiles_lockstep_max_kv: int
+    f5_ratio: float
+    provenance: str = "f5_trace_grounded_longbench_longctx_poisson"
 
 
 @dataclass(frozen=True)
@@ -304,6 +369,336 @@ class Evaluator:
             ratio=ratio,
             direction_positive=direction_positive,
         )
+
+    # ========================================================================
+    # Stage 2 D2 deliverable — Aux1·Aux2·F3·F5 closed-form + cross-validate
+    # ========================================================================
+
+    def aux1_mixed_batch_weight_reuse(self) -> AuxCell:
+        """Aux1 closed-form — mixed batch weight streaming 1 회 절감.
+
+        saving_per_layer = weight_bytes_per_layer / (HBM_ext_BW × η_HBM_ext)
+            ↑ separate prefill+decode 위 2 회 weight streaming → mixed 위 1 회
+
+        Provenance: llama3_70b_published_spec + puls_substrate_hbm4_projection +
+        puls_d1_eta_hbm3_extended_to_hbm4_framing_A.
+        """
+        cal = self.config.calibration
+        bw_Bps = cal.hbm_ext_bw_aggregate_TBps * 1e12 * cal.eta_hbm_external
+        saving_s = cal.weight_bytes_per_layer_fp16 / bw_Bps
+        saving_per_layer_ns = saving_s * 1e9
+        return AuxCell(
+            source=AuxSource.AUX1,
+            saving_per_layer_ns=saving_per_layer_ns,
+            saving_total_80_layer_ns=saving_per_layer_ns * self.config.model.num_layers,
+            provenance_label=cal.provenance.get("weight_bytes_per_layer", "")
+            + " + " + cal.provenance.get("hbm_bw", "")
+            + " + " + cal.provenance.get("eta_hbm_external", ""),
+        )
+
+    def aux2_bus_traffic_reduction(self, kv_length: int) -> AuxCell:
+        """Aux2 closed-form — KV cache HBM↔GPU 전송 절감 (long-ctx dominant).
+
+        Without PIM: time_KV = bytes_KV / (HBM_ext_BW × η_ext)
+        With PIM:
+            time_PIM = num_tiles × pim_tile_time_fp8 × num_layers
+            time_result = bytes_result / (HBM_ext_BW × η_ext)
+        saving = time_KV − (time_PIM + time_result)
+
+        Args:
+            kv_length: per-req KV token 수 (trace 위 산출)
+        """
+        cal = self.config.calibration
+        hw = self.config.hw
+        model = self.config.model
+        bw_ext_Bps = cal.hbm_ext_bw_aggregate_TBps * 1e12 * cal.eta_hbm_external
+
+        # Without PIM — GPU decode-attn 위 KV bytes 외부 bus 읽기
+        bytes_KV = kv_length * cal.kv_bytes_per_token_aggregate_fp8
+        time_KV_s = bytes_KV / bw_ext_Bps
+
+        # With PIM — internal 영역 (compute-bound) + result 외부 bus
+        k_aggregate = hw.num_gpus_instance_a * hw.num_stacks_per_gpu * hw.num_channels_per_stack
+        tile_rows = self.config.time.rtl_fsm_tile_rows
+        num_tiles = math.ceil(kv_length / (k_aggregate * tile_rows)) if kv_length > 0 else 0
+        time_PIM_s = num_tiles * cal.pim_tile_time_fp8_ns_calibrated * 1e-9 * model.num_layers
+
+        # Result bytes (PIM → HBM → GPU read) — [batch=1 × hidden] × FP16 × L
+        bytes_result = model.hidden * 2 * model.num_layers
+        time_result_s = bytes_result / bw_ext_Bps
+
+        saving_s = time_KV_s - (time_PIM_s + time_result_s)
+        saving_total_ns = saving_s * 1e9
+        return AuxCell(
+            source=AuxSource.AUX2,
+            saving_per_layer_ns=saving_total_ns / model.num_layers,
+            saving_total_80_layer_ns=saving_total_ns,
+            provenance_label=cal.provenance.get("kv_bytes", "")
+            + " + " + cal.provenance.get("trace", "")
+            + " + " + cal.provenance.get("pim_tile_fp8", "")
+            + " + " + cal.provenance.get("eta_hbm_external", ""),
+        )
+
+    def f3_closed_form(
+        self, ctx_tokens: int, prefill_chunk: int = 512, batch: int = 1,
+    ) -> F3ClosedFormResult:
+        """F3 closed-form ratio — α path 정합.
+
+        a_cycle = max(t_proj, t_attn)
+            t_proj = t_QKV + t_PREFILL_ATTN + t_O_PROJ (GPU compute-bound spec-derived)
+            t_attn = num_tiles × pim_tile_fp8 (PIM, D5 calibrated)
+        b_cycle = t_FFN (Instance B compute-bound spec-derived)
+
+        F3 = max(a, b) / (a + b)
+
+        batch invariance — batch=1 위 산출 후 ratio 보존 (batch linear 위 분자분모 상쇄).
+        ctx sweep 위 transition — short-ctx GPU-bound → long-ctx PIM-bound.
+        """
+        cal = self.config.calibration
+        model = self.config.model
+        peak_FLOPS = cal.gpu_fp16_dense_peak_tflops * 1e12 * cal.gpu_mfu_default
+
+        # GPU compute (spec-derived per-op, seconds)
+        flops_QKV = 2 * batch * model.hidden * (
+            model.hidden + 2 * model.num_kv_heads * model.head_dim
+        )
+        flops_PREFILL_ATTN = 2 * prefill_chunk * model.hidden * ctx_tokens
+        flops_O_PROJ = 2 * batch * model.hidden * model.hidden
+        flops_FFN = 6 * batch * model.hidden * model.ffn_intermediate
+
+        t_qkv_us = flops_QKV / peak_FLOPS * 1e6
+        t_prefill_attn_us = flops_PREFILL_ATTN / peak_FLOPS * 1e6
+        t_o_proj_us = flops_O_PROJ / peak_FLOPS * 1e6
+        t_proj_us = t_qkv_us + t_prefill_attn_us + t_o_proj_us
+
+        # PIM attention (D5 calibrated, ns → µs)
+        hw = self.config.hw
+        k_aggregate = hw.num_gpus_instance_a * hw.num_stacks_per_gpu * hw.num_channels_per_stack
+        tile_rows = self.config.time.rtl_fsm_tile_rows
+        num_tiles = math.ceil(batch * ctx_tokens / (k_aggregate * tile_rows)) if ctx_tokens > 0 else 0
+        t_attn_us = num_tiles * cal.pim_tile_time_fp8_ns_calibrated * 1e-3
+
+        a_cycle_us = max(t_proj_us, t_attn_us)
+        b_cycle_us = flops_FFN / peak_FLOPS * 1e6
+        total = a_cycle_us + b_cycle_us
+        ratio = max(a_cycle_us, b_cycle_us) / total if total > 0 else 0.0
+
+        return F3ClosedFormResult(
+            ctx_tokens=ctx_tokens,
+            prefill_chunk=prefill_chunk,
+            t_qkv_us=t_qkv_us,
+            t_prefill_attn_us=t_prefill_attn_us,
+            t_o_proj_us=t_o_proj_us,
+            t_proj_us=t_proj_us,
+            t_attn_us=t_attn_us,
+            a_cycle_us=a_cycle_us,
+            b_cycle_us=b_cycle_us,
+            f3_ratio=ratio,
+        )
+
+    def f5_trace_grounded(self, kv_lengths: list[int]) -> F5TraceGroundedResult:
+        """F5 trace-grounded — channel-independent vs lock-step max-KV.
+
+        channel-independent: tiles = ceil(sum_KV / (k × tile_rows))
+        lock-step max-KV:    tiles = ceil(max_KV × N / (k × tile_rows))
+        ratio = tiles_indep / tiles_lockstep (≤ 1.0 — penalty)
+        """
+        hw = self.config.hw
+        k_aggregate = hw.num_gpus_instance_a * hw.num_stacks_per_gpu * hw.num_channels_per_stack
+        tile_rows = self.config.time.rtl_fsm_tile_rows
+        denom = k_aggregate * tile_rows
+        if not kv_lengths:
+            return F5TraceGroundedResult(0, 0, 0, 0, 0, 0.0)
+        sum_kv = sum(kv_lengths)
+        max_kv = max(kv_lengths)
+        n = len(kv_lengths)
+        tiles_indep = math.ceil(sum_kv / denom) if sum_kv > 0 else 0
+        tiles_lockstep = math.ceil(max_kv * n / denom) if max_kv * n > 0 else 0
+        ratio = tiles_indep / tiles_lockstep if tiles_lockstep > 0 else 0.0
+        return F5TraceGroundedResult(
+            n_requests=n,
+            sum_kv=sum_kv,
+            max_kv=max_kv,
+            tiles_channel_independent=tiles_indep,
+            tiles_lockstep_max_kv=tiles_lockstep,
+            f5_ratio=ratio,
+        )
+
+    def f3_cross_validate(
+        self, ctx_tokens: int, prefill_chunk: int = 512,
+    ) -> dict:
+        """F3 closed-form vs run.loop measured cross-validate (α path 정합).
+
+        closed-form = self.f3_closed_form(ctx, chunk)
+        measured = idle_telemetry 위 active duration delta 산출 (a_cycle = gpu_a + pim_a, b_cycle = gpu_b)
+        """
+        closed = self.f3_closed_form(ctx_tokens, prefill_chunk)
+        a_measured = (
+            self.idle_telemetry.active_duration("gpu_instance_a")
+            + self.idle_telemetry.active_duration("pim_instance_a")
+        )
+        b_measured = self.idle_telemetry.active_duration("gpu_instance_b")
+        total_measured = a_measured + b_measured
+        ratio_measured = max(a_measured, b_measured) / total_measured if total_measured > 0 else 0.0
+        return {
+            "closed_form_ratio": closed.f3_ratio,
+            "closed_form_a_cycle_us": closed.a_cycle_us,
+            "closed_form_b_cycle_us": closed.b_cycle_us,
+            "measured_ratio": ratio_measured,
+            "measured_a_cycle_us": a_measured,
+            "measured_b_cycle_us": b_measured,
+            "abs_diff_ratio": abs(closed.f3_ratio - ratio_measured),
+            "provenance": "f3_closed_form_alpha_path + run_loop_measured_b_cycle",
+        }
+
+    def d2_report(
+        self, kv_lengths: list[int], ctx_sweep: list[int] | None = None,
+        aux1_t4_ratio_path: str | Path | None = None,
+    ) -> dict:
+        """D2 통합 산출 — 4 source closed-form + T4 microbench ingest + markdown.
+
+        Args:
+            kv_lengths: trace 첫 N req kv_length 목록 (Aux2 per-req + F5 입력)
+            ctx_sweep: F3 ctx sweep 목록 (default [2k, 32k, 128k, 1M])
+            aux1_t4_ratio_path: Colab T4 microbench JSON path (optional ingest)
+        """
+        if ctx_sweep is None:
+            ctx_sweep = [2_000, 32_000, 128_000, 1_000_000]
+        cal = self.config.calibration
+
+        aux1 = self.aux1_mixed_batch_weight_reuse()
+        aux2_per_req = [
+            self.aux2_bus_traffic_reduction(kv) for kv in kv_lengths
+        ]
+        f3_by_ctx = [self.f3_closed_form(ctx) for ctx in ctx_sweep]
+        f5 = self.f5_trace_grounded(kv_lengths)
+
+        # η_HBM sensitivity sweep
+        eta_sweep = {}
+        for eta in cal.eta_hbm_external_sweep:
+            # Snapshot calibration with different η
+            import dataclasses as dc
+            cal_eta = dc.replace(cal, eta_hbm_external=eta)
+            cfg_eta = dc.replace(self.config, calibration=cal_eta)
+            ev_eta = Evaluator(config=cfg_eta, clock=self.clock, idle_telemetry=self.idle_telemetry)
+            eta_sweep[eta] = {
+                "aux1_saving_total_ns": ev_eta.aux1_mixed_batch_weight_reuse().saving_total_80_layer_ns,
+                "aux2_avg_saving_total_ns": sum(
+                    ev_eta.aux2_bus_traffic_reduction(kv).saving_total_80_layer_ns
+                    for kv in kv_lengths
+                ) / len(kv_lengths) if kv_lengths else 0.0,
+            }
+
+        # T4 microbench ingest (optional, disclosure only)
+        aux1_t4 = None
+        path = aux1_t4_ratio_path or cal.aux1_t4_ratio_path
+        if path:
+            p = Path(path)
+            if not p.is_absolute():
+                p = Path(__file__).parent.parent.parent / p
+            if p.exists():
+                import json
+                aux1_t4 = json.loads(p.read_text())
+
+        result = {
+            "aux1": aux1,
+            "aux2_per_req": aux2_per_req,
+            "f3_by_ctx": f3_by_ctx,
+            "f5": f5,
+            "eta_sweep": eta_sweep,
+            "aux1_t4_microbench": aux1_t4,
+            "provenance": dict(cal.provenance),
+        }
+        result["markdown"] = self._format_d2_markdown(result)
+        return result
+
+    @staticmethod
+    def _format_d2_markdown(d2: dict) -> str:
+        """D2 통합 markdown — 4 source + provenance + honest disclosure."""
+        lines = ["# D2 Calibrated Projection Report (Stage 2)", ""]
+        lines.append("## Substrate Provenance")
+        for k, v in d2["provenance"].items():
+            lines.append(f"- {k}: `{v}`")
+        lines.append("")
+
+        # Aux1
+        a1 = d2["aux1"]
+        lines.append("## Aux1 — Mixed Batching Weight Reuse")
+        lines.append(f"- saving_per_layer = {a1.saving_per_layer_ns:.2f} ns")
+        lines.append(f"- saving_total (80 layer) = {a1.saving_total_80_layer_ns:.2f} ns = "
+                     f"{a1.saving_total_80_layer_ns / 1000:.2f} µs")
+        lines.append(f"- provenance: {a1.provenance_label}")
+        lines.append("")
+
+        # Aux2
+        lines.append("## Aux2 — Bus Traffic Reduction (per-req kv_length)")
+        lines.append("| req | saving_total_ns | saving_total_us |")
+        lines.append("|---|---|---|")
+        for i, c in enumerate(d2["aux2_per_req"]):
+            lines.append(f"| {i} | {c.saving_total_80_layer_ns:.2f} | "
+                         f"{c.saving_total_80_layer_ns / 1000:.2f} |")
+        lines.append("")
+
+        # F3
+        lines.append("## F3 — Inter-instance Pipeline Ratio (closed-form, α path)")
+        lines.append("| ctx | t_proj_us | t_attn_us | a_cycle_us | b_cycle_us | F3 ratio |")
+        lines.append("|---|---|---|---|---|---|")
+        for r in d2["f3_by_ctx"]:
+            lines.append(f"| {r.ctx_tokens} | {r.t_proj_us:.2f} | {r.t_attn_us:.2f} | "
+                         f"{r.a_cycle_us:.2f} | {r.b_cycle_us:.2f} | {r.f3_ratio:.4f} |")
+        lines.append("")
+
+        # F5
+        f5 = d2["f5"]
+        lines.append("## F5 — Channel-independent vs Lock-step max-KV")
+        lines.append(f"- n_reqs = {f5.n_requests}, sum_KV = {f5.sum_kv}, max_KV = {f5.max_kv}")
+        lines.append(f"- tiles_indep = {f5.tiles_channel_independent}, "
+                     f"tiles_lockstep = {f5.tiles_lockstep_max_kv}")
+        lines.append(f"- F5 ratio = {f5.f5_ratio:.4f} "
+                     f"(< 1.0 = channel-independent 가 lock-step 보다 빠름)")
+        lines.append("")
+
+        # η sweep
+        lines.append("## η_HBM Sensitivity Sweep")
+        lines.append("| η | Aux1 saving (ns) | Aux2 avg saving (ns) |")
+        lines.append("|---|---|---|")
+        for eta, v in d2["eta_sweep"].items():
+            lines.append(f"| {eta} | {v['aux1_saving_total_ns']:.2f} | "
+                         f"{v['aux2_avg_saving_total_ns']:.2f} |")
+        lines.append("")
+
+        # T4 microbench
+        if d2["aux1_t4_microbench"]:
+            lines.append("## Aux1 Empirical Anchor — T4 Microbench")
+            lines.append(f"- provenance: `{d2['aux1_t4_microbench']['metadata']['provenance_label']}`")
+            lines.append("| batch (k → 2k) | t_separate (ms) | t_mixed (ms) | ratio |")
+            lines.append("|---|---|---|---|")
+            for k, v in d2["aux1_t4_microbench"].get("aux1_ratio", {}).items():
+                if isinstance(v, dict) and "ratio_separate_over_mixed" in v:
+                    lines.append(f"| {k} | {v['t_separate_ms']:.4f} | "
+                                 f"{v['t_mixed_ms']:.4f} | {v['ratio_separate_over_mixed']:.4f} |")
+            lines.append("")
+            lines.append("*Cross-validation disclosure — T4 위 architectural property (mixed batch "
+                         "weight reuse 가 memory-bound regime 위 dominant). B200 위 ingest 0 — "
+                         "T4 ≠ B200 substrate mismatch 정합.*")
+            lines.append("")
+
+        # Honest disclosure
+        lines.append("## Honest Disclosure")
+        lines.append("- **F1 (SP-PIM vs GPU attention) — Impl-11 deferred**: Blackwell GPU attention "
+                     "kernel calibration 영역. Stage 2 위 reference placeholder `decode_attn_fallback` 보존.")
+        lines.append("- **F2 (double-buffering 정량) — Impl-11 deferred**: calibrated cycle 위 "
+                     "isolated ratio.")
+        lines.append("- **Memory = HBM4 hypothetical projection**: 현재 production 부재, "
+                     "ARCH §3.1 *HBM4 logic die* literal 정합.")
+        lines.append("- **η_HBM_ext = Framing A**: D1 H100 (HBM3) 측정값 → HBM4 영역 extension. "
+                     "직접 measurement 부재.")
+        lines.append("- **NVLink 산식 위 등장 0**: ARCH §3.4 *async hidden* + §3.5.3 *result via HBM*.")
+        lines.append("- **FP16 PIM tile = reference**: ARCH §6.6 regime A 확정 evidence. "
+                     "production 위 `kv_precision = FP8` 영원 (산식 위 미사용).")
+        lines.append("- **`compute_*_op_time_s` per-mb spec-derived**: ARCH §3.5.2 Computed Wait + "
+                     "사용자 의도 *'각 trace 위 정확 산출'* 정합. 평균/dummy 0.")
+        return "\n".join(lines)
 
     def report(
         self, a_cycle: float, b_cycle: float, t_pim: float, t_proj: float,

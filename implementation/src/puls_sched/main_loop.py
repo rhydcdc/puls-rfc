@@ -152,7 +152,7 @@ class SchedulerCore:
                         self.in_flight_requests[req.id] = req
                     # ARCH §5.2 uniform-chunk + B option (PIM-slack) —
                     # spec.prefill_chunk_tokens = TOTAL budget. Distribute uniformly across prefill reqs.
-                    prefill_chunk, decode_tokens = self._populate_mb_phases(
+                    prefill_chunk, decode_tokens, prefill_processed = self._populate_mb_phases(
                         spec.decode_requests, spec.prefill_chunk_tokens,
                     )
                     mb = MicroBatch(
@@ -162,6 +162,7 @@ class SchedulerCore:
                         prefill_chunk=prefill_chunk,                  # Impl-10-pre-2 (O9.1)
                         decode_tokens=decode_tokens,
                         prefill_chunk_budget=spec.prefill_chunk_tokens,   # Impl-10-pre-2 B — adaptive budget 보존
+                        prefill_processed=prefill_processed,          # Impl-10 main — PREFILL_ATTN causal ctx 산출
                     )
                     self.dispatcher.register(mb)
                     self.window.admit(mb_id)
@@ -206,31 +207,67 @@ class SchedulerCore:
     def _compose_admission_payload(self) -> dict:
         """ADMISSION_TICK 의 5 개 payload 입력 산출 (Impl-10-pre-1 (B)~(B''')).
 
-        ARCH §6.4 *"GPU/PIM idle fractions of the previous iteration are measured to regulate
-        next μ-batch's admission"* literal 정합 — 모든 입력 scheduler 자기 상태 derived.
+        Impl-10 main (Stage 2) — *Stage 1 dummy lookup 영역 폐기*. 사용자 의도 정합 위
+        모든 timing 영역 spec-derived per-mb 산출 (ARCH §3.5.2 Computed Wait literal).
 
         - (B) a_cycle / b_cycle — IdleTelemetry active_duration delta (이전 ADMISSION_TICK 대비)
-        - (B') t_proj — config 의 projection (QKV + O_PROJ) GEMM 시간 합
+        - (B') t_proj — last dispatched mb 위 spec-derived (QKV + O_PROJ, compute_gpu_op_time_s)
         - (B'') t_pim_fn — PIMExecutor.op_time 의 closure (avg kv_length 위 동적)
         - (B''') ctx_tokens — in_flight_requests 의 max kv_length (deadband ctx-tier 입력)
+        - gpu_op_time_per_token_us — last mb 위 spec-derived per-token (PREFILL_ATTN / chunk)
         """
+        from puls_sched.config import compute_gpu_op_time_s
+
         a_cycle, b_cycle = self._measure_cycles()
-        t_proj = (
-            self.config.time.gpu_op_time_us.get("qkv", 0.0)
-            + self.config.time.gpu_op_time_us.get("o_proj", 0.0)
-        )
         ctx_tokens = max(
             (r.kv_length for r in self.in_flight_requests.values()), default=0,
         )
+
+        # Stage 2 — Path C: last dispatched mb 위 spec-derived 산출 (정확, 평균/dummy 0).
+        # Cold start (no mb yet) 위 fallback = 0.0 (admission balance 위 cold start anchor).
+        last_mb = self._last_dispatched_mb()
+        if last_mb is not None:
+            t_qkv_s = compute_gpu_op_time_s(
+                NodeType.QKV, last_mb, self.config.calibration, self.config.model,
+            )
+            t_oproj_s = compute_gpu_op_time_s(
+                NodeType.O_PROJ, last_mb, self.config.calibration, self.config.model,
+            )
+            t_proj_us = (t_qkv_s + t_oproj_s) * 1e6
+            # per-token = PREFILL_ATTN total / chunk total (last mb 위 per-token 영역)
+            chunk_total = sum(len(v) for v in last_mb.prefill_chunk.values())
+            if chunk_total > 0:
+                t_pattn_s = compute_gpu_op_time_s(
+                    NodeType.PREFILL_ATTN, last_mb, self.config.calibration, self.config.model,
+                )
+                per_token_us = (t_pattn_s * 1e6) / chunk_total
+            else:
+                # Decode-only last mb — per-token spec-derived 위 평균 ctx 산출
+                avg_ctx = ctx_tokens if ctx_tokens > 0 else 1
+                peak_FLOPS = (
+                    self.config.calibration.gpu_fp16_dense_peak_tflops * 1e12
+                    * self.config.calibration.gpu_mfu_default
+                )
+                per_token_us = (2 * self.config.model.hidden * avg_ctx / peak_FLOPS) * 1e6
+        else:
+            t_proj_us = 0.0
+            per_token_us = 0.0
+
         return {
-            "t_proj": t_proj,
+            "t_proj": t_proj_us,
             "t_pim_fn": self._make_t_pim_fn(),
             "a_cycle": a_cycle,
             "b_cycle": b_cycle,
             "ctx_tokens": ctx_tokens,
-            # Impl-10-pre-2 (B option) — PIM-slack adaptive chunk 위 per-token GPU op time 전달
-            "gpu_op_time_per_token_us": self.config.time.gpu_op_time_per_token_us,
+            "gpu_op_time_per_token_us": per_token_us,
         }
+
+    def _last_dispatched_mb(self):
+        """Last dispatched mb (가장 최근 register 된 mb) 위 spec-derived 산출 입력."""
+        if not self.dispatcher.micro_batches:
+            return None
+        last_id = max(self.dispatcher.micro_batches.keys())
+        return self.dispatcher.micro_batches[last_id]
 
     def _measure_cycles(self) -> tuple[float, float]:
         """Impl-10-pre-1 (B) — 이전 ADMISSION_TICK 대비 a_cycle / b_cycle delta 산출.
@@ -340,32 +377,30 @@ class SchedulerCore:
             for rid in active_req_ids
             if rid in self.in_flight_requests
         ]
-        new_prefill_chunk, new_decode_tokens = self._populate_mb_phases(
+        new_prefill_chunk, new_decode_tokens, new_prefill_processed = self._populate_mb_phases(
             active_reqs, budget,
         )
         mb.prefill_chunk = new_prefill_chunk
         mb.decode_tokens = new_decode_tokens
+        mb.prefill_processed = new_prefill_processed   # Impl-10 main — re-composition causal ctx refresh
 
     def _populate_mb_phases(
         self, reqs, chunk_budget_total: int,
-    ) -> tuple[dict[int, list[int]], dict[int, int]]:
+    ) -> tuple[dict[int, list[int]], dict[int, int], dict[int, int]]:
         """Impl-10-pre-2 (O9.1 + O9.2 + B, S1 fix) — mb phase 분리 + Option A 분배.
 
-        ARCH §5.2 uniform-chunk + 사용자 의도 정합 — admission 의 chunk_budget_total 은
-        *전체 prefill reqs 합산* 위 GPU PREFILL_ATTN 시간이 (t_pim × margin − t_proj) 와 같아지는
-        총 token 수. N 개 prefill reqs 위 균등 분배:
-
-            chunk_per_req = chunk_budget_total // N
-            chunk_uniform = min(chunk_per_req, min(remaining over prefill reqs))
+        ARCH §5.2 uniform-chunk + 사용자 의도 정합. Impl-10 main — *prefill_processed dict*
+        동시 산출 (PREFILL_ATTN causal ctx 산출 입력, ARCH §3.5.2 정합).
 
         Total GPU PREFILL_ATTN work = N × chunk_uniform × per_token ≈ t_pim × margin − t_proj
         → t_qkv + t_prefill_attn + t_oproj ≈ t_pim × margin → 양쪽 idle 최소.
 
         Edge case: N > budget → chunk_per_req=0 → prefill_chunk 비어 있음 (decode-only cycle).
-        Returns (prefill_chunk, decode_tokens).
+        Returns (prefill_chunk, decode_tokens, prefill_processed).
         """
         prefill_chunk: dict[int, list[int]] = {}
         decode_tokens: dict[int, int] = {}
+        prefill_processed: dict[int, int] = {}
         prefill_reqs = []
         for req in reqs:
             remaining = len(req.prompt_tokens) - req.prefill_processed
@@ -383,7 +418,9 @@ class SchedulerCore:
                     prefill_chunk[req.id] = list(range(
                         req.prefill_processed, req.prefill_processed + chunk_uniform,
                     ))
-        return prefill_chunk, decode_tokens
+                    # Impl-10 main — req.prefill_processed 시점 snapshot (causal ctx 산출 입력)
+                    prefill_processed[req.id] = req.prefill_processed
+        return prefill_chunk, decode_tokens, prefill_processed
 
     def _invoke_admission(self, event: Event) -> MicroBatchSpec | None:
         t_proj = event.payload.get("t_proj", 0.0)

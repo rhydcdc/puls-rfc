@@ -71,9 +71,10 @@ class Run:
     evaluator: Evaluator
     output_dir: Path
     _step_count: int = 0
-    # Safety guard — synthetic:100 위 max_tokens ~ 40 × L=80 × 4 nodes × 100 reqs ≈ 1.3M events
-    # 충분히 wide margin (R3 R-loop).
-    _safety_step_limit: int = 10_000_000
+    # Safety guard — Stage 2 위 per-mb spec-derived 산출 위 chunk 작아지면 step 수 자연 증가.
+    # synthetic:30 위 평균 prompt ~500 + max_decode ~30 + chunk_per_req ~100 → 5 mb prefill +
+    # 30 mb decode × L=80 × ~6 event/cycle ≈ 200K event/req × 30 req ≈ 6M. 100M wide margin.
+    _safety_step_limit: int = 100_000_000
 
     @staticmethod
     def init(

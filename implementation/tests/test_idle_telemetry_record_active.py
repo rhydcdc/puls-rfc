@@ -108,7 +108,8 @@ def test_dispatch_gpu_record_duration_matches_op_time(
     node.transition_to(NodeState.READY)
     d.dispatch_gpu(node)
     _, t_start, t_end = mock.calls[0]
-    expected_op_time = dummy_config.time.gpu_op_time_us["qkv"]
+    # Stage 2 — op_time = compute_gpu_op_time_s (spec-derived per-mb fallback)
+    expected_op_time = d._op_time(node)
     assert t_end - t_start == pytest.approx(expected_op_time)
 
 
@@ -124,15 +125,17 @@ def test_dispatcher_real_idle_telemetry_accumulates(
         config=dummy_config, clock=clock, queue=event_queue, dag=dag,
         pim_executor=pim_executor, idle_telemetry=tel,
     )
+    op_times = []
     for mb_id in range(3):
         dag.add_micro_batch(mb_id)
         node = dag.get_node(mb_id, NodeType.QKV)
         node.transition_to(NodeState.READY)
+        op_times.append(d._op_time(node))
         d.dispatch_gpu(node)
         # 다음 dispatch 위 gpu_busy 해제
         d.gpu_busy = False
-    # 3 dispatch × op_time=1.0us = 3.0 누적
-    expected_active = 3.0 * dummy_config.time.gpu_op_time_us["qkv"]
+    # Stage 2 — 3 dispatch × spec-derived op_time (per-mb, 모두 동일 fallback mb 위 동일)
+    expected_active = sum(op_times)
     assert tel._active_duration["gpu_instance_a"] == pytest.approx(expected_active)
 
 

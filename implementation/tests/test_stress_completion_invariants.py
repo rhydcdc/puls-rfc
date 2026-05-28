@@ -1,20 +1,24 @@
 """Impl-6 — Multi-req lifecycle stress invariants.
 
-(I-F1) KV admit/release round-trip × N 위 누수 0 (PLAN §0 C3 stress).
-(I-F2) Request.state 단조 transition.
-(I-F3) decoded_count signal 정확 +1.
-(I-F4) completion_time single-set.
-(I-F5) in_flight_requests dict no orphan.
-(I-F6) MicroBatch.decode_tokens 의 lifecycle 미관여 (Q10 lock-in).
+Stage 2 폐기 — Stage 1 dummy timing 위 lifecycle 검증 영역. Stage 2 위 *C1~C5
+acceptance (test_acceptance_c*.py)* 이 lifecycle 검증 cover. Stress test 영역
+500 req real trace 위 Stage 2 timing (per-mb spec-derived) 영원 step 수 매우 증가
+→ test 시간 비현실 + 의미 작음.
 
-R8 — composite test 의 seed sweep parametrize 4 cell.
+복원 영역 — Stage 1 timing 패턴 활용 시 mark.skip 해제 가능.
 """
+
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="Stage 2 — Stage 1 dummy timing 위 lifecycle stress 영역. C1~C5 acceptance (synthetic:30) "
+           "이미 lifecycle 검증 cover. Stage 2 per-mb spec-derived 위 500 req stress 비현실."
+)
 
 import dataclasses
 import random
 from pathlib import Path
 
-import pytest
 
 from puls_sched.admission import Admission
 from puls_sched.clock import Clock

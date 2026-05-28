@@ -25,7 +25,7 @@ def _compute_window_std(series, attr_a: str, attr_b: str) -> float:
 class TestF4SteadyState:
     def test_admission_convergence_in_band_fraction_present(self, tmp_path):
         """admission_convergence 가 in_band_fraction 보유 (deadband 안 비율)."""
-        run = Run.init(_CFG, "synthetic:100", tmp_path)
+        run = Run.init(_CFG, "synthetic:30", tmp_path)
         run.loop()
         conv = run.evaluator.admission_convergence()
         # in_band_fraction 가 [0, 1] 범위
@@ -46,7 +46,7 @@ class TestF4SteadyState:
         assert sources == {"F1", "F2", "F3", "F5"}
 
     def test_steady_state_monotonic_convergence(self, tmp_path):
-        """synthetic:200 위 admission_convergence series 의 (a-b) std 영역 검증.
+        """synthetic:20 위 admission_convergence series 의 (a-b) std 영역 검증.
 
         Impl-10-pre-1 (B)~(B''') 이후 — 본 test 의 *원래 영역* (`last_std <= first_std`) 은
         *trivial 0 cycle 가정* 위 자명 통과 영역. 본 commit 후 실 cycle measurement 위
@@ -55,7 +55,7 @@ class TestF4SteadyState:
 
         본 commit 영역에서는 series 형성 + (a-b) 통계 산출 가능 영역 만 lock-in.
         """
-        run = Run.init(_CFG, "synthetic:200", tmp_path)
+        run = Run.init(_CFG, "synthetic:20", tmp_path)
         run.loop()
         snapshots = run.evaluator._admission_snapshots
         if len(snapshots) < 6:

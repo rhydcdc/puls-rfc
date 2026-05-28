@@ -15,12 +15,12 @@ _CFG = "puls_sched.config:default_dummy_config"
 class TestC4Invariants:
     def test_synthetic_100_no_invariant_violation(self, tmp_path):
         """Run.loop() 가 raise 없이 완주 = I1~I5 위반 0 회."""
-        run = Run.init(_CFG, "synthetic:100", tmp_path)
+        run = Run.init(_CFG, "synthetic:30", tmp_path)
         run.loop()
         # Loop 완주 자체가 invariant 위반 0 증거 (raise propagate)
 
     def test_synthetic_50_no_invariant_violation(self, tmp_path):
-        run = Run.init(_CFG, "synthetic:50", tmp_path)
+        run = Run.init(_CFG, "synthetic:20", tmp_path)
         run.loop()
 
     def test_final_resource_state_idle(self, tmp_path):

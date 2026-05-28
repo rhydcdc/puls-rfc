@@ -101,8 +101,5 @@ def test_nvlink_async_hidden_invariant(nvlink_transfer, dummy_config):
     calibrated input 위 visible NVLink 영역은 §7 O5.2 sensitivity sweep 영역.
     """
     t_handoff = nvlink_transfer.time((8, dummy_config.model.hidden))
-    # dummy gpu_op_time_us * 1000 (us → ns) — A_cycle 의 lower bound 추정
-    a_cycle_ns_lb = dummy_config.time.gpu_op_time_us["qkv"] * 1000
-    # 본 test 의 inequality 가 dummy-coincidence 임을 명시 — Impl-10 영역에서 재검증 필요
-    assert t_handoff > 0  # 비-zero 검증만 (영역 분류는 Impl-10)
-    assert a_cycle_ns_lb > 0
+    # Stage 2 — NVLink 산식 위 등장 0 (ARCH §3.4 async hidden). 비-zero 검증만.
+    assert t_handoff > 0

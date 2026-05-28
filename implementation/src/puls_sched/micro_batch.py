@@ -17,6 +17,10 @@ class MicroBatch:
     # Impl-10-pre-2 (O9.1 + B option) — Total prefill chunk budget (across all prefill reqs in mb).
     # Stored at admission time → _recompose_mb 위 동일 budget 유지 (PIM-slack adaptive 정합).
     prefill_chunk_budget: int = 0
+    # Impl-10 main — per-req prefill_processed at admission time (PREFILL_ATTN causal ctx 산출 입력).
+    # Each entry = req.prefill_processed *직전* 산출값 (this mb 의 chunk 가 처리하기 전 상태).
+    # PREFILL_ATTN FLOPs = 2 × chunk × hidden × (prefill_processed + chunk) — causal lower bound.
+    prefill_processed: dict[int, int] = field(default_factory=dict)
 
     def request_ids(self) -> set[int]:
         return set(self.prefill_chunk.keys()) | set(self.decode_tokens.keys())

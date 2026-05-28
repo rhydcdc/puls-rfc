@@ -78,8 +78,12 @@ def test_dispatcher_prefill_attn_chunk_scaled(
     )
     d.register(mb)
     node = dag.get_node(0, NodeType.PREFILL_ATTN)
-    expected = 512 * dummy_config.time.gpu_op_time_per_token_us
-    assert d._op_time(node) == pytest.approx(expected)
+    # Stage 2 — FlashAttention causal: 2 × 512 × hidden × (prefill_processed + 512)
+    # prefill_processed default = 0 → ctx = 512
+    expected_flops = 2 * 512 * dummy_config.model.hidden * 512
+    peak = dummy_config.calibration.gpu_fp16_dense_peak_tflops * 1e12 * dummy_config.calibration.gpu_mfu_default
+    expected_us = expected_flops / peak * 1e6
+    assert d._op_time(node) == pytest.approx(expected_us)
 
 
 def test_dispatcher_prefill_attn_decode_only_fallback(
@@ -96,8 +100,8 @@ def test_dispatcher_prefill_attn_decode_only_fallback(
     mb = MicroBatch(id=0, kv_rows_total=100, decode_tokens={1: 0})  # decode-only
     d.register(mb)
     node = dag.get_node(0, NodeType.PREFILL_ATTN)
-    # Lookup 영역 (1.0us dummy) 보존
-    assert d._op_time(node) == dummy_config.time.gpu_op_time_us["prefill_attn"]
+    # Stage 2 — decode-only mb (prefill_chunk={}) → PREFILL_ATTN op_time = 0.0 (FLOPs 0)
+    assert d._op_time(node) == 0.0
 
 
 def test_dispatcher_prefill_attn_scales_with_chunk_size(
@@ -144,8 +148,12 @@ def test_dispatcher_prefill_attn_multi_req_chunk_sum(
     )
     d.register(mb)
     node = dag.get_node(0, NodeType.PREFILL_ATTN)
-    expected = 512 * dummy_config.time.gpu_op_time_per_token_us
-    assert d._op_time(node) == pytest.approx(expected)
+    # Stage 2 — multi-req per-req sum: 2 × Σ(chunk × ctx_so_far)
+    # 2 reqs × chunk=256, prefill_processed=0 → 각 req FLOPs = 2 × 256 × hidden × 256
+    expected_flops = 2 * (2 * 256 * dummy_config.model.hidden * 256)
+    peak = dummy_config.calibration.gpu_fp16_dense_peak_tflops * 1e12 * dummy_config.calibration.gpu_mfu_default
+    expected_us = expected_flops / peak * 1e6
+    assert d._op_time(node) == pytest.approx(expected_us)
 
 
 # ---- Boundary ----
@@ -164,7 +172,8 @@ def test_dispatcher_prefill_attn_empty_chunk_fallback(
     mb = MicroBatch(id=0, kv_rows_total=100, prefill_chunk={1: []})
     d.register(mb)
     node = dag.get_node(0, NodeType.PREFILL_ATTN)
-    assert d._op_time(node) == dummy_config.time.gpu_op_time_us["prefill_attn"]
+    # Stage 2 — empty chunk (sum len = 0) → PREFILL_ATTN op_time = 0.0
+    assert d._op_time(node) == 0.0
 
 
 # ---- Determinism ----

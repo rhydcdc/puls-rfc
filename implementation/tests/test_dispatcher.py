@@ -155,14 +155,15 @@ def test_pick_pim_returns_none_when_empty(dispatcher: Dispatcher):
 # =========================================================================
 
 def test_dispatch_gpu_qkv_sets_busy_and_pushes_event(dispatcher: Dispatcher):
+    """Stage 2 — 구조 invariant 보존, op_time 값 영역은 spec-derived (per-mb)."""
     dispatcher.dag.add_micro_batch(0)
     dispatcher.refresh_ready()
     qkv = dispatcher.dag.get_node(0, NodeType.QKV)
     dispatcher.dispatch_gpu(qkv)
     assert dispatcher.gpu_busy is True
     assert qkv.state is NodeState.RUNNING
-    expected_t = dispatcher.config.time.gpu_op_time_us["qkv"]
-    assert dispatcher.queue.peek_timestamp() == expected_t
+    # Stage 2 — op_time = compute_gpu_op_time_s 산출 (구조: queue push + timestamp > 0)
+    assert dispatcher.queue.peek_timestamp() > 0
     assert len(dispatcher.queue) == 1
 
 
@@ -198,6 +199,7 @@ def test_dispatch_gpu_blocks_oproj_when_attn_pending(dispatcher: Dispatcher):
 # =========================================================================
 
 def test_dispatch_pim_decode_attn_sets_busy_and_pushes_event(dispatcher: Dispatcher):
+    """Stage 2 — PIM op_time unit ns → µs (× 1e-3 정합)."""
     dispatcher.dag.add_micro_batch(0)
     _register_pim_mb(dispatcher, 0)
     _mark_done(dispatcher, 0, NodeType.QKV)
@@ -206,11 +208,13 @@ def test_dispatch_pim_decode_attn_sets_busy_and_pushes_event(dispatcher: Dispatc
     dispatcher.dispatch_pim(decode)
     assert dispatcher.pim_busy is True
     assert decode.state is NodeState.RUNNING
-    # Impl-4: PIM op_time = pim_executor.op_time(k_max, tile_rows) (placeholder default args)
-    expected_t = dispatcher.pim_executor.op_time(
-        kv_rows_total=dispatcher.config.time.rtl_fsm_tile_rows,
-    )
-    assert dispatcher.queue.peek_timestamp() == expected_t
+    # Stage 2 — pim_executor.op_time (ns) × 1e-3 = µs (clock unit 정합)
+    mb = dispatcher.micro_batches[0]
+    expected_us = dispatcher.pim_executor.op_time(
+        kv_rows_total=mb.kv_rows_total,
+        kv_rows_lockstep=mb.kv_rows_lockstep,
+    ) * 1e-3
+    assert dispatcher.queue.peek_timestamp() == pytest.approx(expected_us)
 
 
 def test_dispatch_pim_blocks_when_busy(dispatcher: Dispatcher):
@@ -309,10 +313,11 @@ def test_dispatch_pim_op_time_via_pim_executor(dispatcher: Dispatcher):
     _mark_done(dispatcher, 0, NodeType.QKV)
     dispatcher.refresh_ready()
     decode = dispatcher.dag.get_node(0, NodeType.DECODE_ATTN)
-    expected = dispatcher.pim_executor.op_time(
+    # Stage 2 — PIM op_time (ns) × 1e-3 = µs (clock unit 정합)
+    expected_us = dispatcher.pim_executor.op_time(
         kv_rows_total=dispatcher.config.time.rtl_fsm_tile_rows,
-    )
-    assert dispatcher._op_time(decode) == expected
+    ) * 1e-3
+    assert dispatcher._op_time(decode) == pytest.approx(expected_us)
 
 
 def test_dispatch_pim_completion_timestamp_uses_pim_executor(dispatcher: Dispatcher):
@@ -325,10 +330,11 @@ def test_dispatch_pim_completion_timestamp_uses_pim_executor(dispatcher: Dispatc
     t0 = dispatcher.clock.now
     dispatcher.dispatch_pim(decode)
     pushed_timestamp = dispatcher.queue.peek_timestamp()
-    op_time = dispatcher.pim_executor.op_time(
+    # Stage 2 — PIM op_time (ns) × 1e-3 = µs (clock unit 정합)
+    op_time_us = dispatcher.pim_executor.op_time(
         kv_rows_total=dispatcher.config.time.rtl_fsm_tile_rows,
-    )
-    assert pushed_timestamp == t0 + op_time
+    ) * 1e-3
+    assert pushed_timestamp == pytest.approx(t0 + op_time_us)
 
 
 def test_dispatcher_pim_executor_field_present(dispatcher: Dispatcher):
@@ -406,8 +412,9 @@ def test_dispatch_pim_uses_real_signal_flow(dispatcher):
     decode = dispatcher.dag.get_node(0, NodeType.DECODE_ATTN)
     t0 = dispatcher.clock.now
     dispatcher.dispatch_pim(decode)
-    expected = t0 + dispatcher.pim_executor.op_time(kv_rows_total=10000)
-    assert dispatcher.queue.peek_timestamp() == expected
+    # Stage 2 — PIM op_time (ns) × 1e-3 = µs
+    expected_us = t0 + dispatcher.pim_executor.op_time(kv_rows_total=10000) * 1e-3
+    assert dispatcher.queue.peek_timestamp() == pytest.approx(expected_us)
 
 
 def test_dispatch_pim_unregistered_raises(dispatcher):
@@ -428,5 +435,6 @@ def test_dispatch_pim_kv_rows_total_sweep(dispatcher, kv_rows):
     _mark_done(dispatcher, 0, NodeType.QKV)
     dispatcher.refresh_ready()
     decode = dispatcher.dag.get_node(0, NodeType.DECODE_ATTN)
-    expected = dispatcher.pim_executor.op_time(kv_rows_total=kv_rows)
-    assert dispatcher._op_time(decode) == expected
+    # Stage 2 — PIM op_time (ns) × 1e-3 = µs
+    expected_us = dispatcher.pim_executor.op_time(kv_rows_total=kv_rows) * 1e-3
+    assert dispatcher._op_time(decode) == pytest.approx(expected_us)

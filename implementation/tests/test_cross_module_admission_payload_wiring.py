@@ -31,21 +31,24 @@ def test_compose_payload_returns_six_keys(tmp_path):
     }
 
 
-def test_compose_payload_t_proj_matches_config(tmp_path):
-    """(B') t_proj = config.time.gpu_op_time_us[qkv] + [o_proj]."""
+def test_compose_payload_t_proj_spec_derived(tmp_path):
+    """Stage 2 — t_proj = last mb 위 spec-derived (Path C, compute_gpu_op_time_s).
+    Stage 1 dummy lookup 폐기 정합."""
     run = Run.init(
         config_module="puls_sched.config:default_dummy_config",
         trace_path_or_synthetic="synthetic:5",
         output_dir=tmp_path,
         seed=42,
     )
+    # Cold start — no mb dispatched yet → t_proj = 0
+    payload0 = run.scheduler._compose_admission_payload()
+    assert payload0["t_proj"] == 0.0
+    # Progress steps to dispatch mb → t_proj > 0 (spec-derived per-mb)
+    for _ in range(200):
+        if not run.scheduler.step():
+            break
     payload = run.scheduler._compose_admission_payload()
-    expected = (
-        run.config.time.gpu_op_time_us["qkv"]
-        + run.config.time.gpu_op_time_us["o_proj"]
-    )
-    assert payload["t_proj"] == pytest.approx(expected)
-    assert payload["t_proj"] > 0   # non-trivial
+    assert payload["t_proj"] > 0   # non-trivial spec-derived
 
 
 def test_compose_payload_t_pim_fn_callable_and_non_trivial(tmp_path):
@@ -107,10 +110,6 @@ def test_a_cycle_grows_after_dispatches(tmp_path):
     )
 
 
-@pytest.mark.skip(
-    reason="Impl-10-pre-2 post-fix — Stage 1 placeholder substrate (gpu_instance_b ← NVLink handoff time) "
-           "폐기. b_cycle = active_duration delta 영원 0 (Stage 2 calibration 위 실 FFN op_time 재활성)."
-)
 def test_b_cycle_grows_after_layer_cycles(tmp_path):
     """(B) b_cycle source = IdleTelemetry.active_duration("gpu_instance_b")."""
     run = Run.init(

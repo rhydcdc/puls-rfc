@@ -69,8 +69,15 @@ def test_dispatcher_qkv_oproj_keep_lookup_for_mixed(
     d.register(mb)
     qkv_node = dag.get_node(0, NodeType.QKV)
     o_proj_node = dag.get_node(0, NodeType.O_PROJ)
-    assert d._op_time(qkv_node) == dummy_config.time.gpu_op_time_us["qkv"]
-    assert d._op_time(o_proj_node) == dummy_config.time.gpu_op_time_us["o_proj"]
+    # Stage 2 — bulk GEMM (QKV + O_PROJ) op_time spec-derived per-mb (batch + ctx 의존)
+    # Mixed batch (prefill + decode) → batch_total = chunk + decode_count
+    # 구조: QKV vs O_PROJ ratio (산식 위 FLOPs 차이 — QKV = 2 × batch × hidden × (hidden + 2 × n_kv × d_head),
+    #                              O_PROJ = 2 × batch × hidden^2)
+    t_qkv = d._op_time(qkv_node)
+    t_oproj = d._op_time(o_proj_node)
+    assert t_qkv > 0 and t_oproj > 0
+    # QKV FLOPs > O_PROJ FLOPs (KV head 영역 추가) → t_qkv > t_oproj
+    assert t_qkv > t_oproj
 
 
 def test_dispatcher_prefill_attn_scaled_with_mixed_mb(
@@ -92,8 +99,13 @@ def test_dispatcher_prefill_attn_scaled_with_mixed_mb(
     )
     d.register(mb)
     node = dag.get_node(0, NodeType.PREFILL_ATTN)
-    expected = 256 * dummy_config.time.gpu_op_time_per_token_us
-    assert d._op_time(node) == pytest.approx(expected)
+    # Stage 2 — PREFILL_ATTN spec-derived (FlashAttention causal — chunk × ctx_so_far)
+    # FLOPs = 2 × chunk × hidden × (prefill_processed + chunk). prefill_processed=0 (default)
+    # → FLOPs = 2 × 256 × 8192 × 256
+    expected_flops = 2 * 256 * dummy_config.model.hidden * 256
+    peak = dummy_config.calibration.gpu_fp16_dense_peak_tflops * 1e12 * dummy_config.calibration.gpu_mfu_default
+    expected_us = expected_flops / peak * 1e6
+    assert d._op_time(node) == pytest.approx(expected_us)
 
 
 # ---- Concurrent dispatch (PREFILL_ATTN ‖ DECODE_ATTN) ----

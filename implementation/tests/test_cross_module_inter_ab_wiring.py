@@ -25,10 +25,6 @@ from puls_sched.run import Run
 
 # ---- End-to-end: Run.loop 후 gpu_instance_b signal 활성 ----
 
-@pytest.mark.skip(
-    reason="Impl-10-pre-2 post-fix — Stage 1 placeholder substrate (gpu_instance_b ← NVLink handoff time) "
-           "폐기. Stage 2 calibration 위 실 Instance B FFN op_time substrate 도입 시점 재활성."
-)
 def test_run_loop_activates_gpu_instance_b_signal(tmp_path):
     """End-to-end — Run.init + loop + teardown 후 evaluator report 의
     idle_fraction["gpu_instance_b"] 가 *non-trivial* (1.0 < — 활동 누적 검증).

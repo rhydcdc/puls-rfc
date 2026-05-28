@@ -1,0 +1,86 @@
+{
+  "metadata": {
+    "provenance_label": "colab_t4_free_llama3_70b_ffn_single_layer_measured",
+    "gpu_name": "Tesla T4",
+    "torch_version": "2.11.0+cu128",
+    "cuda_version": "12.8",
+    "timestamp_utc": "2026-05-28T17:31:03.789424",
+    "model_spec": {
+      "name": "Llama-3 70B FFN single layer",
+      "hidden": 8192,
+      "intermediate": 28672,
+      "dtype": "float16"
+    },
+    "measurement_method": {
+      "timer": "torch.cuda.Event(enable_timing=True)",
+      "n_warmup": 10,
+      "n_iter": 100,
+      "aggregation": "mean over n_iter (single-block CUDA Event)"
+    },
+    "disclosure": {
+      "scope": "Stage 2 D2 deliverable #5 \u2014 Aux1 empirical anchor",
+      "ingest_policy": "report markdown \uc704 disclosure \ub9cc \u2014 \ucf54\ub4dc \uc0b0\uc2dd \uc601\uc5ed ingest 0",
+      "rationale": "T4 \u2260 B200 substrate mismatch + PLAN \u00a70.5 ratio property \uc815\ud569"
+    }
+  },
+  "batch_sweep_ms": {
+    "1": {
+      "t_ms": 5.357440795898437,
+      "memory_alloc_GB": 1.417822208
+    },
+    "16": {
+      "t_ms": 5.301631469726562,
+      "memory_alloc_GB": 1.418067968
+    },
+    "64": {
+      "t_ms": 6.614855346679687,
+      "memory_alloc_GB": 1.4188544
+    },
+    "256": {
+      "t_ms": 17.45286376953125,
+      "memory_alloc_GB": 1.422000128
+    },
+    "1024": {
+      "t_ms": 74.6568408203125,
+      "memory_alloc_GB": 1.43458304
+    }
+  },
+  "aux1_ratio": {
+    "8_to_16": {
+      "k": 8,
+      "two_k": 16,
+      "t_k_ms": 5.309968872070312,
+      "t_2k_ms": 5.3853515625,
+      "t_separate_ms": 10.619937744140625,
+      "t_mixed_ms": 5.3853515625,
+      "ratio_separate_over_mixed": 1.9720045424872157
+    },
+    "32_to_64": {
+      "k": 32,
+      "two_k": 64,
+      "t_k_ms": 6.048975219726563,
+      "t_2k_ms": 7.047556762695312,
+      "t_separate_ms": 12.097950439453125,
+      "t_mixed_ms": 7.047556762695312,
+      "ratio_separate_over_mixed": 1.716616246851811
+    },
+    "128_to_256": {
+      "k": 128,
+      "two_k": 256,
+      "t_k_ms": 10.682264404296875,
+      "t_2k_ms": 18.361947021484376,
+      "t_separate_ms": 21.36452880859375,
+      "t_mixed_ms": 18.361947021484376,
+      "ratio_separate_over_mixed": 1.1635219720216057
+    },
+    "512_to_1024": {
+      "k": 512,
+      "two_k": 1024,
+      "t_k_ms": 37.7940771484375,
+      "t_2k_ms": 80.209921875,
+      "t_separate_ms": 75.588154296875,
+      "t_mixed_ms": 80.209921875,
+      "ratio_separate_over_mixed": 0.9423791038554107
+    }
+  }
+}
