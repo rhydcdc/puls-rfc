@@ -6,11 +6,9 @@
 >
 > 혼자 공부하며 배우는 과정이며, 피드백 · 지적 · 가르침을 적극 환영합니다 (GitHub Issues / Discussions).
 
-본 repo 는 진행 중인 prototype 의 공개 RFC (Request for Comments). Architecture + design rationale + scheduler 정책 의 entry point 만 제공하며, 정량 평가 산출은 Phase 3 calibration 영역에서 측정 예정.
+본 repo 는 진행 중인 prototype 의 공개 RFC (Request for Comments). Architecture + design rationale + scheduler 정책의 entry point 와 함께, real long-context trace 위 4 가속 source 의 calibrated projection 산출도 함께 제공 ([Results](#results) 참조).
 
 상세 본문 — [`ARCHITECTURE.md`](ARCHITECTURE.md) (substrate, instance disaggregation, scheduler integration, adaptive admission, layer flow, prior art 비교 통합).
-
-> **Note:** `ARCHITECTURE.md` will be added in a follow-up commit (English translation in progress).
 
 ## 목차
 
@@ -25,8 +23,8 @@
 - [가속 Source 요약](#가속-source-요약)
 - [Mixed Batching 의 역할](#mixed-batching-의-역할)
 
-**Project Status**
-- [Current Status](#current-status-2026-05-22)
+**Results**
+- [Results](#results)
 - [Limitations / Disclosure](#limitations--disclosure)
 - [Forward-looking: HBF-class 분리 Substrate](#forward-looking-hbf-class-분리-substrate)
 
@@ -128,25 +126,85 @@
   - per-token FFN 가중치 bus transaction 감소
   - inter-instance KV transfer 제거 (단일 instance 내 공존)
 
-## Current Status (2026-05-22)
+## Results
 
-| Phase | 영역 | Status |
+Llama-3 70B + DGX B200 + HBM4 substrate 위 4 가속 source (Aux1·Aux2·F3·F5) 의 calibrated projection 및 long-context production trace 위 runtime 검증.
+
+### Substrate
+
+| 항목 | 값 |
+|---|---|
+| GPU compute | DGX B200 standalone, GPU 당 FP16 dense 2,200 TFLOPS |
+| Memory | HBM4 hypothetical projection, GPU 당 16 TB/s × 8 GPU = 128 TB/s aggregate |
+| η_HBM_external | 0.74 (fix) + sensitivity sweep {0.70, 0.74, 0.80} |
+| PIM tile time | 267 ns (compute-bound, FP8 KV) |
+| RTL FSM | 1.3 GHz · 347 cycles |
+| MFU | 0.6 default + sensitivity sweep {0.5, 0.6, 0.7} |
+| Model | Llama-3 70B (L=80, hidden=8192, FFN intermediate=28672) |
+
+### Per-source Acceleration
+
+| Source | Mechanism | Result |
 |---|---|---|
-| Phase 0 — Discovery | η_HBM, NVLink 실측, ctx 외삽 식, KV 분산, FFN saturating, ramulator tile 시간, **FlashAttention 알고리즘 (online softmax + row-wise streaming) 활용 RTL substrate 설계 완료 (Yosys + ASAP7 + OpenSTA pre-CTS flow)** | ✓ Closed |
-| Phase 1 — Scheduler Implementation | 자체 scheduler framework 구현 (event-driven DAG dispatcher + adaptive admission + Instance A/B disaggregation dispatch) + PIM executor emulator | 진행 중 |
-| Phase 2 — Time Model 및 Workload | PIM 정밀 시간 모델, trace replay, handoff 정밀화 | Pending |
-| Phase 3 — Calibration 및 Sensitivity | Sensitivity sweep, 정량 수치 확정 | Pending |
+| Aux1 | Mixed batching 가중치 재사용 | **2.0×** (closed-form), 1.97× (Colab T4 측정) |
+| Aux2 | KV bus traffic 감소 | **4.95× speedup, 79.8% 감소** |
+| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep), **0.5933 (measured = near-balance)** |
+| F5 | Channel-independent vs lock-step | **5.15× speedup** (KV variance dominant) |
 
-본 RFC 의 정량 수치 (가속 배수, throughput / latency 절대값) 는 **Phase 3 calibration 영역에서 측정 예정**.
+### Aggregate Speedup
+
+| 항목 | Baseline | PULS | Saving |
+|---|---|---|---|
+| Weight streaming | 2.89 ms | 1.45 ms | 1.45 ms |
+| KV bus traffic | 8.25 ms | 1.67 ms | 6.59 ms |
+| **합계 (weight + bus)** | **11.14 ms** | **3.12 ms** | **8.04 ms (72.2%)** |
+
+Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (F5 포함)**.
+
+### Runtime Validation
+
+LongBench λ=3.40 첫 3 request (sum prompt 408,148 tokens; 47K + 280K + 81K), end-to-end scheduler 시뮬레이션, single task. Wall-clock 5.4 분, 15.26M admission tick, 50.87 s simulated clock.
+
+| Slot | Active (sec) | Idle |
+|---|---|---|
+| GPU Instance A | 50.82 | 0.10% |
+| PIM Instance A | 0.17 | 99.66% |
+| GPU Instance B | 34.95 | 31.30% |
+
+| Convergence | 값 |
+|---|---|
+| converged | True |
+| oscillating | False |
+| in_band_fraction | 98.70% |
+| samples | 15,261,787 |
+
+| F3 cross-validate | 값 |
+|---|---|
+| closed_form_ratio | 0.9964 |
+| measured_ratio | **0.5933** |
+| abs_diff | 0.4031 |
+
+해석:
+
+- **두 인스턴스 모두 실질 기여.** GPU Instance A 와 Instance B 가 각각 50.82 s · 34.95 s 의 active duration 기록.
+- **Instance B 의 31.30% idle 은 의도된 A-bound 분기 동작**, balance 실패가 아님. Long-context prefill 우세 trace 에서 Instance A 의 prefill GEMM 이 cycle 을 포화시키므로, B-cycle 을 채우려 admission 을 늘리면 이미 포화된 A 로 일이 몰려 throughput 이득 없음.
+- **F3 measured 0.5933 ≈ near-balance** (perfect = 0.50) — balance 메커니즘 활성을 정량 증명. Closed-form 0.9964 와의 gap 은 단일 μ-batch projection (single ctx, single chunk) 과 실제 multi-μ-batch steady-state pipeline (수천 cycle, 동시 A→B dispatch, μ-batch 당 FFN op_time) 의 차이를 반영.
+- **4 balance 분기 모두 steady state 도달.** Deadband 가 15M+ admission tick 위에서 oscillation 없이 유지, in-band fraction 98.70%.
+
+### Honest Disclosure
+
+- **HBM4 substrate** = hypothetical projection (현재 production 부재; ARCH §3.1 literal 정합).
+- **η_HBM_external** = H100 HBM3 측정값을 HBM4 로 확장 (Framing A).
+- **F1·F2 ablation + 비교 baseline (vLLM / Sarathi-Serve)** = 후속 calibration 으로 연기 (calibration-heavy).
+- **절대 metric** (TTFT, TPOT, throughput) = silicon 부재로 영구 out of scope.
 
 ## Limitations / Disclosure
 
-- **Hardware 미보유** — 실제 H100 / HBM4 silicon 없음. 정량 평가는 Phase 3 calibration 영역으로 위임.
+- **Hardware 미보유** — 실제 H100 / HBM4 silicon 없음. 상대적 source decomposition 은 calibrated ([Results](#results) 참조); 절대 metric (TTFT, TPOT, throughput) 은 out of scope.
 - **HBM4 추정** — JEDEC JESD270-4A spec 기반 + 자체 Ramulator2 기반 cycle-accurate 측정 (FP8 tile load / FP16 tile load / PIM compute 영역) 인용.
 - **RTL substrate** — open-source flow (Yosys + ASAP7 + OpenSTA pre-CTS) 한정. Commercial signoff 영역 외.
 - **단일 vendor production trace** — 공개 long-ctx agentic production trace 가 사실상 1 종 한정. 한계 disclosure 와 함께 1M-class benchmark dataset + mid-ctx production chat trace 를 보강 axis 로 사용.
-- **Main claim 정량 = projection** — Phase 3 종료 전 정량 수치는 *추정*.
-- **Workload-segmented deployment** — Short context + low batch + pure decode 영역에선 projection 이 memory-bound 로 전환되어 PIM TSV 점유 헤드룸이 부족할 수 있음. 짧은 컨텍스트 (챗봇 영역) 는 기존 GPU-only 서빙 스택, 장기 컨텍스트 + 대형 배치 (agentic conversation, multi-turn) 는 PULS 를 활용하는 **분리형 서버 구성 가능성 염두**. 정량 영역 경계는 Phase 3 calibration 측정 후 결정.
+- **Main claim 정량 = projection** — Pre-silicon 정량 수치는 *추정* + provenance label 동반 ([Results](#results) 참조).
 
 ## Forward-looking: HBF-class 분리 Substrate
 

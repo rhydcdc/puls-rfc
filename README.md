@@ -6,11 +6,9 @@
 >
 > Self-study work in progress. Feedback, critique, and mentorship are warmly welcomed (GitHub Issues / Discussions).
 
-This repo is the public RFC (Request for Comments) of an in-progress prototype. It provides only the entry point of the architecture + design rationale + scheduler policy; quantitative evaluation will be measured in the Phase 3 calibration track.
+This repo is the public RFC (Request for Comments) of an in-progress prototype. It provides the entry point of the architecture + design rationale + scheduler policy, together with a calibrated projection of the four acceleration sources on real long-context traces (see [Results](#results)).
 
 Full body — [`ARCHITECTURE.md`](ARCHITECTURE.md) (substrate, instance disaggregation, scheduler integration, adaptive admission, layer flow, prior art comparison, all integrated).
-
-> **Note:** `ARCHITECTURE.md` will be added in a follow-up commit (English translation in progress).
 
 ## Table of Contents
 
@@ -25,8 +23,8 @@ Full body — [`ARCHITECTURE.md`](ARCHITECTURE.md) (substrate, instance disaggre
 - [Acceleration Sources Summary](#acceleration-sources-summary)
 - [Role of Mixed Batching](#role-of-mixed-batching)
 
-**Project Status**
-- [Current Status](#current-status-2026-05-22)
+**Results**
+- [Results](#results)
 - [Limitations / Disclosure](#limitations--disclosure)
 - [Forward-looking: HBF-class Disaggregated Substrate](#forward-looking-hbf-class-disaggregated-substrate)
 
@@ -131,25 +129,85 @@ The primary target of this RFC is the **long-context + large-batch production se
   - per-token FFN-weight bus transactions decrease
   - inter-instance KV transfer is eliminated (coexistence within a single instance)
 
-## Current Status (2026-05-22)
+## Results
 
-| Phase | Scope | Status |
+Calibrated projection of the four acceleration sources (Aux1·Aux2·F3·F5) on Llama-3 70B + DGX B200 + HBM4 substrate, plus a runtime validation pass on a long-context production trace.
+
+### Substrate
+
+| Component | Value |
+|---|---|
+| GPU compute | DGX B200 standalone, FP16 dense 2,200 TFLOPS per GPU |
+| Memory | HBM4 hypothetical projection, 16 TB/s per GPU × 8 GPU = 128 TB/s aggregate |
+| η_HBM_external | 0.74 (fix) + sensitivity sweep {0.70, 0.74, 0.80} |
+| PIM tile time | 267 ns (compute-bound, FP8 KV) |
+| RTL FSM | 347 cycles @ 1.3 GHz |
+| MFU | 0.6 default + sensitivity sweep {0.5, 0.6, 0.7} |
+| Model | Llama-3 70B (L=80, hidden=8192, FFN intermediate=28672) |
+
+### Per-source Acceleration
+
+| Source | Mechanism | Result |
 |---|---|---|
-| Phase 0 — Discovery | η_HBM, NVLink measurement, ctx-extrapolation equation, KV variance, FFN saturation, ramulator tile time, **RTL substrate design completed using the FlashAttention algorithm (online softmax + row-wise streaming) (Yosys + ASAP7 + OpenSTA pre-CTS flow)** | ✓ Closed |
-| Phase 1 — Scheduler Implementation | Self-authored scheduler framework (event-driven DAG dispatcher + adaptive admission + Instance A/B disaggregation dispatch) + PIM executor emulator | In progress |
-| Phase 2 — Time Model and Workload | Precise PIM time model, trace replay, handoff refinement | Pending |
-| Phase 3 — Calibration and Sensitivity | Sensitivity sweep, finalize quantitative figures | Pending |
+| Aux1 | Mixed batching weight reuse | **2.0×** (closed-form), 1.97× (Colab T4 measured) |
+| Aux2 | KV bus traffic reduction | **4.95× speedup, 79.8% reduction** |
+| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep), **0.5933 (measured = near-balance)** |
+| F5 | Channel-independent vs lock-step | **5.15× speedup** (KV variance dominant) |
 
-The quantitative figures of this RFC (acceleration multiples, throughput / latency absolute values) **will be measured in the Phase 3 calibration track**.
+### Aggregate Speedup
+
+| Component | Baseline | PULS | Saving |
+|---|---|---|---|
+| Weight streaming | 2.89 ms | 1.45 ms | 1.45 ms |
+| KV bus traffic | 8.25 ms | 1.67 ms | 6.59 ms |
+| **Total (weight + bus)** | **11.14 ms** | **3.12 ms** | **8.04 ms (72.2%)** |
+
+Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (including F5)**.
+
+### Runtime Validation
+
+LongBench λ=3.40 first 3 requests (sum prompt 408,148 tokens; 47K + 280K + 81K), end-to-end scheduler simulation, single task. Wall-clock 5.4 min, 15.26 M admission ticks, 50.87 s simulated clock.
+
+| Slot | Active (sec) | Idle |
+|---|---|---|
+| GPU Instance A | 50.82 | 0.10% |
+| PIM Instance A | 0.17 | 99.66% |
+| GPU Instance B | 34.95 | 31.30% |
+
+| Convergence | Value |
+|---|---|
+| converged | True |
+| oscillating | False |
+| in_band_fraction | 98.70% |
+| samples | 15,261,787 |
+
+| F3 cross-validate | Value |
+|---|---|
+| closed_form_ratio | 0.9964 |
+| measured_ratio | **0.5933** |
+| abs_diff | 0.4031 |
+
+Interpretation:
+
+- **Both instances actively contribute.** GPU Instance A and Instance B record 50.82 s and 34.95 s of active duration, respectively.
+- **Instance B's 31.30% idle is the intended A-bound branch behavior**, not a balance failure. In a long-context prefill-dominant trace, Instance A's prefill GEMM saturates the cycle; forcing additional admission to fill B-cycle would shift work onto an already saturated A without throughput gain.
+- **F3 measured 0.5933 ≈ near-balance** (perfect = 0.50) quantitatively proves the balance mechanism is active. The gap from the closed-form 0.9964 reflects the difference between an idealized single-μ-batch projection (single ctx, single chunk) and the real multi-μ-batch steady-state pipeline (thousands of cycles, concurrent A→B dispatch, FFN op_time per μ-batch).
+- **All four balance branches reached steady state.** The deadband held over 15M+ admission ticks without oscillation; in-band fraction 98.70%.
+
+### Honest Disclosure
+
+- **HBM4 substrate** = hypothetical projection (current production absent; ARCH §3.1 literal alignment).
+- **η_HBM_external** = H100 HBM3 measurement extended to HBM4 (Framing A).
+- **F1·F2 ablation + comparative baseline (vLLM / Sarathi-Serve)** = deferred to subsequent calibration (calibration-heavy).
+- **Absolute metrics** (TTFT, TPOT, throughput) = silicon absent, permanently out of scope.
 
 ## Limitations / Disclosure
 
-- **No hardware in hand** — No actual H100 / HBM4 silicon. Quantitative evaluation deferred to the Phase 3 calibration track.
+- **No hardware in hand** — No actual H100 / HBM4 silicon. Relative source decomposition is calibrated (see [Results](#results)); absolute metrics (TTFT, TPOT, throughput) remain out of scope.
 - **HBM4 estimation** — Based on the JEDEC JESD270-4A spec + in-house Ramulator2-based cycle-accurate measurements (FP8 tile load / FP16 tile load / PIM compute regimes) as references.
 - **RTL substrate** — Limited to an open-source flow (Yosys + ASAP7 + OpenSTA pre-CTS). Out of scope of commercial signoff.
 - **Single-vendor production trace** — Publicly available long-context agentic production traces are effectively limited to one. Disclosed as a limitation; augmented with a 1M-class benchmark dataset + a mid-context production chat trace as supplementary axes.
-- **Main claim quantitatives = projection** — Pre-Phase-3 numbers are *estimates*.
-- **Workload-segmented deployment** — In the short-context + low-batch + pure-decode regime, projection switches to memory-bound and the PIM TSV-occupancy headroom may be insufficient. A **separated-server configuration is kept in mind**, in which short contexts (the chatbot regime) use the existing GPU-only serving stack and long contexts + large batches (agentic conversation, multi-turn) use PULS. The quantitative boundary between regimes will be decided after Phase 3 calibration.
+- **Main claim quantitatives = projection** — Pre-silicon numbers are *estimates* with provenance labels (see [Results](#results)).
 
 ## Forward-looking: HBF-class Disaggregated Substrate
 

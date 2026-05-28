@@ -3,7 +3,8 @@
 **P**IM-**U**nified **L**LM **S**erving — scheduler-aware co-design.
 
 - Motivation / problem statement / proposal overview — see [`README.md`](README.md)
-- Quantitative evaluation (acceleration multiples, latency / throughput absolute values) — to be measured in the Phase 3 calibration track
+- Quantitative source decomposition (Aux1·Aux2·F3·F5) — see [`README.md`](README.md#results)
+- F1·F2 ablation + absolute metrics (TTFT / TPOT / throughput) — deferred to subsequent calibration / silicon absent
 
 ## Table of Contents
 
@@ -88,8 +89,8 @@ A row-wise pipelined attention SFU is placed on the HBM4 **logic die (PHY)** —
   - Fixed cycle count per tile → execution time is deterministic → the scheduler can precisely predict PIM completion timing and plan overlap with GPU operations in advance.
 - **Internal-path BW advantage (vs the GPU's external path).**
   - **PIM path (internal)** — uses only the row buffer → logic die SFU internally; no external-bus overhead → channel peak × 100% utilization.
-  - **GPU path (external)** — row buffer → TSV → interposer → GPU memory controller → SM. Serialization delay · controller queuing · interposer latency cause loss against peak (η_HBM < 1, derived in Phase 0 Discovery).
-  - **Result** — SP-PIM's aggregate effective BW over 2048 channels exceeds the GPU's aggregate effective BW by a factor of (1 / η_HBM). Substrate-level degrees of freedom are closed, so this is a near-fixed value (quantitative = disclosed after Phase 3).
+  - **GPU path (external)** — row buffer → TSV → interposer → GPU memory controller → SM. Serialization delay · controller queuing · interposer latency cause loss against peak (η_HBM < 1, derived in the Discovery track).
+  - **Result** — SP-PIM's aggregate effective BW over 2048 channels exceeds the GPU's aggregate effective BW by a factor of (1 / η_HBM). Substrate-level degrees of freedom are closed, so this is a near-fixed value (quantitative enters Aux2 / F3 — see [`README.md`](README.md#results)).
 
 ### 3.2 Channel-level PIM Toggle
 
@@ -154,7 +155,7 @@ Instance B's memory requirements differ structurally from Instance A's.
   - **(a) GDDR (GDDR6 / GDDR6X) substitution** — Substrate technology itself is changed. Capacity requirements (TP=8 basis) are also met by standard GDDR modules (24 GB). Substantial unit-cost reduction vs HBM4 8-stack (per-GB 3-5×) + additional savings on packaging cost (interposer + CoWoS). Trade-off: per-bit power rises 2-3× (long PCB path + higher clock + termination loss), partially mitigated by the low BW utilization of the compute-bound regime.
   - **(b) Low-stack-count HBM** — Same substrate technology, only the number of stacks is reduced (e.g., 8 stacks → 2-4 stacks). HBM's power efficiency (3-5 pJ/bit) is preserved. Trade-off: limited savings — part of the packaging cost is preserved.
   - Both options leave B_cycle unaffected (compute-bound regime preserved). The choice is a trade-off domain of cost / power / supply availability.
-- **Comparison fairness preserved.** Since Instance B memory substrate changes (both options) do not affect B_cycle (compute-bound preserved), the PULS vs baseline comparison ratio is preserved. Quantitative analysis (required module count, cost / power ratio, sweet-spot stack count) belongs to Phase 3.
+- **Comparison fairness preserved.** Since Instance B memory substrate changes (both options) do not affect B_cycle (compute-bound preserved), the PULS vs baseline comparison ratio is preserved. Quantitative analysis (required module count, cost / power ratio, sweet-spot stack count) deferred to subsequent calibration.
 
 **TP+SP Selection Rationale (PP Rejected)**
 
@@ -214,7 +215,7 @@ Directly serves as the implementation basis for the *"PIM completion time precom
 - **Only channel = HBM** — PIM resides on the HBM4 logic die, the GPU on a separate die; no direct P2P link.
 - **Write → Read protocol** — PIM **writes** the result O to a designated address in HBM → the GPU **reads** that address exactly on time via computed wait.
 - **Natural emergence of GPU-side conformance** — Data passing between GPU-internal kernels uses the same scheme (via global memory) → no separate DMA engine · doorbell mechanism required.
-- **PIM-GPU TSV bandwidth contention margin** — Since PIM (internal HBM logic die) and Instance A GPU share HBM TSV bandwidth, simultaneous full-load operations can throttle each other. A 10% conservative time margin (`PIM_SLACK_SAFETY_MARGIN = 0.9`) is applied when computing GPU prefill chunk size from predicted PIM decode-attn time, preventing contention. Calibrated value to be refined in Stage 2 / Impl-11.
+- **PIM-GPU TSV bandwidth contention margin** — Since PIM (internal HBM logic die) and Instance A GPU share HBM TSV bandwidth, simultaneous full-load operations can throttle each other. A 10% conservative time margin (`PIM_SLACK_SAFETY_MARGIN = 0.9`) is applied when computing GPU prefill chunk size from predicted PIM decode-attn time, preventing contention.
 
 ## 4. Op Partitioning
 
@@ -238,7 +239,7 @@ Only decode attention simultaneously satisfies these 3 conditions → the PIM sc
 
 ### 5.1 Phase-aware Channel Activation
 
-Instance A's SP-PIM aggregate channel count is fixed at k_total = 2048. PIM activates whenever decode-attn work exists, naturally overlapping with the HBM idle headroom of Instance A's GPU compute-bound stages (QKV · prefill_attn · O-proj) per O3 + §3.5.3. Because PIM is sequence-parallel across channels (§3.4), at any moment a single μ-batch's decode-attn occupies all 2048 channels — no channel-level partitioning across concurrent μ-batches is needed (Hermite identity on per-channel tile counts equates partition vs serialize). Residual TSV contention is conservatively absorbed by the 10% margin `PIM_SLACK_SAFETY_MARGIN = 0.9` — no fine-grained channel knob (Impl-10-pre-2).
+Instance A's SP-PIM aggregate channel count is fixed at k_total = 2048. PIM activates whenever decode-attn work exists, naturally overlapping with the HBM idle headroom of Instance A's GPU compute-bound stages (QKV · prefill_attn · O-proj) per O3 + §3.5.3. Because PIM is sequence-parallel across channels (§3.4), at any moment a single μ-batch's decode-attn occupies all 2048 channels — no channel-level partitioning across concurrent μ-batches is needed (Hermite identity on per-channel tile counts equates partition vs serialize). Residual TSV contention is conservatively absorbed by the 10% margin `PIM_SLACK_SAFETY_MARGIN = 0.9` — no fine-grained channel knob.
 
 - **Attention step** — In a mixed batch, prefill chunk tokens go to the GPU attention kernel and decode tokens to SP-PIM *concurrently*. With decode tokens present, all 2048 channels run a single lock-step op. For a pure-prefill batch (no decode rows), PIM op_time = 0.
 - **Projection step (QKV / O-proj / FFN)** — No same-μ-batch PIM work. Under intra-instance double-buffering (§5.6), PIM processes the *next* μ-batch's decode-attn during the projection window — aligned with P5's compute-bound timing activation.
@@ -264,7 +265,7 @@ Within Instance A, when the GPU projection is compute-bound, HBM bandwidth becom
 
 - **Q-replicate / KV-row sharding** — Broadcast Q to all k_total channels, shard KV rows across channels → each channel independently sweeps its own KV slice (see §3.4).
 - **Time derivation** — In both prefill chunk and decode batch scenarios, the number of tiles per channel is determined → tile count × tile time = SP-PIM attention time.
-- **Ratio vs GPU baseline** — Determined by combining the internal-path BW advantage of §3.1 (exceeds by a factor of 1 / η_HBM) with ctx-dependent KV variance. **Quantitative derivation will be disclosed after the Phase 3 sim closes.**
+- **Ratio vs GPU baseline** — Determined by combining the internal-path BW advantage of §3.1 (exceeds by a factor of 1 / η_HBM) with ctx-dependent KV variance. **Quantitative derivation enters Aux2 / F3 — see [`README.md`](README.md#results).**
 
 For quantitative evaluation of the concrete scheduling policy, see Open Empirical Work (§8 E6).
 
@@ -538,4 +539,8 @@ Qualitative estimation. Since the scheduler recognizes the bound at runtime via 
 
 ---
 
-All quantitative figures in this architecture document (acceleration multiples, latency / throughput absolute values, MFU plateau, admission ceiling values, deadband width %) **will be measured in the Phase 3 calibration track**.
+Quantitative coverage of this architecture document:
+
+- **Source decomposition** (Aux1·Aux2·F3·F5, η_HBM sensitivity sweep) — calibrated projection, see [`README.md`](README.md#results)
+- **F1·F2 ablation, MFU plateau, admission ceiling, deadband width** — deferred to subsequent calibration
+- **Absolute metrics** (TTFT, TPOT, throughput) — silicon absent, permanently out of scope

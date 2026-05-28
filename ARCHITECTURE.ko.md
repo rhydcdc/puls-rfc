@@ -3,7 +3,8 @@
 **P**IM-**U**nified **L**LM **S**erving — scheduler-aware co-design.
 
 - Motivation / problem statement / proposal 개관 — [`README.md`](README.md) 참조
-- 정량 평가 (가속 배수, latency / throughput 절대값) — Phase 3 calibration 영역에서 측정 예정
+- 정량 source decomposition (Aux1·Aux2·F3·F5) — [`README.md`](README.md#results) 참조
+- F1·F2 ablation + 절대 metric (TTFT / TPOT / throughput) — 후속 calibration 으로 연기 / silicon 부재로 out of scope
 
 ## Table of Contents
 
@@ -88,8 +89,8 @@ HBM4 **logic die (PHY)** 에 row-wise pipelined attention SFU 를 배치한다 �
   - Tile 당 cycle 수 고정 → 실행 시간 결정론적 → 스케줄러가 PIM 완료 시점을 정확히 예측, GPU 연산과의 overlap 사전 계획 가능.
 - **Internal path BW 우위 (vs GPU 외부 경로).**
   - **PIM 경로 (내부)** — row buffer → logic die SFU 내부만 사용, 외부 버스 오버헤드 없음 → channel peak × 100% 활용.
-  - **GPU 경로 (외부)** — row buffer → TSV → interposer → GPU 메모리 컨트롤러 → SM. 직렬화 지연 · 컨트롤러 큐잉 · 인터포저 레이턴시로 peak 대비 손실 (η_HBM < 1, Phase 0 Discovery 산출).
-  - **결과** — SP-PIM 2048 채널 aggregate 실효 BW 가 GPU aggregate 실효 BW 를 (1 / η_HBM) 배 초과. Substrate-level 자유도가 닫혀 거의 확정값 (정량 = Phase 3 종료 후 공개).
+  - **GPU 경로 (외부)** — row buffer → TSV → interposer → GPU 메모리 컨트롤러 → SM. 직렬화 지연 · 컨트롤러 큐잉 · 인터포저 레이턴시로 peak 대비 손실 (η_HBM < 1, Discovery track 산출).
+  - **결과** — SP-PIM 2048 채널 aggregate 실효 BW 가 GPU aggregate 실효 BW 를 (1 / η_HBM) 배 초과. Substrate-level 자유도가 닫혀 거의 확정값 (정량은 Aux2 / F3 산식에 진입 — [`README.md`](README.md#results) 참조).
 
 ### 3.2 Channel-level PIM Toggle
 
@@ -154,7 +155,7 @@ Instance B 의 메모리 요구사항은 Instance A 와 구조적으로 다르�
   - **(a) GDDR (GDDR6 / GDDR6X) 대체** — Substrate technology 자체 변경. 용량 요건 (TP=8 기준) 도 GDDR 표준 모듈 (24 GB) 로 충족. HBM4 8 stack 대비 unit cost 대폭 절감 (per-GB 3-5×) + packaging cost (interposer + CoWoS) 추가 절감. Trade-off: per-bit 전력 2-3× 상승 (긴 PCB 경로 + 높은 clock + termination loss), 단 compute-bound regime 의 낮은 BW utilization 으로 부분 mitigated.
   - **(b) 적은 stack 수 HBM** — 동일 substrate technology, stack 개수만 reduce (예: 8 stack → 2-4 stack). HBM 의 power 효율 (3-5 pJ/bit) 보존. Trade-off: 절감 폭 한정 — packaging cost 일부 보존.
   - 양 옵션 모두 B_cycle 에 영향 없음 (compute-bound regime 유지). 선택은 cost / power / supply availability 의 trade-off 영역.
-- **비교 공정성 유지.** Instance B memory substrate 변경 (양 옵션) 은 B_cycle 에 영향을 주지 않으므로 (compute-bound 유지) PULS vs baseline 비교 ratio 보존. 정량 분석 (필요 module 수, cost / power 비율, sweet spot stack 수) 은 Phase 3 영역.
+- **비교 공정성 유지.** Instance B memory substrate 변경 (양 옵션) 은 B_cycle 에 영향을 주지 않으므로 (compute-bound 유지) PULS vs baseline 비교 ratio 보존. 정량 분석 (필요 module 수, cost / power 비율, sweet spot stack 수) 은 후속 calibration 으로 연기.
 
 **TP+SP 선택 근거 (PP 기각)**
 
@@ -214,7 +215,7 @@ GPU 가 기존 DRAM 명령 (RD/WR) 의 **RFU (Reserved For Future use) bit 1 개
 - **유일한 채널 = HBM** — PIM 은 HBM4 logic die, GPU 는 별도 die 에 위치하여 직접 P2P 통신선 없음.
 - **Write → Read 프로토콜** — PIM 이 결과 O 를 HBM 의 정해진 주소에 **write** → GPU 가 computed wait 로 정시에 그 주소를 **read**.
 - **GPU 측 정합 자연 산출** — GPU 내부 kernel 간 데이터 전달도 동일 방식 (global memory 경유) → 별도 DMA 엔진 · doorbell 메커니즘 불요.
-- **PIM-GPU TSV 대역폭 contention 마진** — PIM (HBM4 logic die 내부) 과 Instance A GPU 가 HBM TSV 대역폭 공유로, 동시 full-load 동작 시 상호 throttling 가능. PIM decode-attn 예측 시간 위 GPU prefill chunk 산출 시 10% conservative 시간 마진 (`PIM_SLACK_SAFETY_MARGIN = 0.9`) 적용 → contention 방지. Stage 2 / Impl-11 위 calibrated 값 refinement.
+- **PIM-GPU TSV 대역폭 contention 마진** — PIM (HBM4 logic die 내부) 과 Instance A GPU 가 HBM TSV 대역폭 공유로, 동시 full-load 동작 시 상호 throttling 가능. PIM decode-attn 예측 시간 위 GPU prefill chunk 산출 시 10% conservative 시간 마진 (`PIM_SLACK_SAFETY_MARGIN = 0.9`) 적용 → contention 방지.
 
 ## 4. Op Partitioning
 
@@ -238,7 +239,7 @@ Decode attention 만 이 3 조건을 동시 충족 → PIM scope 가 substrate �
 
 ### 5.1 Phase-aware Channel Activation
 
-Instance A 의 SP-PIM aggregate 채널 수는 k_total = 2048 으로 고정. PIM 은 decode-attn 일이 존재하는 한 *항상* 가동되어, Instance A GPU 의 compute-bound 영역 (QKV · prefill_attn · O-proj) 의 HBM idle 헤드룸 위에 자연 overlap (O3 + §3.5.3). Sequence-parallel 성질 위 임의 시점 한 mb 의 decode-attn 이 모든 채널 점유 — 채널 분할 micromanagement 불필요 (Hermite identity 위 partition·serialize 동치). 잔여 TSV contention 은 10% margin `PIM_SLACK_SAFETY_MARGIN = 0.9` 으로 보수 흡수 — channel knob 부재 (Impl-10-pre-2).
+Instance A 의 SP-PIM aggregate 채널 수는 k_total = 2048 으로 고정. PIM 은 decode-attn 일이 존재하는 한 *항상* 가동되어, Instance A GPU 의 compute-bound 영역 (QKV · prefill_attn · O-proj) 의 HBM idle 헤드룸 위에 자연 overlap (O3 + §3.5.3). Sequence-parallel 성질 위 임의 시점 한 mb 의 decode-attn 이 모든 채널 점유 — 채널 분할 micromanagement 불필요 (Hermite identity 위 partition·serialize 동치). 잔여 TSV contention 은 10% margin `PIM_SLACK_SAFETY_MARGIN = 0.9` 으로 보수 흡수 — channel knob 부재.
 
 - **Attention step** — Mixed batch 의 prefill chunk 토큰은 GPU attention kernel 이, decode 토큰은 SP-PIM 이 *동시 처리*. decode 토큰 존재 시 2048 채널 lock-step 단일 op. Pure prefill 배치 (decode rows 0) 는 PIM op_time = 0.
 - **Projection step (QKV / O-proj / FFN)** — 같은 mb 의 PIM 작업 없음. Intra-instance double-buffering (§5.6) 위 *다음 mb* 의 decode-attn 이 projection 구간에 자연 overlap — P5 compute-bound timing 활성화 원칙 정합.
@@ -264,7 +265,7 @@ Instance A 내에서 GPU projection 이 compute-bound 상태일 때 HBM 대역�
 
 - **Q-replicate / KV-row sharding** — Q 를 k_total 채널 전체에 broadcast, KV row 를 채널에 sharding → 각 채널이 자기 KV slice 를 독립 sweep (§3.4 참조).
 - **시간 산출** — Prefill chunk / decode batch 양 시나리오에서 channel 당 tile 수가 결정 → tile 수 × tile 시간 = SP-PIM attention 시간.
-- **GPU baseline 대비 ratio** — §3.1 internal path BW 우위 (1 / η_HBM 배 초과) 와 ctx 종속 KV variance 의 결합으로 결정. **정량 산출은 Phase 3 sim 종료 후 공개.**
+- **GPU baseline 대비 ratio** — §3.1 internal path BW 우위 (1 / η_HBM 배 초과) 와 ctx 종속 KV variance 의 결합으로 결정. **정량 산출은 Aux2 / F3 산식에 진입 — [`README.md`](README.md#results) 참조.**
 
 구체적 스케줄링 정책의 정량 평가는 Open Empirical Work (§8 E6) 참조.
 
@@ -538,4 +539,8 @@ PULS 스케줄러의 balanced steady state 에서 3 μ-batch in-flight window �
 
 ---
 
-본 architecture 문서의 정량 수치 (가속 배수, latency / throughput 절대값, MFU plateau, admission ceiling 수, deadband width %) 는 모두 **Phase 3 calibration 영역에서 측정 예정**.
+본 architecture 문서의 정량 coverage:
+
+- **Source decomposition** (Aux1·Aux2·F3·F5, η_HBM sensitivity sweep) — calibrated projection, [`README.md`](README.md#results) 참조
+- **F1·F2 ablation, MFU plateau, admission ceiling, deadband width** — 후속 calibration 으로 연기
+- **절대 metric** (TTFT, TPOT, throughput) — silicon 부재로 영구 out of scope
