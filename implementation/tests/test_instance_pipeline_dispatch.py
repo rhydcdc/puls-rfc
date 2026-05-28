@@ -85,6 +85,11 @@ def _make_pipeline_with_telemetry(cfg, clock, tel):
     )
 
 
+@pytest.mark.skip(
+    reason="Impl-10-pre-2 post-fix — Stage 1 placeholder substrate (NVLink handoff time → gpu_instance_b) "
+           "폐기 위 window_end 오염 제거. Stage 2 calibration 위 실 Instance B FFN op_time substrate "
+           "도입 시점 재활성 (gpu_instance_b 의 진정 active duration 측정)."
+)
 def test_dispatch_records_gpu_instance_b(dummy_config):
     """dispatch 호출 시 gpu_instance_b slot 에 activity 누적 (O8.1 substrate)."""
     clock = Clock()
@@ -93,7 +98,6 @@ def test_dispatch_records_gpu_instance_b(dummy_config):
     p = _make_pipeline_with_telemetry(dummy_config, clock, tel)
     mb = MicroBatch(id=0, decode_tokens={i: 0 for i in range(4)})
     p.dispatch(mb)
-    # gpu_instance_b 누적 > 0 (NVLink handoff time 양의 값)
     assert tel._active_duration["gpu_instance_b"] > 0
 
 
@@ -113,7 +117,11 @@ def test_dispatch_does_not_record_other_slots(dummy_config):
 
 def test_forward_pass_run_calls_dispatch_per_layer(dummy_config):
     """ForwardPass.run() 의 매 layer 마다 instance_pipeline.dispatch 호출 (Q6 a 결정).
-    L=80 회 반복 → 80 회 record_active 누적."""
+    L=80 회 반복.
+
+    Impl-10-pre-2 post-fix — gpu_instance_b active_duration 검증 제거 (placeholder 폐기).
+    Dispatch 호출 횟수 검증 위 fp.run 의 count + mb.current_layer_index 만 유지.
+    """
     clock = Clock()
     tel = IdleTelemetry()
     tel.reset(0.0)
@@ -122,12 +130,8 @@ def test_forward_pass_run_calls_dispatch_per_layer(dummy_config):
     fp = ForwardPass(config=dummy_config, instance_pipeline=p, layer_state=layer_state)
     mb = MicroBatch(id=0, decode_tokens={0: 0, 1: 0})
     count = fp.run(mb)
-    # L=80 layer iteration → 80 회 dispatch + advance
     assert count == dummy_config.model.num_layers
     assert mb.current_layer_index == dummy_config.model.num_layers
-    # Per-layer record: 80 회 누적 ≈ NVLink time × 80 (clock 미 advance → 모두 t=0 timestamp)
-    # window_end = handoff_time (마지막 record 의 t_end)
-    assert tel._active_duration["gpu_instance_b"] > 0
 
 
 def test_forward_pass_run_with_layer_count_parametrize(dummy_config):

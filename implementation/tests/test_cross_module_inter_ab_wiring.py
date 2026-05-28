@@ -25,12 +25,13 @@ from puls_sched.run import Run
 
 # ---- End-to-end: Run.loop 후 gpu_instance_b signal 활성 ----
 
+@pytest.mark.skip(
+    reason="Impl-10-pre-2 post-fix — Stage 1 placeholder substrate (gpu_instance_b ← NVLink handoff time) "
+           "폐기. Stage 2 calibration 위 실 Instance B FFN op_time substrate 도입 시점 재활성."
+)
 def test_run_loop_activates_gpu_instance_b_signal(tmp_path):
     """End-to-end — Run.init + loop + teardown 후 evaluator report 의
     idle_fraction["gpu_instance_b"] 가 *non-trivial* (1.0 < — 활동 누적 검증).
-
-    본 test 가 통과 = production hot path 위 instance_pipeline.dispatch 진정 호출.
-    실패 = (A) wiring 결손 또는 backward-compat path (instance_pipeline=None) 진입.
     """
     run = Run.init(
         config_module="puls_sched.config:default_dummy_config",
@@ -40,11 +41,7 @@ def test_run_loop_activates_gpu_instance_b_signal(tmp_path):
     )
     run.loop()
     report = run.teardown()
-    # gpu_instance_b idle_fraction < 1.0 = activity > 0 누적 (production wiring 활성)
-    assert report["idle_fraction"]["gpu_instance_b"] < 1.0, (
-        f"gpu_instance_b idle_fraction = {report['idle_fraction']['gpu_instance_b']} "
-        f"(1.0 = inactive — wiring gap 의심)"
-    )
+    assert report["idle_fraction"]["gpu_instance_b"] < 1.0
 
 
 def test_run_loop_intra_a_signals_also_active(tmp_path):

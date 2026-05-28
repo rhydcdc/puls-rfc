@@ -63,9 +63,9 @@ def test_compose_payload_t_pim_fn_callable_and_non_trivial(tmp_path):
     payload = run.scheduler._compose_admission_payload()
     fn = payload["t_pim_fn"]
     assert callable(fn)
-    # in_flight 가 있으면 t_pim_fn(k, n) > 0
+    # in_flight 가 있으면 t_pim_fn(n) > 0 (Impl-10-pre-2 — k_channels 매개변수 폐기)
     if run.scheduler.in_flight_requests:
-        result = fn(256, 4)
+        result = fn(4)
         assert result >= 0   # non-negative (정합 — PIMExecutor.op_time 산출값)
 
 
@@ -80,7 +80,7 @@ def test_compose_payload_t_pim_fn_zero_when_empty(tmp_path):
     payload = run.scheduler._compose_admission_payload()
     fn = payload["t_pim_fn"]
     # init 시점 in_flight empty
-    assert fn(256, 4) == 0.0
+    assert fn(4) == 0.0
 
 
 # ---- (B) a_cycle / b_cycle 진정 측정 ----
@@ -107,13 +107,12 @@ def test_a_cycle_grows_after_dispatches(tmp_path):
     )
 
 
+@pytest.mark.skip(
+    reason="Impl-10-pre-2 post-fix — Stage 1 placeholder substrate (gpu_instance_b ← NVLink handoff time) "
+           "폐기. b_cycle = active_duration delta 영원 0 (Stage 2 calibration 위 실 FFN op_time 재활성)."
+)
 def test_b_cycle_grows_after_layer_cycles(tmp_path):
-    """(B) b_cycle source = IdleTelemetry.active_duration("gpu_instance_b") — InstancePipeline.dispatch
-    호출 후 누적. 본 test 위 *누적 영역 직접 검증* (delta 영역 위 _compose 자동 fire 갱신 영역의 trap 회피).
-
-    Impl-10-pre-2 — prefill chunking 위 L-cycle event count 증가 (mixed batch 영역).
-    충분 step 영역 후 첫 O_PROJ 완료 → instance_pipeline.dispatch → gpu_instance_b 영역의 누적.
-    """
+    """(B) b_cycle source = IdleTelemetry.active_duration("gpu_instance_b")."""
     run = Run.init(
         config_module="puls_sched.config:default_dummy_config",
         trace_path_or_synthetic="synthetic:10",

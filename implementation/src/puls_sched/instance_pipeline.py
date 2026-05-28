@@ -87,24 +87,19 @@ class InstancePipeline:
 
         Effects:
         1. A → B handoff tensor 의 fixed-shape 검증 (ARCH §5.2)
-        2. NVLink handoff time 측정 (async hidden under max(A,B), ARCH §3.4 정합)
-        3. Instance B GPU activity recording (gpu_instance_b — ARCH §6.4 inter-AB balance 의 B-side substrate)
 
-        Stage 1 영역 — B-FFN duration = NVLink handoff time 의 placeholder substrate (PLAN §0.5
-        정합). Stage 2 calibration 영역에서 실 FFN op_time (Llama-3 70B FP8 spec) 으로 교체.
+        Stage 1 영역 — Instance B FFN op_time substrate 영역 *placeholder 폐기* (Impl-10-pre-2 post-fix).
+        이전: NVLink handoff time 을 `gpu_instance_b` active 시간 으로 기록 → handoff_time 의 dummy 위
+        과대값 위 `IdleTelemetry._window_end` 가 부풀어 *모든 slot* (gpu_a · pim_a 포함) 의 idle_fraction
+        분모 오염 → balance_intra_A 가 사실상 dead. 본 placeholder 폐기 후 분모 = clock.now 기준
+        정상 → 4 balance mechanism 모두 진짜 활성. 진정 Instance B FFN op_time 은 Stage 2 calibration
+        시점 dispatcher event push 위 정상 wiring 영역 (ARCH §3.4 *"async hidden"* literal 정합).
 
-        `clock` · `idle_telemetry` 가 None 이면 record 단계 skip (backward-compat).
+        `clock` · `idle_telemetry` field 는 backward-compat (test_meta_instance_pipeline_class_fields lock-in)
+        + Stage 2 시점 재활용 위 유지.
         """
         n_tokens = len(mb.decode_tokens) + sum(
             len(t) for t in mb.prefill_chunk.values()
         )
-        # 1. Fixed-shape handoff validation (ARCH §5.2)
+        # Fixed-shape handoff validation (ARCH §5.2)
         self.validate_handoff_shape(mb, (n_tokens, self.config.model.hidden))
-        # 2. NVLink handoff time (async hidden, dispatched event 아님)
-        handoff_time = self.nvlink.time((n_tokens, self.config.model.hidden))
-        # 3. Instance B GPU activity recording (gpu_instance_b substrate)
-        if self.clock is not None and self.idle_telemetry is not None:
-            t_start = self.clock.now
-            self.idle_telemetry.record_active(
-                "gpu_instance_b", t_start, t_start + handoff_time,
-            )
