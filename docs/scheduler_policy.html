@@ -1160,13 +1160,13 @@ pre.code-block .var { color: #f9a8d4; }
               <td><b>Intra-A</b> (secondary)</td>
               <td>GPU idle &gt; <code>θ_high</code>,<br>PIM busy</td>
               <td>PIM-dominant inside Instance A</td>
-              <td>admit additional decode &rarr; fill PIM window</td>
+              <td>admit prefill chunk &rarr; fill GPU window</td>
             </tr>
             <tr>
               <td><b>Intra-A</b> (secondary)</td>
               <td>PIM idle &gt; <code>θ_high</code>,<br>GPU busy</td>
               <td>GPU-dominant inside Instance A</td>
-              <td>admit prefill chunk &rarr; fill GPU window</td>
+              <td>admit additional decode &rarr; fill PIM window</td>
             </tr>
             <tr>
               <td>&mdash;</td>
