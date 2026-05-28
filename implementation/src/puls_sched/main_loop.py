@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Callable, TYPE_CHECKING
+from typing import Callable, Optional, TYPE_CHECKING
 
 from puls_sched.admission import Admission, MicroBatchSpec
 from puls_sched.clock import Clock
@@ -10,6 +10,7 @@ from puls_sched.dispatcher import Dispatcher
 from puls_sched.event import Event, EventType
 from puls_sched.event_queue import EventQueue
 from puls_sched.forward_pass import LayerState
+from puls_sched.instance_pipeline import InstancePipeline
 from puls_sched.kv_accountant import KVAccountant
 from puls_sched.micro_batch import MicroBatch
 from puls_sched.node import NodeType
@@ -46,6 +47,17 @@ class SchedulerCore:
     # Default False: isolated unit test 영역의 single-shot 처리 보존 (R14 setup gap).
     # True: ARCH §6.4 per-iteration admission cadence 정합 (continuous chain).
     enable_admission_tick_rescheduling: bool = False
+    # ---- Impl-10-pre-1 (A) — production hot path 위 inter-AB chain wiring. ----
+    # Default None: 기존 SchedulerCore fixture 영역 backward-compat (단위 test 무변경).
+    # None 아니면 매 O_PROJ 완료 시 instance_pipeline.dispatch(mb) 호출 — ARCH §3.4
+    # *forward pass = L × cycle* literal 의 production hot path 영역 wiring.
+    # gpu_instance_b activity recording + fixed-shape handoff defensive validation.
+    instance_pipeline: Optional[InstancePipeline] = None
+    # ---- Impl-10-pre-1 (B) — per-iteration cycle measurement snapshot. ----
+    # 이전 ADMISSION_TICK 시점의 IdleTelemetry active_duration 누적값. _measure_cycles 가
+    # 현 누적값과 delta 산출 → a_cycle / b_cycle (ARCH §6.4 'previous iteration measurement').
+    _prev_a_active_snapshot: float = 0.0
+    _prev_b_active_snapshot: float = 0.0
 
     def on_admission_tick(self, callback: AdmissionTickCallback) -> None:
         """Admission tick snapshot capture 위 callback 등록 (Impl-8 D1 hook).
@@ -159,6 +171,9 @@ class SchedulerCore:
 
         ARCH §6.4 'per-iteration basis' 정합. Idle termination guard:
         request_queue + in_flight_requests 동시 empty 시 self-push 중단 (Run.loop 3 조건 정합).
+
+        Impl-10-pre-1 (B)~(B''') — prev_event.payload 영원 propagate (0 영원 trivial) → *진정 측정
+        payload* 재구성 (`_compose_admission_payload`). 5 개 입력 모두 scheduler 자기 상태에서 산출.
         """
         if len(self.request_queue) == 0 and len(self.in_flight_requests) == 0:
             return
@@ -166,28 +181,91 @@ class SchedulerCore:
         self.queue.push(Event(
             timestamp=next_t,
             type=EventType.ADMISSION_TICK,
-            payload=prev_event.payload,
+            payload=self._compose_admission_payload(),
         ))
 
     def _schedule_admission_tick_with_default_payload(self) -> None:
-        """REQUEST_ARRIVAL 위 admission chain 재기동 — zero-default payload (dummy 영역)."""
+        """REQUEST_ARRIVAL 위 admission chain 재기동.
+
+        Impl-10-pre-1 (B)~(B''') — 'default' = scheduler 자기 상태 위 *진정 측정 payload*.
+        """
         if len(self.request_queue) == 0 and len(self.in_flight_requests) == 0:
             return
         next_t = self.clock.now + self.config.admission.tick_interval_us
         self.queue.push(Event(
             timestamp=next_t,
             type=EventType.ADMISSION_TICK,
-            payload={
-                "t_proj": 0.0, "t_pim_fn": lambda k, n: 0.0,
-                "a_cycle": 0.0, "b_cycle": 0.0, "ctx_tokens": 0,
-            },
+            payload=self._compose_admission_payload(),
         ))
+
+    def _compose_admission_payload(self) -> dict:
+        """ADMISSION_TICK 의 5 개 payload 입력 산출 (Impl-10-pre-1 (B)~(B''')).
+
+        ARCH §6.4 *"GPU/PIM idle fractions of the previous iteration are measured to regulate
+        next μ-batch's admission"* literal 정합 — 모든 입력 scheduler 자기 상태 derived.
+
+        - (B) a_cycle / b_cycle — IdleTelemetry active_duration delta (이전 ADMISSION_TICK 대비)
+        - (B') t_proj — config 의 projection (QKV + O_PROJ) GEMM 시간 합
+        - (B'') t_pim_fn — PIMExecutor.op_time 의 closure (avg kv_length 위 동적)
+        - (B''') ctx_tokens — in_flight_requests 의 max kv_length (deadband ctx-tier 입력)
+        """
+        a_cycle, b_cycle = self._measure_cycles()
+        t_proj = (
+            self.config.time.gpu_op_time_us.get("qkv", 0.0)
+            + self.config.time.gpu_op_time_us.get("o_proj", 0.0)
+        )
+        ctx_tokens = max(
+            (r.kv_length for r in self.in_flight_requests.values()), default=0,
+        )
+        return {
+            "t_proj": t_proj,
+            "t_pim_fn": self._make_t_pim_fn(),
+            "a_cycle": a_cycle,
+            "b_cycle": b_cycle,
+            "ctx_tokens": ctx_tokens,
+        }
+
+    def _measure_cycles(self) -> tuple[float, float]:
+        """Impl-10-pre-1 (B) — 이전 ADMISSION_TICK 대비 a_cycle / b_cycle delta 산출.
+
+        a_cycle = Instance A 의 (gpu_instance_a + pim_instance_a) active 증가분
+        b_cycle = Instance B 의 (gpu_instance_b) active 증가분
+        """
+        tel = self.admission.idle_telemetry
+        cur_a = tel.active_duration("gpu_instance_a") + tel.active_duration("pim_instance_a")
+        cur_b = tel.active_duration("gpu_instance_b")
+        delta_a = max(0.0, cur_a - self._prev_a_active_snapshot)
+        delta_b = max(0.0, cur_b - self._prev_b_active_snapshot)
+        self._prev_a_active_snapshot = cur_a
+        self._prev_b_active_snapshot = cur_b
+        return delta_a, delta_b
+
+    def _make_t_pim_fn(self):
+        """Impl-10-pre-1 (B'') — PIMExecutor.op_time closure (in_flight_requests 의 avg kv 위 동적).
+
+        kTotalDecider.solve 가 9 k_total dial 위 호출 — 각 호출 시 *현재* in_flight state 반영.
+        """
+        in_flight = self.in_flight_requests
+        pim_executor = self.dispatcher.pim_executor
+        def fn(k_channels: int, n_decode: int) -> float:
+            if not in_flight or n_decode <= 0 or k_channels <= 0:
+                return 0.0
+            avg_kv = max(1, sum(r.kv_length for r in in_flight.values()) // len(in_flight))
+            return pim_executor.op_time(
+                k_channels=k_channels, kv_rows_total=n_decode * avg_kv,
+            )
+        return fn
 
     def _maybe_advance_forward_pass(self, event: Event, eos_seen: bool = False) -> None:
         """KERNEL_COMPLETION (O_PROJ done) → LayerState.advance → L 도달 시 token decode signal.
 
         Q5 — consumer 는 main_loop 영역. Dispatcher / forward_pass 침범 0.
         Q6 (c) — eos_seen=True 명시 시 EOS branch 발동 (외부 caller / test fixture path).
+
+        Impl-10-pre-1 (A) — 매 O_PROJ 완료 = 1 layer cycle 의 A-side 종료 = B-side 진입 시점.
+        ARCH §3.4 *forward pass = L × cycle* literal 정합. `instance_pipeline.dispatch(mb)` 호출 위
+        gpu_instance_b activity recording (inter-AB balance signal substrate) + fixed-shape handoff
+        defensive validation (ARCH §5.2 production 강제). `instance_pipeline=None` 시 skip (backward-compat).
         """
         node_type = event.payload.get("node_type")
         if node_type is not NodeType.O_PROJ:
@@ -196,6 +274,9 @@ class SchedulerCore:
         mb = self.dispatcher.micro_batches.get(mb_id) if mb_id is not None else None
         if mb is None:
             return  # defensive — mb already unregistered
+        # Impl-10-pre-1 (A) — per-layer A→B chain wiring (production hot path)
+        if self.instance_pipeline is not None:
+            self.instance_pipeline.dispatch(mb)
         token_signal = self.layer_state.advance(mb)
         if not token_signal:
             # Impl-9 — 다음 layer 의 fresh dispatch 위 DAG nodes 재생성. ARCH §3.4 L × cycle 정합.

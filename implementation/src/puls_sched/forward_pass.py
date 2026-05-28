@@ -50,6 +50,9 @@ class ForwardPass:
     def run(self, mb: MicroBatch) -> int:
         """MicroBatch 위 L-layer iteration 실행.
 
+        Impl-10-pre-1 O5.1 — 매 layer 마다 `instance_pipeline.dispatch(mb)` 호출 (Q6 (a) 결정).
+        ARCH §3.4 *forward pass = L × cycle* literal 정합 — 각 layer 가 A → handoff → B → handoff → A_next chain.
+
         Returns:
             count of layer advance (== num_layers if completed normally).
         """
@@ -59,6 +62,8 @@ class ForwardPass:
             )
         count = 0
         while True:
+            # O5.1 — 매 layer 의 A→B chain wiring (substrate 영역, ARCH §3.4 정합)
+            self.instance_pipeline.dispatch(mb)
             done = self.layer_state.advance(mb)
             count += 1
             if done:

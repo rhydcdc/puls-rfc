@@ -127,20 +127,23 @@ def test_evaluator_admission_convergence_admitted_and_not_both_captured(evaluato
 # =========================================================================
 
 def test_evaluator_idle_fraction_keys(evaluator):
-    """key set lock-in — O8.1 (per-instance A/B split 부재) schema 정합"""
+    """key set lock-in — Impl-10-pre-1 O8.1 (3-key) schema 정합."""
     result = evaluator.idle_fraction()
-    assert set(result.keys()) == {"gpu_instance_a", "pim_instance_a"}
+    assert set(result.keys()) == {"gpu_instance_a", "pim_instance_a", "gpu_instance_b"}
 
 
 def test_evaluator_idle_fraction_values_bit_exact_telemetry(evaluator, idle_telemetry):
-    """Post-hoc snapshot lock-in (D1) — idle_telemetry 의 값과 bit-exact 일치"""
+    """Post-hoc snapshot lock-in (D1) — idle_telemetry 의 값과 bit-exact 일치."""
     # 합성 active duration 주입
     idle_telemetry.reset(0.0)
     idle_telemetry.record_active("GPU", 0.0, 5.0)
     idle_telemetry.record_active("PIM", 0.0, 3.0)
+    # Impl-10-pre-1 — gpu_instance_b 신설 slot 도 inject
+    idle_telemetry.record_active("gpu_instance_b", 0.0, 2.0)
     result = evaluator.idle_fraction()
     assert result["gpu_instance_a"] == idle_telemetry.gpu_idle_fraction()
     assert result["pim_instance_a"] == idle_telemetry.pim_idle_fraction()
+    assert result["gpu_instance_b"] == idle_telemetry.gpu_instance_b_idle_fraction()
 
 
 # =========================================================================

@@ -72,8 +72,12 @@ class TestSelfRescheduling:
             dummy_config.admission.tick_interval_us
         )
 
-    def test_next_tick_payload_carried(self, scheduler_core):
-        """self-push 된 ADMISSION_TICK payload = prev_event.payload."""
+    def test_next_tick_payload_freshly_composed(self, scheduler_core):
+        """self-push 된 ADMISSION_TICK payload = scheduler._compose_admission_payload() 의 fresh 산출.
+
+        Impl-10-pre-1 (B)~(B''') — prev payload identity propagation 영역 → fresh composition 영역.
+        Production 위 scheduler 자기 상태 측정값 (a_cycle/b_cycle/t_proj/t_pim_fn/ctx_tokens) 진정 주입.
+        """
         scheduler_core.enable_admission_tick_rescheduling = True
         req = _make_request(req_id=0)
         scheduler_core.request_queue.push(req)
@@ -81,7 +85,11 @@ class TestSelfRescheduling:
         scheduler_core.queue.push(orig)
         scheduler_core.step()
         ticks = _admission_ticks(scheduler_core)
-        assert ticks[0].payload is orig.payload
+        # Fresh composition — identity 다름 + 5 key 모두 존재 (composer schema)
+        assert ticks[0].payload is not orig.payload
+        assert set(ticks[0].payload.keys()) == {
+            "t_proj", "t_pim_fn", "a_cycle", "b_cycle", "ctx_tokens",
+        }
 
     def test_idle_guard_with_in_flight(self, scheduler_core):
         """in_flight_requests 잔재 시 self-push (queue 비어도)."""

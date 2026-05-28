@@ -17,6 +17,7 @@ import dataclasses
 import enum
 import importlib
 import json
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,8 +33,11 @@ from puls_sched.event import Event, EventType
 from puls_sched.event_queue import EventQueue
 from puls_sched.forward_pass import LayerState
 from puls_sched.idle_telemetry import IdleTelemetry
+from puls_sched.instance import Instance
+from puls_sched.instance_pipeline import InstancePipeline
 from puls_sched.kv_accountant import KVAccountant
 from puls_sched.main_loop import SchedulerCore
+from puls_sched.nvlink import NVLinkTransfer
 from puls_sched.pim_emulator import PIMExecutor
 from puls_sched.request_queue import RequestQueue
 from puls_sched.trace import TraceReplayer
@@ -108,6 +112,7 @@ class Run:
         pim_executor = PIMExecutor(config=config)
         dispatcher = Dispatcher(
             config=config, clock=clock, queue=queue, dag=dag, pim_executor=pim_executor,
+            idle_telemetry=idle_telemetry,    # Impl-10-pre-1 O8.2 wiring
         )
         request_queue = RequestQueue(capacity=config.admission.request_queue_capacity)
         kv_accountant = KVAccountant(capacity=config.admission.kv_capacity_aggregate)
@@ -119,11 +124,20 @@ class Run:
         )
         layer_state = LayerState(num_layers=config.model.num_layers)
         completion = Completion(clock=clock, kv_accountant=kv_accountant)
+        # Impl-10-pre-1 (A) — InstancePipeline plumbing 위 production hot path inter-AB chain
+        instance_a = Instance(name="A", has_pim=True)
+        instance_b = Instance(name="B", has_pim=False)
+        nvlink = NVLinkTransfer(config=config)
+        instance_pipeline = InstancePipeline(
+            config=config, instance_a=instance_a, instance_b=instance_b, nvlink=nvlink,
+            clock=clock, idle_telemetry=idle_telemetry,
+        )
         scheduler = SchedulerCore(
             config=config, clock=clock, queue=queue, dag=dag, window=window,
             dispatcher=dispatcher, request_queue=request_queue,
             kv_accountant=kv_accountant, admission=admission,
             layer_state=layer_state, completion=completion,
+            instance_pipeline=instance_pipeline,    # (A) production inter-AB wiring
         )
         # Q1 — self-rescheduling enable (R14 opt-in flag)
         scheduler.enable_admission_tick_rescheduling = True
@@ -141,14 +155,12 @@ class Run:
                 payload={"request": req},
             ))
 
-        # Q1 first ADMISSION_TICK priming
+        # Q1 first ADMISSION_TICK priming. Impl-10-pre-1 (B)~(B''') — composer 사용
+        # (init 시점 in_flight empty + idle_telemetry 0 → 자연 trivial payload, 단 t_pim_fn 은 진정 closure).
         queue.push(Event(
             timestamp=0.0,
             type=EventType.ADMISSION_TICK,
-            payload={
-                "t_proj": 0.0, "t_pim_fn": lambda k, n: 0.0,
-                "a_cycle": 0.0, "b_cycle": 0.0, "ctx_tokens": 0,
-            },
+            payload=scheduler._compose_admission_payload(),
         ))
 
         out = Path(output_dir)
@@ -169,7 +181,12 @@ class Run:
         return progressed
 
     def loop(self) -> int:
-        """Termination 3 조건 (queue empty AND window empty AND in_flight empty) 까지."""
+        """Termination 3 조건 (queue empty AND window empty AND in_flight empty) 까지.
+
+        Impl-10-pre-1 — `PULS_PROGRESS_INTERVAL` env (default 0 = off) 위 진행 logging.
+        Set to N > 0 → 매 N step 마다 stderr 위 step/clock/in_flight/queue 출력.
+        """
+        progress_interval = int(os.environ.get("PULS_PROGRESS_INTERVAL", "0"))
         while True:
             if (
                 len(self.scheduler.queue) == 0
@@ -179,6 +196,15 @@ class Run:
                 break
             if not self.step():
                 break  # defensive
+            if progress_interval > 0 and self._step_count % progress_interval == 0:
+                print(
+                    f"[Run.loop] step={self._step_count} "
+                    f"clock={self.scheduler.clock.now:.1f} "
+                    f"in_flight={len(self.scheduler.in_flight_requests)} "
+                    f"queue={len(self.scheduler.queue)} "
+                    f"window={len(self.scheduler.window.current_ids())}",
+                    file=sys.stderr, flush=True,
+                )
         return self._step_count
 
     def teardown(self) -> dict:

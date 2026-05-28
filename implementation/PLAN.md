@@ -12,7 +12,7 @@
 
 **D1. 동작하는 scheduler.** Event-driven DAG dispatch + adaptive admission + Instance A/B pipeline 이 임의 ctx × batch trace 위에서 *처리 시간 균형 잡힌 μ-batch 구성*으로 수렴. 검증 = §6.5 dispatch trace emergence + admission deadband 수렴 + F4 steady-state + invariant 0 위반 + determinism. → **Impl-9 acceptance (시뮬레이터 통과 조건)**.
 
-**D2. F1~F5 가속 source decomposition.** ARCHITECTURE §5.7 의 F1·F2·F3·F5 각 source 의 isolated cycle ratio 를 workload regime (ctx × batch) 격자 위에서 산출. F4 는 D1 의 전제 검증. → **Impl-10 (Phase 3 calibrated projection — GPU 실측 + PIM Ramulator2 추정)**.
+**D2. 가속 source decomposition (slim scope).** ARCHITECTURE §5.7 의 *F3 (inter-instance pipeline) + F5 (channel-independent straggler penalty) + Aux1 (mixed batch weight reuse) + Aux2 (bus traffic reduction)* 4 source 의 정량 ratio 산출. *Model spec (Llama-3 70B) + 실 LongBench trace + η_HBM 가정* 만으로 closed-form / trace-grounded 산출 (Blackwell GPU attention spec 미요구). F4 = D1 의 전제 검증. → **Impl-10 main**. *F1·F2 ablation + workload/chunk/deadband sweep + vLLM 모사 비교* = **Impl-11 deferred** (Blackwell calibrated + simple simulation 위 별도 영역).
 
 **산출하지 않음 (scope 외):**
 
@@ -599,29 +599,63 @@ run-time per ADMISSION_TICK:
 - [ ] 그룹 2 구현 후 lifecycle test 갱신 — Request.state 전이 영역 (PREFILL phase 의 L_prefill cycle 이상 잔존), `test_acceptance_c1` 의 max_tokens·prefill_tokens 정합 갱신
 - [ ] Regression 검증 — Impl-9 acceptance C1~C5 (`test_acceptance_c1~c5_*`) 가 wiring + 구현 후에도 green 보존. 특히 C5 determinism 의 bit-exact 가 Instance B activity 의 새 event-time stream + prefill chunked dispatch 의 새 KERNEL_COMPLETION 추가에도 동일 seed 위 보존
 
-#### Implementation:
-- [ ] Workload sweep — ctx ∈ {2k, 8k, 32k, 128k, 512k, 1M} × batch ∈ {16, 64, 128, 256}
-- [ ] k_total sweep — fixed k_total 대조군 + adaptive k_total 비교
-- [ ] Chunk size sweep — PULS 내부 admission 의 chunk 결정 sensitivity (외부 reference 없음)
-- [ ] Deadband width sweep — ctx-tiered lookup vs static 비교
-- [ ] F1·F2·F3·F5 가속 source 별 ablation 기여도 분해 + F4 (steady-state 전제) 충족 검증
-- [ ] Aux1·Aux2 closed-form 산출 (bytes-saved / bandwidth 영역, 위 산식 직접)
-- [ ] D2 산출 — F1~F5 + Aux1·Aux2 cycle ratio 표 (workload regime 격자 cell 별, 7 source)
+#### Implementation (Scope Reframing — adaptive scheduler 정합):
+
+> **Reframing 사유.** PULS 의 *adaptive scheduler* 특성 위 외부 sweep (workload / chunk / deadband / k_total) 영역은 adaptive 결정과 직접 비교 어려움. *Adaptive 영역의 진정 작동 검증* = Impl-10-pre-1 위 실 LongBench trace 의 end-to-end Run.loop (commit 영역 lock-in). Stage 2 main = *가속 source 별 closed-form + trace-grounded 산출만*.
+
+- [ ] **Aux1 — Mixed batching weight reuse** (closed-form, model spec 만): mixed mb vs separate prefill+decode batch 의 weight streaming 절감. Llama-3 70B weight bytes / HBM BW × η 산식 직접
+- [ ] **Aux2 — Bus traffic reduction** (closed-form, model spec + trace KV 분포 + η_HBM 가정): KV cache HBM↔GPU 전송 절감. **Long-ctx 위 dominant — PULS 의 가장 큰 가속 source**. Trace 의 KV 분포 위 직접 산출
+- [ ] **F3 inter-instance pipeline ratio** (실 trace + Impl-10-pre-1 (B) wiring): `max(a_cycle, b_cycle) / (a_cycle + b_cycle)` 의 실 trace 위 산출. 측정값 단위 = placeholder (상대 ratio 의미)
+- [ ] **F5 KV variance straggler penalty** (실 trace 의 KV 분포): lock-step max-KV vs channel-independent 의 straggler bubble 정량
+- [ ] **FFN-only GPU isolation 실험** (Colab 위 소규모): FFN 만 GPU 처리 vs PULS mixed batch 의 가속. 실 hardware 위 measurement (별도 notebook)
+- [ ] D2 산출 — 위 5 analyses 의 정량 ratio + 출처 라벨 (`llama3_70b_published_spec` · `longbench_longctx_poisson` · η_HBM 가정 출처)
+
+#### Deferred to Impl-11 (Blackwell calibrated + vLLM 모사):
+
+본 항목들은 Stage 2 (Impl-10 main) scope 외 — 별도 follow-up 영역. 사유: calibration heavy + adaptive 영역과 정합 어려움 + scope 의 honest 정합.
+
+- ~~Workload sweep (ctx × batch grid)~~ — 실 LongBench trace 가 다양 ctx 분포 보유 (Impl-10-pre-1 trace 검증 위 자연 cover)
+- ~~Chunk size sweep~~ — Hybrid Chunk Size Policy (Impl-10-pre-2 group 2) 의 adaptive 영역이 자연 보정 (ARCH §6.4 정합)
+- ~~Deadband width sweep~~ — ARCH §6.4 literal explicit deferred (*"σ_total measurement 부재, the very definition of σ measurement is absent"*)
+- ~~k_total sweep (fixed vs adaptive)~~ — adaptive k_total_decider 의 진정 작동 = Impl-10-pre-1 (B'') 위 검증
+- ~~F1 ablation (SP-PIM vs GPU attention)~~ — Blackwell GPU attention kernel spec 필수 (Impl-11 calibration)
+- ~~F2 ablation (double-buffering)~~ — 산식 structural 이미 Impl-8 lock-in, 정량 ratio = calibration 의존
+- ~~Comparative baseline (vLLM/Sarathi 모사)~~ — PLAN §1.2 영구 out of scope. Impl-11 위 simple simulation 가능
 
 #### Unit Tests:
-- [ ] Sweep grid coverage — ctx × batch 격자 모든 셀 실행 확인 (누락 0)
-- [ ] F1 ablation — SP-PIM 비활성화 (GPU attention kernel route) 시 가속 source disappear
-- [ ] F2 ablation — Double-buffering 비활성화 (μ-batch 직렬 강제) 시 `A_cycle = t_proj + t_attn`
-- [ ] F3 ablation — Single-instance fallback (A·B fusion) 시 steady-state cycle = `A_cycle + B_cycle`
-- [ ] F5 ablation — Channel-independent scheduling 비활성화 (lock-step max-KV wait) 시 straggler bubble 복원
-- [ ] F4 검증 — F2·F3 활성화 + μ-batch staggering 활성화 시 steady-state regime 도달 (F4 는 별도 기여가 아닌 전제 충족 확인)
-- [ ] Aux1 — mixed vs separate batch 위 weight bytes 절감 산식 정합
-- [ ] Aux2 — KV bytes 절감 + internal BW × η_internal 의 compound 산식 정합 (long-ctx 위 dominant 검증)
-- [ ] η_HBM sensitivity sweep — η_HBM_external ∈ {0.70, 0.75, 0.80} 위 F1 · Aux2 ratio 의 monotonic 의존 확인
-- [ ] 출처 라벨 round-trip — 4 calibrated input source label (`blackwell_whitepaper_spec` · `ramulator2_hbm4_estimated_jedec_spec` · `llama3_70b_published_spec` · `longbench_longctx_poisson` + optional `lab_blackwell_measured` · η_HBM 출처) 이 D2 보고서까지 보존
+- [ ] Aux1 — mixed vs separate batch 위 weight bytes 절감 산식 (model spec 위 closed-form 검증)
+- [ ] Aux2 — KV bytes 절감 + internal BW × η_internal compound 산식 (long-ctx dominant 정성 검증)
+- [ ] F3 — 실 trace 위 a_cycle/b_cycle 측정값 위 `max/(a+b)` ratio 산출 reproducibility
+- [ ] F5 — trace KV variance 위 straggler penalty 산식 (`ceil(max_kv / k×tile_rows)` vs `ceil(sum_kv / k×tile_rows)`) 정합
+- [ ] FFN-only Colab 실험 — measurement reproducibility (별도 notebook)
+- [ ] η_HBM sensitivity (Aux2 ratio 의 monotonic 의존, {0.70, 0.75, 0.80})
+- [ ] 출처 라벨 round-trip — `llama3_70b_published_spec` · `longbench_longctx_poisson` · η_HBM 출처 라벨이 D2 산출까지 보존
 
 #### Acceptance:
-§5.7 F1·F2·F3·F5 + Aux1·Aux2 각 source 의 isolated cycle ratio 가 calibrated input 위 workload regime 격자에서 산출. F4 steady-state 전제 충족. *Whitepaper + Ramulator2 + model spec + trace 의 4 source 만으로 D2 산출 — lab 실측은 refinement (선택 영역)*. *Comparative baseline 미산출 — D2 deliverable 단독 (Deliverables 정합).*
+
+*F3 · F5 + Aux1 · Aux2* 4 source 의 정량 ratio 가 *model spec + trace + η_HBM 가정* 으로 산출 (Blackwell GPU attention spec 미요구). F1·F2 ablation + workload/chunk/deadband sweep = **Impl-11 deferral**. *Comparative baseline (vLLM/Sarathi 모사) = Impl-11 simple simulation.*
+
+*Adaptive scheduler 의 진정 작동 검증* = Impl-10-pre-1 위 실 LongBench trace end-to-end Run.loop 위 lock-in (KV 누수 0 + invariant 0 + determinism + 5 payload signal 진정 활성 + 모든 req COMPLETED 도달).
+
+FFN-only Colab 실험 = 별도 notebook (Stage 2 산출물 추가) — *small-scale 실 hardware 위 isolation measurement*.
+
+---
+
+### Impl-11 — (Deferred) Blackwell Calibrated Projection + vLLM Simple Simulation
+
+> **Scope.** Stage 2 (Impl-10 main) 의 *closed-form + trace-grounded* 영역 외 — calibration-heavy 영역 + comparative simulation 영역. Stage 2 게시 (GitHub) 이후 follow-up 영역. *시간 가용 시 진행*, blocker 아님.
+
+#### Implementation:
+- [ ] Blackwell whitepaper spec calibration — `config.time.gpu_op_time_us` 의 placeholder → calibrated value (출처 라벨 `blackwell_whitepaper_spec`)
+- [ ] Ramulator2 HBM4 PIM cycle ingest — `config.time.pim_tile_time_ns` 의 calibrated value (출처 라벨 `ramulator2_hbm4_estimated_jedec_spec`)
+- [ ] F1 ablation (SP-PIM vs GPU attention) — calibrated GPU attention time 위 isolated ratio
+- [ ] F2 ablation (double-buffering) — calibrated cycle 위 `max(t_proj, t_attn)` vs `t_proj + t_attn` ratio
+- [ ] Workload regime sweep (optional) — ctx × batch 격자 위 4 source ratio variance
+- [ ] vLLM/Sarathi simple simulation — calibrated placeholder 위 vLLM 영역의 *fixed-budget admission* 모사 + PULS adaptive 와 throughput / TTFT 비교
+- [ ] η_HBM sensitivity sweep — {0.70, 0.75, 0.80} 위 F1 · Aux2 ratio monotonic
+
+#### Acceptance:
+F1·F2 ablation + workload sweep + vLLM 모사 비교 산출. *Comparative baseline* 영역 = Impl-11 의 *simple simulation 위 정합 disclosure* (절대 비교 아님, calibrated placeholder 위 ratio 비교).
 
 ---
 

@@ -1,11 +1,12 @@
 from dataclasses import dataclass, field
-from typing import Callable, TYPE_CHECKING
+from typing import Callable, Optional, TYPE_CHECKING
 
 from puls_sched.clock import Clock
 from puls_sched.config import Config
 from puls_sched.dag import DAG
 from puls_sched.event import Event, EventType
 from puls_sched.event_queue import EventQueue
+from puls_sched.idle_telemetry import IdleTelemetry
 from puls_sched.invariants import check_I1, check_I2, check_I3, check_I4, check_I5
 from puls_sched.micro_batch import MicroBatch
 from puls_sched.node import Node, NodeState, NodeType
@@ -41,6 +42,8 @@ class Dispatcher:
     gpu_busy: bool = False
     pim_busy: bool = False
     _dispatch_callbacks: list[DispatchCallback] = field(default_factory=list)  # Impl-8 — D1 hook (evaluator 등록 점)
+    # Impl-10-pre-1 O8.2 — optional IdleTelemetry wiring. None 시 record_active skip (backward-compat 영역).
+    idle_telemetry: Optional[IdleTelemetry] = None
 
     def register(self, mb: MicroBatch) -> None:
         """MicroBatch 를 dispatcher 의 lookup 저장소에 등록 (Q1-bis).
@@ -145,8 +148,10 @@ class Dispatcher:
             check_I3(self.dag, node.micro_batch_id)
         node.transition_to(NodeState.RUNNING)
         self.gpu_busy = True
+        op_time = self._op_time(node)
+        t_start = self.clock.now
         self.queue.push(Event(
-            timestamp=self.clock.now + self._op_time(node),
+            timestamp=t_start + op_time,
             type=EventType.KERNEL_COMPLETION,
             payload={
                 "micro_batch_id": node.micro_batch_id,
@@ -154,6 +159,9 @@ class Dispatcher:
                 "resource": "GPU",
             },
         ))
+        # Impl-10-pre-1 O8.2 — gpu_instance_a activity recording (ARCH §6.4 intra-A balance signal)
+        if self.idle_telemetry is not None:
+            self.idle_telemetry.record_active("gpu_instance_a", t_start, t_start + op_time)
         self._fire_dispatch(node, resource="GPU")    # Impl-8 — D1 hook (evaluator 통지)
 
     def dispatch_pim(self, node: Node) -> None:
@@ -161,8 +169,10 @@ class Dispatcher:
         check_I2(self.dag, node.micro_batch_id)
         node.transition_to(NodeState.RUNNING)
         self.pim_busy = True
+        op_time = self._op_time(node)
+        t_start = self.clock.now
         self.queue.push(Event(
-            timestamp=self.clock.now + self._op_time(node),
+            timestamp=t_start + op_time,
             type=EventType.KERNEL_COMPLETION,
             payload={
                 "micro_batch_id": node.micro_batch_id,
@@ -170,6 +180,9 @@ class Dispatcher:
                 "resource": "PIM",
             },
         ))
+        # Impl-10-pre-1 O8.2 — pim_instance_a activity recording (ARCH §6.4 intra-A balance signal)
+        if self.idle_telemetry is not None:
+            self.idle_telemetry.record_active("pim_instance_a", t_start, t_start + op_time)
         self._fire_dispatch(node, resource="PIM")    # Impl-8 — D1 hook (evaluator 통지). F1 ablation 시에도 resource="PIM" 유지 (I5 invariant 정합)
 
     def on_completion(self, event: Event) -> None:

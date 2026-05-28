@@ -75,11 +75,21 @@ def test_pim_executor_no_clock_or_queue_field():
 # =========================================================================
 
 def test_instance_pipeline_no_l_loop():
-    """InstancePipeline 에 L-loop method 부재 (Q3 — forward_pass = L-loop owner)."""
+    """InstancePipeline 에 L-loop method 부재 (Q3 — forward_pass = L-loop owner).
+
+    Impl-10-pre-1 O5.1 — `dispatch()` 는 *단일 layer chain* (forward_pass 가 L 회 호출). L-loop 아님.
+    """
     for forbidden in ("run", "iterate_layers", "forward"):
         assert not hasattr(InstancePipeline, forbidden), (
             f"InstancePipeline.{forbidden} 존재 — Q3 위반 (L-loop 은 ForwardPass 책임)."
         )
+
+
+def test_instance_pipeline_dispatch_signature():
+    """InstancePipeline.dispatch signature `(self, mb)` (Impl-10-pre-1 O5.1, Q6 (a))."""
+    assert hasattr(InstancePipeline, "dispatch")
+    params = list(inspect.signature(InstancePipeline.dispatch).parameters.keys())
+    assert params == ["self", "mb"]
 
 
 def test_forward_pass_owns_l_loop():
@@ -213,6 +223,18 @@ def test_main_loop_in_flight_requests_dict():
     from puls_sched.main_loop import SchedulerCore
     fields = SchedulerCore.__dataclass_fields__
     assert "in_flight_requests" in fields
+
+
+def test_scheduler_core_has_instance_pipeline_field():
+    """Impl-10-pre-1 (A) — SchedulerCore.instance_pipeline Optional field 신설.
+
+    Production hot path 위 inter-AB chain wiring 영구 기록. backward-compat default None.
+    """
+    from puls_sched.main_loop import SchedulerCore
+    fields = SchedulerCore.__dataclass_fields__
+    assert "instance_pipeline" in fields
+    # Default None — backward-compat (기존 fixture 무변경)
+    assert fields["instance_pipeline"].default is None
 
 
 # ============================================================================

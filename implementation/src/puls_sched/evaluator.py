@@ -196,14 +196,18 @@ class Evaluator:
         )
 
     def idle_fraction(self) -> dict:
-        """GPU · PIM idle fraction (Instance A scope).
+        """3-key idle fraction schema. Impl-10-pre-1 O8.1 정합.
 
-        Per-instance (A vs B) split 은 O8.1 carry-over — 현 idle_telemetry single-instance.
-        Instance B 의 FFN idle 측정은 Impl-9 driver 영역.
+        - `gpu_instance_a` / `pim_instance_a` — intra-A balance signal (ARCH §6.4)
+        - `gpu_instance_b` — inter-AB balance 의 B-side substrate
+
+        Instance B activity 의 production 측정 = `InstancePipeline.dispatch` chain.
+        스케줄러 driver path 가 ForwardPass.run 미사용 시 gpu_instance_b 는 0 — schema lock-in 의미 (Stage 1).
         """
         return {
             "gpu_instance_a": self.idle_telemetry.gpu_idle_fraction(),
             "pim_instance_a": self.idle_telemetry.pim_idle_fraction(),
+            "gpu_instance_b": self.idle_telemetry.gpu_instance_b_idle_fraction(),
         }
 
     def pim_utilization(self) -> float:

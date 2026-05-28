@@ -213,8 +213,13 @@ def test_meta_instance_class_fields():
 
 
 def test_meta_instance_pipeline_class_fields():
+    """Impl-10-pre-1 O5.1 — clock + idle_telemetry Optional field 신설.
+
+    backward-compat 정합 (default None) — 기존 fixture/constructor 무변경.
+    """
     assert set(InstancePipeline.__dataclass_fields__.keys()) == {
         "config", "instance_a", "instance_b", "nvlink",
+        "clock", "idle_telemetry",
     }
 
 
