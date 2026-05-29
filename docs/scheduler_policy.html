@@ -812,6 +812,782 @@ pre.code-block .var { color: #f9a8d4; }
 #sec-5 .caption-list li.assumption .item-label { color: var(--color-pim); }
 #sec-5 .caption-list .sub { color: #6b7280; font-weight: 500; text-transform: none; letter-spacing: 0; }
 
+/* ============================ §6 Acceleration Sources ============================ */
+
+#sec-6 .source-card,
+#sec-7 .source-card {
+  border: 1px solid var(--color-grid);
+  border-radius: 5px;
+  margin: 18px 0;
+  background: white;
+  overflow: hidden;
+}
+
+#sec-6 .source-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--color-softer);
+  border-bottom: 1px solid var(--color-grid);
+  flex-wrap: wrap;
+}
+
+#sec-6 .source-id {
+  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-pim);
+  background: white;
+  border: 1px solid var(--color-pim);
+  padding: 2px 8px;
+  border-radius: 3px;
+}
+
+#sec-6 .source-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: #111827;
+  letter-spacing: -0.01em;
+}
+
+#sec-6 .source-badge {
+  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 2px 7px;
+  border-radius: 3px;
+  text-transform: uppercase;
+}
+
+#sec-6 .source-badge.calibrated { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
+#sec-6 .source-badge.deferred   { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+#sec-6 .source-badge.absorbed   { background: #e5e7eb; color: #4b5563; border: 1px solid #9ca3af; }
+
+#sec-6 .source-headline {
+  margin-left: auto;
+  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #111827;
+}
+
+#sec-6 .source-figure {
+  padding: 22px 18px 14px 18px;
+  background: white;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 200px;
+  border-bottom: 1px solid var(--color-grid);
+}
+
+#sec-6 .source-mechanism {
+  padding: 12px 16px 14px 16px;
+  font-size: 12.5px;
+  color: var(--color-muted);
+  line-height: 1.6;
+  background: var(--color-softer);
+}
+
+#sec-6 .source-mechanism b {
+  color: #111827;
+  font-weight: 600;
+}
+
+#sec-6 .source-mechanism code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11.5px;
+  background: white;
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid var(--color-grid);
+}
+
+/* ---------- Common figure axes ---------- */
+#sec-6 .fig-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-subtle);
+  font-family: 'JetBrains Mono', monospace;
+  letter-spacing: 0.03em;
+  margin-bottom: 10px;
+  text-align: center;
+}
+
+/* ---------- F1 SP-PIM channel grid ---------- */
+#sec-6 .f1-wrap {
+  width: 100%;
+  max-width: 640px;
+}
+#sec-6 .f1-q {
+  text-align: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-n);
+  background: var(--color-n-bg);
+  border: 1px solid var(--color-n);
+  border-radius: 3px;
+  padding: 5px 10px;
+  display: inline-block;
+  margin: 0 auto;
+}
+#sec-6 .f1-broadcast {
+  text-align: center;
+  color: var(--color-n);
+  font-size: 11px;
+  margin: 4px 0 6px 0;
+  font-family: 'JetBrains Mono', monospace;
+}
+#sec-6 .f1-grid {
+  display: grid;
+  grid-template-columns: repeat(16, 1fr);
+  gap: 3px;
+  margin: 4px 0 10px 0;
+}
+#sec-6 .f1-ch {
+  background: var(--color-pim-bg);
+  border: 1px solid var(--color-pim);
+  border-radius: 2px;
+  padding: 6px 2px 4px 2px;
+  text-align: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8px;
+  color: #92400e;
+  font-weight: 600;
+}
+#sec-6 .f1-ch .kv-row {
+  display: block;
+  height: 2px;
+  background: var(--color-kv);
+  margin: 1px auto;
+  width: 70%;
+  border-radius: 1px;
+}
+#sec-6 .f1-scale {
+  text-align: center;
+  font-size: 11px;
+  color: var(--color-muted);
+  font-family: 'JetBrains Mono', monospace;
+  margin-top: 6px;
+}
+#sec-6 .f1-scale b { color: var(--color-pim); }
+
+/* ---------- F2 cross-link to §5 ---------- */
+#sec-6 .xref-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 22px 18px;
+  background: var(--color-softer);
+  border: 1px dashed var(--color-pim);
+  border-radius: 4px;
+  width: 100%;
+  max-width: 520px;
+  text-align: center;
+}
+#sec-6 .xref-card .xref-eyebrow {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--color-pim);
+  letter-spacing: 0.05em;
+}
+#sec-6 .xref-card .xref-body {
+  font-size: 12.5px;
+  color: var(--color-text);
+  line-height: 1.5;
+}
+#sec-6 .xref-card .xref-body b { color: #111827; }
+#sec-6 .xref-card a.xref-btn {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 7px 14px;
+  background: var(--color-pim);
+  color: white;
+  text-decoration: none;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11.5px;
+  font-weight: 700;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+#sec-6 .xref-card a.xref-btn:hover { background: #b45309; }
+
+/* ---------- F2 Double-buffer timeline ---------- */
+#sec-6 .f2-wrap { width: 100%; max-width: 620px; }
+#sec-6 .f2-lane {
+  display: flex;
+  align-items: center;
+  margin: 5px 0;
+}
+#sec-6 .f2-lane-label {
+  width: 56px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-muted);
+}
+#sec-6 .f2-track {
+  flex: 1;
+  display: flex;
+  height: 30px;
+  background: var(--color-softer);
+  border: 1px solid var(--color-grid);
+  border-radius: 3px;
+  overflow: hidden;
+  position: relative;
+}
+#sec-6 .f2-bar {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: white;
+}
+#sec-6 .f2-gpu-bar  { background: var(--color-n); border-right: 1px solid rgba(255,255,255,0.55); }
+#sec-6 .f2-pim-bar  { background: var(--color-pim); border-right: 1px solid rgba(255,255,255,0.55); }
+#sec-6 .f2-track > .f2-bar:last-child { border-right: none; }
+#sec-6 .f2-empty    { background: transparent; }
+/* μ-batch tinting — saturation cue lines up the same μ-batch across GPU and PIM lanes */
+#sec-6 .f2-mb-prev  { filter: brightness(1.18) saturate(0.6); }
+#sec-6 .f2-mb-a     { /* default */ }
+#sec-6 .f2-mb-b     { filter: brightness(0.92) saturate(1.1); }
+#sec-6 .f2-mb-c     { filter: brightness(0.82) saturate(1.15); }
+#sec-6 .f2-tick-row {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  margin-top: 2px;
+}
+#sec-6 .f2-tick-row > .f2-tick:first-child,
+#sec-6 .f2-tick-row::before {
+  content: "";
+}
+#sec-6 .f2-tick-row {
+  display: flex;
+  align-items: center;
+}
+#sec-6 .f2-tick-row > .f2-tick {
+  flex: 1;
+  text-align: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  color: var(--color-subtle);
+}
+#sec-6 .f2-tick-row::before {
+  display: block;
+  width: 56px;
+  height: 1px;
+  flex-shrink: 0;
+}
+#sec-6 .f2-bracket {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--color-muted);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  text-align: center;
+  color: var(--color-muted);
+  line-height: 1.5;
+}
+#sec-6 .f2-bracket b { color: #111827; }
+#sec-6 .f2-bracket code { background: var(--color-soft); padding: 1px 5px; border-radius: 3px; color: #111827; }
+
+/* ---------- F3 Inter-instance pipeline ---------- */
+#sec-6 .f3-wrap { width: 100%; max-width: 620px; display: flex; align-items: center; gap: 12px; }
+#sec-6 .f3-inst {
+  flex: 1;
+  border-radius: 4px;
+  padding: 14px 12px;
+  text-align: center;
+}
+#sec-6 .f3-inst.a { background: var(--color-a-bg); border: 1px solid var(--color-a-border); }
+#sec-6 .f3-inst.b { background: var(--color-b-bg); border: 1px solid var(--color-b-border); }
+#sec-6 .f3-inst-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #111827;
+  margin-bottom: 4px;
+}
+#sec-6 .f3-inst-sub {
+  font-size: 10.5px;
+  color: var(--color-subtle);
+  margin-bottom: 10px;
+  font-family: 'JetBrains Mono', monospace;
+}
+#sec-6 .f3-mb {
+  display: inline-block;
+  padding: 5px 12px;
+  border-radius: 3px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: white;
+}
+#sec-6 .f3-mb.m   { background: var(--color-m); }
+#sec-6 .f3-mb.m-1 { background: var(--color-n); }
+#sec-6 .f3-link {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--color-subtle);
+}
+#sec-6 .f3-link-arrow { font-size: 18px; color: var(--color-kv); line-height: 1; }
+#sec-6 .f3-cycle {
+  text-align: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--color-muted);
+  margin-top: 12px;
+}
+#sec-6 .f3-cycle code { background: var(--color-soft); padding: 1px 5px; border-radius: 3px; }
+
+/* ---------- F5 Bubble removal — ragged handoff vs fixed-shape ---------- */
+#sec-6 .f5-wrap { width: 100%; max-width: 720px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+#sec-6 .f5-panel {
+  border: 1px solid var(--color-grid);
+  border-radius: 4px;
+  padding: 12px 11px;
+  background: var(--color-softer);
+}
+#sec-6 .f5-panel-title {
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--color-muted);
+  margin-bottom: 8px;
+  letter-spacing: 0.03em;
+}
+#sec-6 .f5-sublabel {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  color: var(--color-subtle);
+  margin: 6px 0 3px 0;
+  letter-spacing: 0.04em;
+}
+#sec-6 .f5-lane-row {
+  display: flex;
+  align-items: center;
+  margin: 3px 0;
+}
+#sec-6 .f5-lane-label {
+  width: 44px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  color: var(--color-muted);
+}
+#sec-6 .f5-track {
+  flex: 1;
+  height: 14px;
+  background: white;
+  border: 1px solid var(--color-grid);
+  border-radius: 2px;
+  overflow: hidden;
+  display: flex;
+}
+#sec-6 .f5-work     { height: 100%; background: var(--color-pim); }
+#sec-6 .f5-work.kv  { background: var(--color-kv); }
+#sec-6 .f5-work.gpu { background: var(--color-n); }
+#sec-6 .f5-bubble {
+  height: 100%;
+  background: repeating-linear-gradient(
+    45deg, #fecaca, #fecaca 4px, #fee2e2 4px, #fee2e2 8px
+  );
+}
+#sec-6 .f5-handoff {
+  margin: 6px 0;
+  padding: 5px 7px;
+  border-radius: 3px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  text-align: center;
+  border: 1px dashed var(--color-grid);
+  background: white;
+  color: var(--color-muted);
+}
+#sec-6 .f5-handoff.ragged b { color: #b91c1c; }
+#sec-6 .f5-handoff.uniform b { color: #166534; }
+#sec-6 .f5-shape {
+  display: inline-flex;
+  gap: 2px;
+  vertical-align: middle;
+  margin-left: 4px;
+}
+#sec-6 .f5-shape span {
+  display: inline-block;
+  width: 8px;
+  background: var(--color-kv);
+  border-radius: 1px;
+}
+#sec-6 .f5-shape.r span:nth-child(1) { height: 5px; }
+#sec-6 .f5-shape.r span:nth-child(2) { height: 11px; }
+#sec-6 .f5-shape.r span:nth-child(3) { height: 7px; }
+#sec-6 .f5-shape.u span { height: 9px; }
+#sec-6 .f5-panel-caption {
+  text-align: center;
+  margin-top: 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--color-muted);
+}
+#sec-6 .f5-panel-caption b { color: #111827; }
+
+/* ---------- Aux1 FFN weight pinning via instance disaggregation ---------- */
+#sec-6 .aux1-wrap { width: 100%; max-width: 720px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+#sec-6 .aux1-panel {
+  border: 1px solid var(--color-grid);
+  border-radius: 4px;
+  padding: 12px 11px;
+  background: var(--color-softer);
+}
+#sec-6 .aux1-panel-title {
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--color-muted);
+  margin-bottom: 10px;
+  letter-spacing: 0.03em;
+}
+#sec-6 .aux1-sublabel {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  color: var(--color-subtle);
+  margin: 8px 0 4px 0;
+  letter-spacing: 0.04em;
+}
+#sec-6 .aux1-mem {
+  background: white;
+  border: 1px solid var(--color-grid);
+  border-radius: 3px;
+  padding: 7px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+#sec-6 .aux1-mem.pinned { border-color: var(--color-pim); background: #fff7ed; box-shadow: inset 0 0 0 1px rgba(217,119,6,0.2); }
+#sec-6 .aux1-wslot {
+  display: flex;
+  align-items: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+}
+#sec-6 .aux1-wslot .tag {
+  display: inline-block;
+  width: 50px;
+  padding: 2px 0;
+  text-align: center;
+  border-radius: 2px;
+  font-weight: 700;
+  margin-right: 8px;
+  font-size: 9.5px;
+}
+#sec-6 .aux1-wslot.qkv .tag { background: var(--color-n-bg);  color: var(--color-n);  border: 1px solid var(--color-n); }
+#sec-6 .aux1-wslot.kv  .tag { background: var(--color-kv-bg); color: #166534;         border: 1px solid var(--color-kv); }
+#sec-6 .aux1-wslot.ffn .tag { background: var(--color-pim-bg);color: #92400e;         border: 1px solid var(--color-pim); }
+#sec-6 .aux1-wslot .note { color: var(--color-muted); font-size: 9.5px; }
+#sec-6 .aux1-wslot.struck .tag { opacity: 0.35; text-decoration: line-through; }
+#sec-6 .aux1-wslot.struck .note { opacity: 0.45; }
+#sec-6 .aux1-cycle {
+  display: flex;
+  gap: 3px;
+  flex-wrap: wrap;
+  background: white;
+  border: 1px solid var(--color-grid);
+  border-radius: 3px;
+  padding: 6px;
+  align-items: center;
+}
+#sec-6 .aux1-load-pill {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 2px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 700;
+}
+#sec-6 .aux1-load-pill.qkv { background: var(--color-n-bg);  color: var(--color-n);  border: 1px solid var(--color-n); }
+#sec-6 .aux1-load-pill.kv  { background: var(--color-kv-bg); color: #166534;         border: 1px solid var(--color-kv); }
+#sec-6 .aux1-load-pill.ffn { background: var(--color-pim-bg);color: #92400e;         border: 1px solid var(--color-pim); }
+#sec-6 .aux1-load-pill.ffn.amortized { background: var(--color-pim); color: white; }
+#sec-6 .aux1-arrow-thin { color: var(--color-subtle); font-size: 10px; font-family: 'JetBrains Mono', monospace; }
+#sec-6 .aux1-cycle-cap {
+  margin-top: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  text-align: center;
+  color: var(--color-muted);
+}
+#sec-6 .aux1-cycle-cap b { color: #111827; }
+#sec-6 .aux1-panel-caption {
+  text-align: center;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--color-grid);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--color-muted);
+}
+#sec-6 .aux1-panel-caption b { color: #111827; }
+#sec-6 .aux1-panel-caption .good { color: #166534; }
+
+/* ---------- Aux2 Three bus reductions (decode regime) ---------- */
+#sec-6 .aux2-wrap { width: 100%; max-width: 720px; }
+#sec-6 .aux2-regime {
+  text-align: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--color-pim);
+  letter-spacing: 0.05em;
+  margin-bottom: 12px;
+  font-weight: 700;
+}
+#sec-6 .aux2-row {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--color-grid);
+}
+#sec-6 .aux2-row:last-child { border-bottom: none; }
+#sec-6 .aux2-row-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--color-text);
+  font-weight: 600;
+  line-height: 1.4;
+}
+#sec-6 .aux2-row-label .num {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  background: var(--color-pim);
+  color: white;
+  font-weight: 700;
+  font-size: 10.5px;
+  text-align: center;
+  line-height: 18px;
+  margin-right: 6px;
+}
+#sec-6 .aux2-row-label .sub {
+  display: block;
+  font-size: 9.5px;
+  color: var(--color-subtle);
+  font-weight: 500;
+  margin-top: 2px;
+  margin-left: 24px;
+}
+#sec-6 .aux2-compare {
+  display: grid;
+  grid-template-columns: 60px 1fr 70px;
+  gap: 6px;
+  align-items: center;
+  margin: 3px 0;
+}
+#sec-6 .aux2-cmp-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  color: var(--color-muted);
+  text-align: right;
+}
+#sec-6 .aux2-cmp-bar {
+  position: relative;
+  height: 16px;
+  background: var(--color-softer);
+  border-radius: 2px;
+  border: 1px solid var(--color-grid);
+  overflow: hidden;
+}
+#sec-6 .aux2-cmp-fill {
+  position: absolute;
+  top: 0; bottom: 0; left: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 5px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  color: white;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1;
+}
+#sec-6 .aux2-cmp-fill.baseline { background: #b91c1c; }
+#sec-6 .aux2-cmp-fill.puls     { background: #166534; }
+#sec-6 .aux2-cmp-fill.zero     { background: transparent; color: #166534; font-style: italic; padding-left: 5px; }
+#sec-6 .aux2-cmp-tag {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  color: #166534;
+}
+#sec-6 .aux2-cmp-tag.bad { color: #b91c1c; }
+#sec-6 .aux2-caption {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--color-grid);
+  text-align: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--color-muted);
+}
+#sec-6 .aux2-caption b { color: #111827; }
+#sec-6 .aux2-caption .good { color: #166534; font-weight: 700; }
+
+/* ---------- F4 absorption note ---------- */
+#sec-6 .f4-card {
+  border: 1px dashed var(--color-border);
+  background: var(--color-softer);
+  border-radius: 5px;
+  padding: 14px 18px;
+  margin: 18px 0;
+  font-size: 12.5px;
+  color: var(--color-muted);
+  line-height: 1.6;
+}
+#sec-6 .f4-card .f4-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+#sec-6 .f4-card b { color: #111827; }
+
+/* ============================ §7 Results ============================ */
+
+#sec-7 .result-block {
+  margin: 22px 0;
+}
+
+#sec-7 .result-block-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #111827;
+  margin: 0 0 10px 0;
+  letter-spacing: -0.01em;
+}
+
+#sec-7 table.result-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+#sec-7 table.result-table th,
+#sec-7 table.result-table td {
+  text-align: left;
+  padding: 7px 9px;
+  border: 1px solid var(--color-grid);
+  vertical-align: top;
+}
+#sec-7 table.result-table th {
+  background: var(--color-soft);
+  font-weight: 600;
+  font-size: 11.5px;
+}
+#sec-7 table.result-table td .mono,
+#sec-7 table.result-table td code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: #1f2937;
+}
+#sec-7 .source-id-cell {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 700;
+  color: var(--color-pim);
+}
+#sec-7 .status-cal { color: #166534; font-weight: 700; font-family: 'JetBrains Mono', monospace; font-size: 10.5px; }
+#sec-7 .status-def { color: #92400e; font-weight: 700; font-family: 'JetBrains Mono', monospace; font-size: 10.5px; }
+#sec-7 .status-abs { color: #4b5563; font-weight: 700; font-family: 'JetBrains Mono', monospace; font-size: 10.5px; }
+
+/* Aggregate bars */
+#sec-7 .agg-row {
+  display: grid;
+  grid-template-columns: 130px 1fr 1fr 90px;
+  gap: 10px;
+  align-items: center;
+  margin: 6px 0;
+  font-size: 12px;
+}
+#sec-7 .agg-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11.5px;
+  color: var(--color-muted);
+}
+#sec-7 .agg-bar-cell {
+  position: relative;
+  height: 22px;
+  background: var(--color-softer);
+  border-radius: 2px;
+  border: 1px solid var(--color-grid);
+}
+#sec-7 .agg-bar {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 5px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: white;
+  font-weight: 700;
+  border-radius: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1;
+}
+#sec-7 .agg-baseline-bar { background: #b91c1c; }
+#sec-7 .agg-puls-bar { background: #166534; }
+#sec-7 .agg-saving {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: right;
+  color: #166534;
+}
+#sec-7 .agg-total-row {
+  border-top: 1px solid var(--color-border);
+  padding-top: 8px;
+  margin-top: 10px;
+}
+#sec-7 .agg-total-row .agg-label,
+#sec-7 .agg-total-row .agg-saving { font-weight: 800; color: #111827; }
+
+#sec-7 .disclosure-row {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--color-grid);
+  font-size: 12px;
+}
+#sec-7 .disclosure-row:last-child { border-bottom: none; }
+#sec-7 .disclosure-key {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-pim);
+}
+#sec-7 .disclosure-val {
+  color: var(--color-muted);
+  line-height: 1.5;
+}
+#sec-7 .disclosure-val b { color: #111827; }
+
 /* ============================ Responsive (basic) ============================ */
 @media (max-width: 900px) {
   .layout { grid-template-columns: 1fr; }
@@ -835,6 +1611,8 @@ pre.code-block .var { color: #f9a8d4; }
       <li><a data-target="sec-3"><span class="nav-num">3</span>Scheduler Usage</a></li>
       <li><a data-target="sec-4"><span class="nav-num">4</span>Adaptive Admission</a></li>
       <li><a data-target="sec-5"><span class="nav-num">5</span>Example Dispatch Trace</a></li>
+      <li><a data-target="sec-6"><span class="nav-num">6</span>Acceleration Sources</a></li>
+      <li><a data-target="sec-7"><span class="nav-num">7</span>Results</a></li>
     </ul>
     <div class="sidebar-footer">
       Canonical text:
@@ -1311,12 +2089,432 @@ pre.code-block .var { color: #f9a8d4; }
       </div>
     </section>
 
+    <!-- ======== Section 6: Acceleration Sources ======== -->
+    <section id="sec-6" class="doc-section">
+      <div class="section-header">
+        <div class="section-eyebrow">§ 5.7 — SOURCE DECOMPOSITION</div>
+        <h1 class="section-title">Acceleration Sources</h1>
+        <div class="section-lede">Five op-/systems-level sources (<b>F1–F5</b>) and two derived effects (<b>Aux1, Aux2</b>) account for PULS's end-to-end speedup. Each card shows the mechanism schematic, a one-line headline, and the calibration status; full numerical breakdown is in <b>§7 Results</b>.</div>
+      </div>
+
+      <!-- F1 SP-PIM -->
+      <div class="source-card">
+        <div class="source-card-header">
+          <span class="source-id">F1</span>
+          <span class="source-name">SP-PIM Attention</span>
+          <span class="source-badge deferred">Impl-11 Deferred</span>
+          <span class="source-headline">2048-channel cooperative</span>
+        </div>
+        <div class="source-figure">
+          <div class="f1-wrap">
+            <div class="fig-title">Q-replicate broadcast → 32-channel lock-step (per HBM stack)</div>
+            <div style="text-align:center;"><div class="f1-q">Q vector</div></div>
+            <div class="f1-broadcast">▼ broadcast to all channels ▼</div>
+            <div class="f1-grid">
+              <div class="f1-ch">ch0<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch1<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch2<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch3<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch4<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch5<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch6<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch7<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch8<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch9<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch10<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch11<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch12<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch13<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch14<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch15<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch16<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch17<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch18<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch19<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch20<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch21<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch22<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch23<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch24<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch25<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch26<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch27<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch28<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch29<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch30<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+              <div class="f1-ch">ch31<span class="kv-row"></span><span class="kv-row"></span><span class="kv-row"></span></div>
+            </div>
+            <div class="f1-scale">32 channels / stack &nbsp;×&nbsp; 8 stacks / GPU &nbsp;×&nbsp; 8 GPU &nbsp;=&nbsp; <b>2048 channels aggregate</b></div>
+          </div>
+        </div>
+        <div class="source-mechanism">
+          The same <b>Q vector</b> is broadcast to every channel in lock-step; each channel sweeps its own KV-row slice independently inside the HBM4 logic-die SFU. With 2048 channels cooperating across 8 GPUs, a single attention operation is parallelized at sequence-row granularity rather than head granularity — bypassing the GPU's external HBM bandwidth ceiling by a factor of <code>1 / η_HBM</code>.
+        </div>
+      </div>
+
+      <!-- F2 Double-buffer -->
+      <div class="source-card">
+        <div class="source-card-header">
+          <span class="source-id">F2</span>
+          <span class="source-name">Projection ‖ PIM Double-Buffer</span>
+          <span class="source-badge deferred">Impl-11 Deferred</span>
+          <span class="source-headline">A_cycle = max(t_proj, t_attn)</span>
+        </div>
+        <div class="source-figure">
+          <div class="xref-card">
+            <div class="xref-eyebrow">SHOWN IN ACTION</div>
+            <div class="xref-body">
+              The double-buffer pattern emerges naturally in <b>§5 Example Dispatch Trace</b> — back-fill at <b>Init</b> and <b>T3</b> shows GPU and PIM concurrently dispatched on different μ-batches without any explicit lookahead policy.
+            </div>
+            <a class="xref-btn" data-target="sec-5" href="#sec-5">→ Go to §5 Example Dispatch Trace</a>
+          </div>
+        </div>
+        <div class="source-mechanism">
+          In steady state both lanes are <b>fully loaded</b>: GPU runs QKV of μ-batch <b>M+i</b> while PIM runs decode-attn of μ-batch <b>M+i&minus;1</b>, with no idle gap on either side. Channel separation (KV-cache channels vs weight-streaming channels) eliminates HBM-bus contention. The per-μ-batch cycle drops from <code>t_proj + t_attn</code> to <code>max(t_proj, t_attn)</code> — and over a long staggered stream, the slower of the two becomes the steady-state cadence.
+        </div>
+      </div>
+
+      <!-- F3 Inter-instance pipeline -->
+      <div class="source-card">
+        <div class="source-card-header">
+          <span class="source-id">F3</span>
+          <span class="source-name">Inter-Instance A↔B Pipeline</span>
+          <span class="source-badge calibrated">Calibrated</span>
+          <span class="source-headline">0.5933 measured (near-balance)</span>
+        </div>
+        <div class="source-figure">
+          <div class="f3-wrap">
+            <div class="f3-inst a">
+              <div class="f3-inst-label">Instance A</div>
+              <div class="f3-inst-sub">attention + projection</div>
+              <div class="f3-mb m">μ-batch M</div>
+            </div>
+            <div class="f3-link">
+              <div>NVLink</div>
+              <div class="f3-link-arrow">⇌</div>
+              <div>[B × hidden]</div>
+            </div>
+            <div class="f3-inst b">
+              <div class="f3-inst-label">Instance B</div>
+              <div class="f3-inst-sub">FFN</div>
+              <div class="f3-mb m-1">μ-batch M-1</div>
+            </div>
+          </div>
+        </div>
+        <div class="source-mechanism">
+          In steady state, Instance A processes μ-batch <b>M</b> (attention + projection) while Instance B processes μ-batch <b>M-1</b> (FFN) — the two instances handle <i>different</i> μ-batches at the same wall-clock instant. The per-layer effective time drops from <code>t_A + t_B</code> to <code>max(t_A, t_B)</code>. The <b>0.5933 measured ratio</b> on a long-ctx trace (perfect balance = 0.50) confirms both instances actively contribute.
+        </div>
+      </div>
+
+      <!-- F4 absorption note -->
+      <div class="f4-card">
+        <div class="f4-header">
+          <span class="source-id">F4</span>
+          <span class="source-name">μ-batch Staggering</span>
+          <span class="source-badge absorbed">Absorbed</span>
+        </div>
+        <p style="margin:6px 0 0 0;">
+          μ-batch staggering is the <b>steady-state precondition</b> under which F2 and F3 hold — without staggered μ-batch arrivals, neither double-buffering (F2) nor the inter-instance pipeline (F3) would reach the overlap regime. F4 is therefore not an independent additive factor; its effect is <b>already contained inside F2·F3 measurements</b>. No separate figure. (ARCH §5.7)
+        </p>
+      </div>
+
+      <!-- F5 Bubble removal -->
+      <div class="source-card">
+        <div class="source-card-header">
+          <span class="source-id">F5</span>
+          <span class="source-name">Channel-Independent Scheduling</span>
+          <span class="source-badge calibrated">Calibrated</span>
+          <span class="source-headline">5.15× speedup (trace-grounded)</span>
+        </div>
+        <div class="source-figure">
+          <div class="f5-wrap">
+            <!-- LEFT: ragged handoff → Instance B bubbles -->
+            <div class="f5-panel">
+              <div class="f5-panel-title">Lock-step baseline — ragged handoff</div>
+              <div class="f5-sublabel">INSTANCE A · attention (per-req KV variance)</div>
+              <div class="f5-lane-row"><div class="f5-lane-label">req A (47K)</div><div class="f5-track"><div class="f5-work" style="width:18%;"></div><div class="f5-bubble" style="width:82%;"></div></div></div>
+              <div class="f5-lane-row"><div class="f5-lane-label">req B (280K)</div><div class="f5-track"><div class="f5-work" style="width:100%;"></div></div></div>
+              <div class="f5-lane-row"><div class="f5-lane-label">req C (81K)</div><div class="f5-track"><div class="f5-work" style="width:30%;"></div><div class="f5-bubble" style="width:70%;"></div></div></div>
+              <div class="f5-handoff ragged">
+                handoff shape: <b>ragged</b>
+                <span class="f5-shape r"><span></span><span></span><span></span></span>
+                &nbsp; — Instance B must wait
+              </div>
+              <div class="f5-sublabel">INSTANCE B · FFN</div>
+              <div class="f5-lane-row"><div class="f5-lane-label">B (FFN)</div><div class="f5-track"><div class="f5-bubble" style="width:100%;"></div></div></div>
+              <div class="f5-panel-caption"><b>Bubble</b> until max-KV req (B) finishes</div>
+            </div>
+
+            <!-- RIGHT: fixed-shape handoff → no bubble -->
+            <div class="f5-panel">
+              <div class="f5-panel-title">PULS — fixed-shape handoff</div>
+              <div class="f5-sublabel">INSTANCE A · attention (PIM absorbs variance)</div>
+              <div class="f5-lane-row"><div class="f5-lane-label">req A (47K)</div><div class="f5-track"><div class="f5-work" style="width:42%;"></div></div></div>
+              <div class="f5-lane-row"><div class="f5-lane-label">req B (280K)</div><div class="f5-track"><div class="f5-work" style="width:42%;"></div></div></div>
+              <div class="f5-lane-row"><div class="f5-lane-label">req C (81K)</div><div class="f5-track"><div class="f5-work" style="width:42%;"></div></div></div>
+              <div class="f5-handoff uniform">
+                handoff shape: <b>[B × hidden]</b>
+                <span class="f5-shape u"><span></span><span></span><span></span></span>
+                &nbsp; — uniform, no straggler
+              </div>
+              <div class="f5-sublabel">INSTANCE B · FFN</div>
+              <div class="f5-lane-row"><div class="f5-lane-label">B (FFN)</div><div class="f5-track"><div class="f5-work gpu" style="width:42%;"></div></div></div>
+              <div class="f5-panel-caption">Instance B starts <b>immediately</b> — no bubble</div>
+            </div>
+          </div>
+        </div>
+        <div class="source-mechanism">
+          In a multi-request decode batch, per-request KV length varies (e.g. <code>47K · 280K · 81K</code>) → attention output is <b>ragged</b>, and Instance B sits idle until the longest-KV straggler finishes. PULS lets each SP-PIM channel sweep its own KV slice independently, so all requests complete attention at the same wall-clock tick. Instance B always receives a <b>fixed-shape <code>[B × hidden]</code> tensor</b> and runs immediately. Bubble eliminated; speedup equals the trace's <code>max/mean KV ratio</code> — <b>5.15×</b> on LongBench λ=3.40 (10 req).
+        </div>
+      </div>
+
+      <!-- Aux1 Mixed batch -->
+      <div class="source-card">
+        <div class="source-card-header">
+          <span class="source-id">Aux1</span>
+          <span class="source-name">Mixed Batching Weight Reuse</span>
+          <span class="source-badge calibrated">Calibrated</span>
+          <span class="source-headline">2.0× (closed-form) / 1.97× (T4)</span>
+        </div>
+        <div class="source-figure">
+          <div class="aux1-wrap">
+            <!-- LEFT: baseline single instance — weight cache thrash -->
+            <div class="aux1-panel">
+              <div class="aux1-panel-title">Baseline — single instance, weight thrash</div>
+              <div class="aux1-sublabel">GPU MEMORY HOLDS (all 3 weight types)</div>
+              <div class="aux1-mem">
+                <div class="aux1-wslot qkv"><span class="tag">QKV</span><span class="note">projection weights</span></div>
+                <div class="aux1-wslot kv"><span class="tag">KV</span><span class="note">cache (grows with ctx)</span></div>
+                <div class="aux1-wslot ffn"><span class="tag">FFN</span><span class="note">gate / up / down weights</span></div>
+              </div>
+              <div class="aux1-sublabel">PER-LAYER WEIGHT-STREAMING SEQUENCE</div>
+              <div class="aux1-cycle">
+                <span class="aux1-load-pill qkv">QKV</span>
+                <span class="aux1-arrow-thin">→</span>
+                <span class="aux1-load-pill kv">KV</span>
+                <span class="aux1-arrow-thin">→</span>
+                <span class="aux1-load-pill ffn">FFN</span>
+                <span class="aux1-arrow-thin">→</span>
+                <span class="aux1-load-pill qkv">QKV</span>
+                <span class="aux1-arrow-thin">→</span>
+                <span class="aux1-load-pill kv">KV</span>
+                <span class="aux1-arrow-thin">→</span>
+                <span class="aux1-load-pill ffn">FFN</span>
+                <span class="aux1-arrow-thin">…</span>
+              </div>
+              <div class="aux1-cycle-cap">FFN weights re-streamed <b>once per layer × per batch-type</b></div>
+              <div class="aux1-panel-caption">prefill batch + decode batch run separately → <b>2× FFN weight loads</b></div>
+            </div>
+
+            <!-- RIGHT: PULS instance B FFN-only pinned + mixed batch -->
+            <div class="aux1-panel">
+              <div class="aux1-panel-title">PULS Instance B — FFN-only, mixed batch</div>
+              <div class="aux1-sublabel">INSTANCE B MEMORY HOLDS (FFN only)</div>
+              <div class="aux1-mem pinned">
+                <div class="aux1-wslot qkv struck"><span class="tag">QKV</span><span class="note">→ stays in Instance A</span></div>
+                <div class="aux1-wslot kv struck"><span class="tag">KV</span><span class="note">→ stays in Instance A (PIM)</span></div>
+                <div class="aux1-wslot ffn"><span class="tag">FFN</span><span class="note"><b>pinned</b> — no swap-out</span></div>
+              </div>
+              <div class="aux1-sublabel">PER-LAYER FFN-STREAMING (single mixed batch)</div>
+              <div class="aux1-cycle">
+                <span class="aux1-load-pill ffn amortized">FFN (prefill + decode)</span>
+                <span class="aux1-arrow-thin">→</span>
+                <span class="aux1-load-pill ffn amortized">FFN (prefill + decode)</span>
+                <span class="aux1-arrow-thin">→</span>
+                <span class="aux1-load-pill ffn amortized">FFN (prefill + decode)</span>
+                <span class="aux1-arrow-thin">…</span>
+              </div>
+              <div class="aux1-cycle-cap">1 FFN load amortized over <b>prefill + decode tokens</b> simultaneously</div>
+              <div class="aux1-panel-caption"><span class="good">Arithmetic intensity ↑</span> → weight-streaming time halved (memory-bound regime)</div>
+            </div>
+          </div>
+        </div>
+        <div class="source-mechanism">
+          Instance disaggregation pins <b>FFN weights only</b> inside Instance B's memory — QKV / KV never enter B, so no weight-cache thrash. With PIM absorbing the variable-length attention, prefill chunks and decode tokens coexist in a single mixed μ-batch and share the same FFN weight load. Token denominator of FFN bus traffic grows → <b>arithmetic intensity rises</b>. <b>Colab T4 microbench confirms 1.97×</b> against a 2.0× closed-form ceiling.
+        </div>
+      </div>
+
+      <!-- Aux2 Bus reduction -->
+      <div class="source-card">
+        <div class="source-card-header">
+          <span class="source-id">Aux2</span>
+          <span class="source-name">KV Bus Traffic Reduction</span>
+          <span class="source-badge calibrated">Calibrated</span>
+          <span class="source-headline">4.95× / 79.8% reduction</span>
+        </div>
+        <div class="source-figure">
+          <div class="aux2-wrap">
+            <div class="aux2-regime">DECODE REGIME — three bus paths simultaneously reduced</div>
+
+            <!-- (1) KV bus in Instance A -->
+            <div class="aux2-row">
+              <div class="aux2-row-label">
+                <span class="num">1</span>KV bus
+                <span class="sub">Instance A · HBM ↔ GPU during decode-attn</span>
+              </div>
+              <div>
+                <div class="aux2-compare">
+                  <div class="aux2-cmp-label">baseline</div>
+                  <div class="aux2-cmp-bar"><div class="aux2-cmp-fill baseline" style="width:100%;">ctx × B bytes</div></div>
+                  <div class="aux2-cmp-tag bad">heavy</div>
+                </div>
+                <div class="aux2-compare">
+                  <div class="aux2-cmp-label">PULS</div>
+                  <div class="aux2-cmp-bar"><div class="aux2-cmp-fill zero" style="width:100%;">⟲ KV stays inside HBM (PIM in-die)</div></div>
+                  <div class="aux2-cmp-tag">eliminated</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- (2) FFN weight bus in Instance B -->
+            <div class="aux2-row">
+              <div class="aux2-row-label">
+                <span class="num">2</span>FFN weight bus
+                <span class="sub">Instance B · FFN weight streaming per layer</span>
+              </div>
+              <div>
+                <div class="aux2-compare">
+                  <div class="aux2-cmp-label">baseline</div>
+                  <div class="aux2-cmp-bar"><div class="aux2-cmp-fill baseline" style="width:80%;">FFN × 2 (prefill + decode separately)</div></div>
+                  <div class="aux2-cmp-tag bad">2× load</div>
+                </div>
+                <div class="aux2-compare">
+                  <div class="aux2-cmp-label">PULS</div>
+                  <div class="aux2-cmp-bar"><div class="aux2-cmp-fill puls" style="width:40%;">FFN × 1 (pinned)</div></div>
+                  <div class="aux2-cmp-tag">−50%</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- (3) Inter-instance bus -->
+            <div class="aux2-row">
+              <div class="aux2-row-label">
+                <span class="num">3</span>Inter-instance bus
+                <span class="sub">A ↔ B · NVLink handoff per layer</span>
+              </div>
+              <div>
+                <div class="aux2-compare">
+                  <div class="aux2-cmp-label">baseline</div>
+                  <div class="aux2-cmp-bar"><div class="aux2-cmp-fill baseline" style="width:95%;">KV transfer (if naively split)</div></div>
+                  <div class="aux2-cmp-tag bad">prohibitive</div>
+                </div>
+                <div class="aux2-compare">
+                  <div class="aux2-cmp-label">PULS</div>
+                  <div class="aux2-cmp-bar"><div class="aux2-cmp-fill puls" style="width:12%;">[B×h]</div></div>
+                  <div class="aux2-cmp-tag">small</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="aux2-caption">
+              Total HBM bus traffic in the decode regime: <b>−79.8%</b> reduction, <span class="good">4.95× speedup</span> · long-ctx alone reaches <b>−81% (5.3×)</b>.
+            </div>
+          </div>
+        </div>
+        <div class="source-mechanism">
+          In the <b>decode regime</b>, PULS reduces three bus paths simultaneously: (1) the <b>KV bus</b> inside Instance A is eliminated because PIM processes attention on the HBM4 logic die; (2) the <b>FFN weight bus</b> inside Instance B halves because the mixed batch amortizes one FFN load over prefill + decode tokens; (3) the <b>inter-instance bus</b> carries only the fixed-shape <code>[B × hidden]</code> tensor — KV never crosses. <b>Calibrated 79.8% reduction</b> on LongBench λ=3.40 (10 req); long-ctx alone reaches <b>81%, 5.3×</b>.
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== Section 7: Results ======== -->
+    <section id="sec-7" class="doc-section">
+      <div class="section-header">
+        <div class="section-eyebrow">§ 5.7 — QUANTITATIVE PROJECTION</div>
+        <h1 class="section-title">Results</h1>
+        <div class="section-lede">Calibrated projection on Llama-3 70B + DGX B200 + HBM4 hypothetical substrate, plus a runtime validation pass on a long-context LongBench trace. Absolute metrics (TTFT, TPOT, throughput) are out of scope — silicon absent.</div>
+      </div>
+
+      <div class="result-block">
+        <h3 class="result-block-title">Per-source breakdown</h3>
+        <table class="result-table">
+          <thead>
+            <tr><th>ID</th><th>Source</th><th>Status</th><th>Number</th><th>Provenance</th></tr>
+          </thead>
+          <tbody>
+            <tr><td class="source-id-cell">F1</td><td>SP-PIM attention (2048-ch Q-replicate)</td><td><span class="status-def">Deferred</span></td><td class="mono">—</td><td>Impl-11 (Blackwell attn kernel calibration)</td></tr>
+            <tr><td class="source-id-cell">F2</td><td>Projection ‖ PIM double-buffering</td><td><span class="status-def">Deferred</span></td><td class="mono">—</td><td>Impl-11 (isolated cycle ratio)</td></tr>
+            <tr><td class="source-id-cell">F3</td><td>Inter-instance A↔B pipeline</td><td><span class="status-cal">Calibrated</span></td><td class="mono">0.5933 measured / 0.9964 closed-form</td><td>run.loop measured vs closed-form ctx sweep</td></tr>
+            <tr><td class="source-id-cell">F4</td><td>μ-batch staggering</td><td><span class="status-abs">Absorbed</span></td><td class="mono">—</td><td>Precondition for F2·F3; contained in their measurements</td></tr>
+            <tr><td class="source-id-cell">F5</td><td>Channel-independent vs lock-step</td><td><span class="status-cal">Calibrated</span></td><td class="mono">5.15× speedup</td><td>LongBench λ=3.40, 10-req sum trace-grounded</td></tr>
+            <tr><td class="source-id-cell">Aux1</td><td>Mixed batching weight reuse</td><td><span class="status-cal">Calibrated</span></td><td class="mono">2.0× closed-form · 1.97× T4 measured</td><td>Llama-3 70B FFN single-layer, Colab T4</td></tr>
+            <tr><td class="source-id-cell">Aux2</td><td>KV bus traffic reduction</td><td><span class="status-cal">Calibrated</span></td><td class="mono">4.95× speedup · 79.8% reduction</td><td>LongBench λ=3.40, 10-req sum closed-form</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="result-block">
+        <h3 class="result-block-title">Aggregate breakdown</h3>
+        <div class="agg-row">
+          <div class="agg-label">Weight streaming</div>
+          <div class="agg-bar-cell"><div class="agg-bar agg-baseline-bar" style="width:35%;">2.89 ms</div></div>
+          <div class="agg-bar-cell"><div class="agg-bar agg-puls-bar" style="width:17.5%;">1.45 ms</div></div>
+          <div class="agg-saving">−1.45 ms (Aux1)</div>
+        </div>
+        <div class="agg-row">
+          <div class="agg-label">KV bus traffic</div>
+          <div class="agg-bar-cell"><div class="agg-bar agg-baseline-bar" style="width:100%;">8.25 ms</div></div>
+          <div class="agg-bar-cell"><div class="agg-bar agg-puls-bar" style="width:20.2%;">1.67 ms</div></div>
+          <div class="agg-saving">−6.59 ms (Aux2)</div>
+        </div>
+        <div class="agg-row agg-total-row">
+          <div class="agg-label">Total (weight + bus)</div>
+          <div class="agg-bar-cell"><div class="agg-bar agg-baseline-bar" style="width:100%;">11.14 ms</div></div>
+          <div class="agg-bar-cell"><div class="agg-bar agg-puls-bar" style="width:28%;">3.12 ms</div></div>
+          <div class="agg-saving">−8.04 ms (72.2%)</div>
+        </div>
+        <p style="margin-top:14px; font-size:12.5px; color:var(--color-muted); line-height:1.55;">
+          <b>Net speedup:</b> <code>11.14 / 3.12 = 3.57×</code> (closed-form, weight + bus) → <b>4–5×</b> per forward pass when F5 channel-independent scheduling is composed in the long-ctx multi-request regime.
+        </p>
+      </div>
+
+      <div class="result-block">
+        <h3 class="result-block-title">Runtime validation — LongBench λ=3.40, first 3 requests</h3>
+        <p style="font-size:12.5px; color:var(--color-muted); margin: 6px 0 12px 0;">
+          Prompts <code>47K + 280K + 81K = 408,148 tokens</code>; decode budget 350/req. End-to-end <code>Run.loop</code>, single-task, 50.87 s simulated clock, 15.26 M admission ticks, 5.4 min wall.
+        </p>
+        <table class="result-table">
+          <thead><tr><th>Slot</th><th>Active (s)</th><th>Idle</th><th>Interpretation</th></tr></thead>
+          <tbody>
+            <tr><td>GPU Instance A</td><td class="mono">50.82</td><td class="mono">0.10%</td><td>99.9% busy — prefill GEMM dominates the long-ctx regime</td></tr>
+            <tr><td>PIM Instance A</td><td class="mono">0.17</td><td class="mono">99.66%</td><td>Decode tokens scarce (350/req) → PIM under-driven in this prefill-heavy trace. Mechanism intact (verified by Impl-2/Impl-8 synthetic stress)</td></tr>
+            <tr><td>GPU Instance B</td><td class="mono">34.95</td><td class="mono">31.30%</td><td>A-bound branch active (ARCH §6.4) — Instance B idle is the intended diagnosis, not a balance failure</td></tr>
+          </tbody>
+        </table>
+        <table class="result-table" style="margin-top:14px;">
+          <thead><tr><th>Convergence</th><th>Value</th><th>F3 cross-validate</th><th>Value</th></tr></thead>
+          <tbody>
+            <tr><td>converged</td><td class="mono">True</td><td>closed-form ratio</td><td class="mono">0.9964</td></tr>
+            <tr><td>oscillating</td><td class="mono">False</td><td>measured ratio</td><td class="mono"><b>0.5933</b></td></tr>
+            <tr><td>in_band_fraction</td><td class="mono">98.70%</td><td>abs_diff</td><td class="mono">0.4031</td></tr>
+            <tr><td>samples</td><td class="mono">15,261,787</td><td>regime</td><td>near-balance</td></tr>
+          </tbody>
+        </table>
+        <p style="margin-top:12px; font-size:12.5px; color:var(--color-muted); line-height:1.55;">
+          The deadband held over 15M+ admission ticks without oscillation. <b>F3 measured 0.5933 ≈ near-balance</b> (perfect = 0.50) quantitatively proves the inter-instance pipeline mechanism is active; the gap from the idealized single-μ-batch closed-form (0.9964) reflects the multi-μ-batch steady-state cycle averaging.
+        </p>
+      </div>
+
+      <div class="result-block">
+        <h3 class="result-block-title">Honest disclosure</h3>
+        <div class="disclosure-row"><div class="disclosure-key">F1 deferred</div><div class="disclosure-val">Requires <b>Blackwell GPU attention kernel calibration</b> for the GPU-side decode-attn baseline. No projected number is included in the aggregate above — only what is closed-form / measured.</div></div>
+        <div class="disclosure-row"><div class="disclosure-key">F2 deferred</div><div class="disclosure-val">Isolated cycle ratio quantification deferred. Mechanism validated structurally (Impl-5 stress tests); quantitative contribution not yet calibrated.</div></div>
+        <div class="disclosure-row"><div class="disclosure-key">F4 absorbed</div><div class="disclosure-val">μ-batch staggering is the steady-state precondition for F2·F3. Its effect is already contained inside their measurements — not an independent additive factor.</div></div>
+        <div class="disclosure-row"><div class="disclosure-key">HBM4 substrate</div><div class="disclosure-val">Hypothetical projection — current production absent. JEDEC JESD270-4A spec + Ramulator2-based cycle-accurate measurements as references.</div></div>
+        <div class="disclosure-row"><div class="disclosure-key">η_HBM_external</div><div class="disclosure-val">0.74 fix + sweep {0.70, 0.74, 0.80}. H100 HBM3 measurement extended to HBM4 (Framing A).</div></div>
+        <div class="disclosure-row"><div class="disclosure-key">RTL substrate</div><div class="disclosure-val">Open-source flow only (Yosys + ASAP7 + OpenSTA pre-CTS). Not commercial signoff.</div></div>
+        <div class="disclosure-row"><div class="disclosure-key">Comparative baseline</div><div class="disclosure-val">vLLM / Sarathi-Serve — not compared in this RFC.</div></div>
+        <div class="disclosure-row"><div class="disclosure-key">Absolute metrics</div><div class="disclosure-val">TTFT, TPOT, throughput, SLO goodput — to be derived in a later calibration pass.</div></div>
+      </div>
+    </section>
+
   </main>
 </div>
 
 <script>
 (function() {
   const navLinks = document.querySelectorAll('.nav a[data-target]');
+  const allTargets = document.querySelectorAll('a[data-target]');
   const sections = document.querySelectorAll('section.doc-section');
 
   function show(targetId) {
@@ -1328,7 +2526,8 @@ pre.code-block .var { color: #f9a8d4; }
     if (history.replaceState) history.replaceState(null, '', '#' + targetId);
   }
 
-  navLinks.forEach(a => {
+  // Bind both sidebar nav and in-content xref links
+  allTargets.forEach(a => {
     a.addEventListener('click', e => {
       e.preventDefault();
       show(a.dataset.target);
