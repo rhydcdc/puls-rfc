@@ -120,10 +120,58 @@ balance 4-factor 발현의 무대(동시 다중 mb) 자체가 형성되지 않�
 staggering 불가(window 무용) + 합류 불가(큐 적체분이 기존 mb 에도, 새 mb 에도 못 들어감)
 가 단일 근본 원인 — **"한 tick = 캐파까지 한 mb"** 정책 — 에서 동시 발생.
 
-## 8. 다음 단계
+## 7b. 직렬 처리 확증 (prove_serial_fast.py)
 
-- 수정의 1차 타깃 = **mb 당 배치 크기 상한** (admission 이 한 mb 에 몰아넣지 않도록).
-  동시 다중 mb 형성이 balance·staggering·합류의 공통 선결 조건.
-- 그 위에서 (2차) 신규 요청의 in-flight 합류 경로.
-- 수정 후 trace_long_pressure 재실행하여 mb 다중화·idle 변화 측정.
-- 최종 검증은 풀 3종(T-S/T-L/T-M)으로: T-S 대조군 idle 불변, T-L/T-M idle 감소.
+"새 mb 가 영원히 안 생기는가, 아니면 직렬 대기인가" 를 판별. 가속 위해 KV 캐파만
+200K 로 축소(`config_small_cap.py`), tiny 트레이스(5 req × 60K, decode=2)로 완주.
+
+```
+완전 drain: True, 총 step: 7,416,591
+총 mb 생성 수: 2
+동시 최대 window: 1 / capacity 3        (한 번도 2개 공존 안 함)
+
+mb register 이력:
+  ts=10.1         mb=0  reqs=[0,1,2]  window=0   (캐파 200K 에 3 req=180K admit)
+  ts=8,671,910.1  mb=1  reqs=[3,4]    window=0   (mb0 완전 종료 후에야 생성)
+
+판정: 동시 다중 mb = False (max window=1), 직렬 = True
+```
+
+결론: **"영원히 못 들어옴"이 아니라 "직렬 대기"**. mb0 가 ts=10→8.67e6 동안 혼자
+완주한 뒤에야 KV release → mb1 생성. 두 mb 가 단 한 순간도 공존하지 않아 window
+capacity 3 이 완전 무용. mb0 가 도는 동안 PIM 이 놀아도 mb1(아직 미생성)의 prefill
+로 빈자리를 못 채움 — cross-mb staggering·balance·합류가 전부 죽는 단일 근본 원인.
+
+## 8. 수정 설계 — 세 한계의 분리
+
+현재 구현은 KV 캐파(메모리) 하나를 배치 크기 한계로도 겸용하여 단일 mb 독점을
+초래한다. 목적이 다른 세 한계를 분리한다.
+
+| 한계 | 성격 | 역할 |
+|---|---|---|
+| **KV 캐파** | 하드 | OOM 방지 (인스턴스 전체 동시 보유 KV 한계, 여러 mb 공유) |
+| **배치 크기 (seq 상한)** | 하드 | head-of-line blocking 방지 (한 mb 의 최대 요청 수) |
+| **token budget** | 소프트 기본값 | PULS 동적성이 사는 곳 (balance 가 PIM/GPU idle 보고 동적 조절) |
+
+- **KV 캐파 = 하드** — OOM 방지. 그대로 4M 유지.
+- **배치 크기(seq 상한) = 하드** — head-of-line blocking 방지. 신설.
+- **token budget = 소프트 기본값** — balance 4-factor 가 동적 조절. PULS 동적성의 핵심.
+  실제 모델을 돌리지 않아도 트레이스의 decode 토큰 수 + prefill 길이로 closed-form
+  산출 가능 (per-token FLOPs × batch / GPU peak, PIM 임계 56K/65536 동반).
+
+상한과 그 안의 balance 는 직교 — 상한은 천장, balance 는 천장 아래 공간의 동적
+조절. 충돌하지 않으며, 상한이 오히려 balance 가 작동할 무대를 만든다.
+
+표준 정합: vLLM `max_num_seqs`(seq 상한) / `max_num_batched_tokens`(token budget),
+Sarathi-Serve token budget(decode + chunked prefill 혼합). PULS 는 Sarathi 의 PIM
+확장. 현 구현이 두 한계를 겸용한 것이 오히려 비표준.
+
+## 9. 다음 단계
+
+- 1차 = **배치 크기(seq 상한)** 신설 — KV 캐파와 분리. 동시 다중 mb 형성 (balance·
+  staggering·합류의 공통 선결 조건).
+- 배치 크기 스윕 = **{256, 512} 2값만**. 각각 idle_fraction + (대리)TTFT/TBT 관측.
+- token budget = closed-form 산출(트레이스 decode/prefill 기반), balance 동적 조절 입력.
+- 2차 = 신규 요청의 in-flight 합류 경로.
+- 수정 후 trace_long_pressure 재실행 → mb 다중화·idle 변화 측정.
+- 최종 검증 = 풀 3종(T-S/T-L/T-M): T-S 대조군 idle 불변, T-L/T-M idle 감소.

@@ -1,0 +1,6 @@
+arrived_at,num_prefill_tokens,num_decode_tokens
+0.1,60000,2
+0.2,60000,2
+0.3,60000,2
+0.4,60000,2
+0.5,60000,2
