@@ -1,5 +1,7 @@
 # PULS — PIM-Unified LLM Serving
 
+> 🚧 **Under active debugging** — The balance 4-factor scheduler logic (chunked-prefill / chunked-decode mutual fill) is being revised. Reported runtime numbers may change.
+
 **Scheduler-aware co-design of HBM-PIM and production LLM serving stack.**
 
 > **Disclosure** — Personal research project by a single undergraduate author. No institutional / vendor affiliation.

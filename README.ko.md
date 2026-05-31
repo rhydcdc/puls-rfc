@@ -1,5 +1,7 @@
 # PULS — PIM-Unified LLM Serving
 
+> 🚧 **디버깅 진행 중** — Balance 4요소 스케줄러 로직(chunked-prefill / chunked-decode 상호 채움)을 수정하고 있습니다. 보고된 런타임 수치는 변경될 수 있습니다.
+
 **Scheduler-aware co-design of HBM-PIM and production LLM serving stack.**
 
 > **Disclosure** — 학부생 단일 저자의 개인 연구 프로젝트. 소속 기관·vendor 연계 없음.
