@@ -7,8 +7,8 @@ from dataclasses import dataclass, field
 _RESOURCE_SLOTS = ("gpu_instance_a", "pim_instance_a", "gpu_instance_b")
 
 # Legacy 키 (Impl-3 영역 single-instance) → Impl-10-pre-1 의 3-slot 매핑.
-# 기존 caller (admission.balance_intra_A · evaluator.AdmissionSnapshot · dispatcher 의 단축 호출)
-# 가 "GPU"/"PIM" 키 사용 — backward-compat 정합.
+# 기존 caller (evaluator.AdmissionSnapshot · dispatcher 의 단축 호출)
+# 가 "GPU"/"PIM" 키 사용 — backward-compat 정합. (balance_intra_A 는 Phase-2 S1 삭제.)
 _LEGACY_KEY_MAP = {
     "GPU": "gpu_instance_a",
     "PIM": "pim_instance_a",

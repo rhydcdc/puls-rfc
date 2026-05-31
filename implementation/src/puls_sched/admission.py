@@ -43,24 +43,6 @@ class Admission:
             return prefill_chunk_tokens + self.admission_cfg.n_sat
         return prefill_chunk_tokens
 
-    def balance_intra_A(self, prefill_chunk_tokens: int) -> int:
-        """Impl-10-pre-2 — ARCH §6.4 invert: GPU idle 시 prefill chunk 증량.
-
-        - GPU idle > θ_high (PIM busy) → prefill chunk + n_sat → idle GPU 를
-          PREFILL_ATTN 으로 채움 (PIM decode-attn 과 동시).
-
-        STEP 3-b — 옛 decode 방향(PIM idle 시 decode_count +1)은 **제거**. 그 +1 은
-        spec.n(통계)에만 반영되고 실제 배치 decode 요청은 안 늘리는 무실효였음
-        (REPORT §11 영역). decode 합류는 이제 `_try_join`(매 완료 경계, 실효 있게)이
-        전담 — 역할 분리. balance_intra_A 는 prefill chunk 증량만 담당.
-        """
-        gpu_idle = self.idle_telemetry.gpu_idle_fraction()
-        pim_idle = self.idle_telemetry.pim_idle_fraction()
-        theta_high = self.admission_cfg.idle_theta_high
-        if gpu_idle > theta_high and pim_idle <= theta_high:
-            return prefill_chunk_tokens + self.admission_cfg.n_sat
-        return prefill_chunk_tokens
-
     def balance_pim_slack(
         self,
         prefill_chunk_tokens: int,
@@ -147,14 +129,15 @@ class Admission:
         if not decode_reqs:
             return None
 
-        # Impl-10-pre-2 — Hybrid Chunk Size Policy: base = prefill_chunk_default, balance 가 adjustment
+        # Phase-2 S1 — 밸런스는 *시간 기준* 둘만: inter_AB(A_cycle vs B_cycle, 인스턴스 간)
+        # + pim_slack(t_pim vs t_gpu, A 내부 더블버퍼링). 유휴율 기반 balance_intra_A 는 삭제.
+        # Hybrid base = prefill_chunk_default, balance 가 adjustment.
         prefill_chunk_tokens = self.admission_cfg.prefill_chunk_default
         prefill_chunk_tokens = self.balance_inter_AB(
             prefill_chunk_tokens, a_cycle, b_cycle, ctx_tokens,
         )
-        prefill_chunk_tokens = self.balance_intra_A(prefill_chunk_tokens)
 
-        # STEP 3-b — decode 조절은 _try_join 전담. n 은 실제 admit 된 decode 수의 MFU floor.
+        # decode 조절 레버 없음 (decode 충전 불가 — 부산물). n 은 admit 된 decode 수의 MFU floor.
         n = self.mfu_floor(len(decode_reqs))
         # Impl-10-pre-2 — PIM-time-driven adaptive *total* chunk budget.
         # t_gpu_base = t_proj (= t_qkv + t_oproj) — GPU non-attention 영역 시간.

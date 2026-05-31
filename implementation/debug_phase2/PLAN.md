@@ -51,6 +51,14 @@
 op-time 산식·closed-form 에 이미 존재 → 잃는 것 없음. **S0 후 스케줄링 레이어가 ARCH
 §3.4·§5.7 과 동역학으로 완전 정합** (F1 GPU-fallback 보정만 범위 밖, 기존 공시).
 
+> **Overlap ≠ Balance (사용자 정정 2026-06-01).** S0 가 준 것은 *overlap*(B 도는 동안 A
+> backfill). *balance*(A_cycle vs B_cycle 중 bound 판정 → prefill 양 조절)는 별개 축이고
+> **admission 이 시간 기준으로** 결정 — `balance_inter_AB`(이미 시간). 유휴율 아님.
+
+> **메모리 = HBM4 (사용자 정정).** [config.py:112-116] — 2 TB/s/stack × 8 = 16 TB/s/GPU,
+> 8 GPU 합산 128 TB/s (HBM4 hypothetical projection). 인스턴스 B FFN 은 compute-bound 라
+> 시간 모델에 메모리 항 *고의 생략*(HBM/GDDR 에서 FFN memory-bound 확률 0 — 죽은 분기 회피).
+
 ## 1. 코드 인벤토리 — 재사용(substrate) vs 교체(scheduling)
 
 ### 1a. 재사용하는 기판 (substrate — 대부분 무수정, F3 확장만 추가)
@@ -85,10 +93,15 @@ op-time 산식·closed-form 에 이미 존재 → 잃는 것 없음. **S0 후 �
   로직만 풀 모델로.
 - [ ] `main_loop.py::ADMISSION_TICK` 핸들러 (146~187) 의 "spec→영속 mb 1개 생성" —
   **교체.** per-iteration 배치 former 로.
-- [ ] `admission.py::balance_intra_A` (46~62) — **삭제.** 유휴율 chunk 증량 → 시간 기준
-  `balance_pim_slack` 로 일원화.
-- [ ] `admission.py::balance_inter_AB` (31~44) — **보류/재검토.** inter-AB 균형 자체는
-  유효하나 deadband(유휴율) 기반. 시간 기준으로 재표현할지 §2 에서 결정.
+- [ ] `admission.py::balance_intra_A` (46~62) — **삭제.** *유일한 유휴율 기반* 레버
+  (`gpu_idle_fraction`/`pim_idle_fraction`). 시간 기준 둘(inter_AB·pim_slack)로 대체.
+- [x] `admission.py::balance_inter_AB` (31~44) — **유지 (이미 시간 기준).** 재확인 결과
+  `diff = a_cycle − b_cycle`(둘 다 측정 cycle *시간*), deadband 는 그 시간차의 hysteresis.
+  A<B(A idle)면 prefill +n_sat — 사용자 의도("프리필 양 조절")와 정확히 일치. 인스턴스
+  A∥B 균형 = **시간 기준** (사용자 확정 2026-06-01). 유휴율 아님.
+- 밸런스 레버 정리: **두 시간 기준이 같은 prefill 레버를 같은 방향으로** 민다 —
+  `balance_inter_AB`(A_cycle vs B_cycle, 인스턴스 간) + `balance_pim_slack`(t_pim vs
+  t_gpu, A 내부 더블버퍼링 슬랙). 유휴율 기반은 전부 제거.
 - [ ] `admission.py::layer1` (98~176) — **재작성.** head-of-line walk + KV admit 은 유지
   (멤버십=용량), per-mb KV 예산(`max_mb_kv_tokens`)·balance_intra_A 호출 제거.
 - [ ] `micro_batch.py::prefill_chunk_budget` (19), `_recompose` 전제 필드 — 풀 모델에서
@@ -221,8 +234,11 @@ op-time 산식·closed-form 에 이미 존재 → 잃는 것 없음. **S0 후 �
   dispatch·I6·단일 layer FFN 종료·F3 overlap[FFN(M) B점유 중 GPU 가 QKV(N) backfill]).
   미정리: 옛 `instance_pipeline.dispatch` telemetry 경로(이제 FFN 노드가 대체) + 4노드
   가정 옛 테스트(test_dag/test_dispatcher/test_invariants 등) — S2 후 일괄 갱신.
-- [ ] **S1. `admission.py` 슬림화** → `balance_intra_A` 삭제, `balance_inter_AB` 처리
-  결정 반영, `layer1` 에서 per-mb KV 예산·intra_A 제거. 단위테스트 갱신.
+- [x] **S1. `admission.py` 슬림화** — 완료. `balance_intra_A`(유일 유휴율 레버) + layer1
+  호출 삭제. `balance_inter_AB`(시간 기준)·`balance_pim_slack` 유지. `max_mb_kv_tokens` 는
+  former(S2)가 호출 경로 교체 시 함께 처리(S1 무변경). 테스트 정리: test_admission intra_A
+  4개·test_chunk_size intra-A 2개·test_idle_telemetry chain 1개 제거, idle_telemetry.py
+  주석 갱신. **84 tests green**(admission·chunk_size·idle_telemetry·pim_slack).
 - [ ] **S2. `main_loop.py` 풀 former** → `_try_join`·`_per_mb_kv_budget`·`_recompose_mb`
   삭제, ADMISSION_TICK 핸들러를 per-iteration 배치 former 로 교체. L 도달 token 생성·전이
   유지, 그 뒤 풀 재선택.
