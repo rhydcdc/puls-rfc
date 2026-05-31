@@ -36,11 +36,12 @@ def _add(disp: Dispatcher, mb: MicroBatch) -> None:
 
 
 def _drive_to_done(disp: Dispatcher, mb_id: int, *ntypes: NodeType) -> None:
+    """Force nodes to DONE, tolerating any current state (PENDING or already READY)."""
     for t in ntypes:
         n = disp.dag.nodes[mb_id][t]
-        n.transition_to(NodeState.READY)
-        n.transition_to(NodeState.RUNNING)
-        n.transition_to(NodeState.DONE)
+        for s in (NodeState.READY, NodeState.RUNNING, NodeState.DONE):
+            if n.state is not s:
+                n.transition_to(s)
 
 
 # ---- DAG 구조 ----
