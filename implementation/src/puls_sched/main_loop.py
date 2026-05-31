@@ -41,6 +41,10 @@ class SchedulerCore:
     completion: Completion
     in_flight_requests: dict[int, Request] = field(default_factory=dict)
     _next_mb_id: int = 0
+    # ---- STEP 5 — 합류 게이트 hysteresis deadband latch (README 'adaptive admission
+    # with hysteresis deadband'). idle 신호가 θ_high 초과 시 열고, θ_low 미만 시 닫음.
+    # [θ_low, θ_high] 구간은 직전 상태 유지 → 경계 진동 방지. False = 닫힘에서 시작.
+    _join_gate_open: bool = False
     # ---- Impl-8 — D1 admission tick hook (evaluator 등록 점) ----
     _admission_tick_callbacks: list[AdmissionTickCallback] = field(default_factory=list)
     # ---- Impl-9 Q1 — ADMISSION_TICK self-rescheduling opt-in (Run.init 가 enable). ----
@@ -386,9 +390,11 @@ class SchedulerCore:
         - prompt 남은 req → prefill chunk (GPU PREFILL_ATTN 채움 — PIM-bound 구간 해소)
         - prompt 소진/없는 req → decode token (PIM decode-attn 채움 — GPU-bound 구간 해소)
 
-        게이트 = `gpu_idle > θ OR pim_idle > θ` (어느 한쪽이라도 놀면 합류). 양쪽 다 포화면
-        게이트 닫힘 (배치_생애 §5: 밸런스 맞음 → 합류 중단). 방향(prefill/decode)은 큐 head
-        의 성질이 자동 결정 — idle 자원에 맞는 일을 끌어오는 효과.
+        게이트 = hysteresis deadband (STEP 5). 신호 = max(gpu_idle, pim_idle) — 어느
+        한쪽이라도 놀면 채움(단일임계 `gpu_idle>θ OR pim_idle>θ` 와 동치). 닫힘 상태에서
+        신호 > θ_high 면 열고, 열림 상태에서 신호 < θ_low 면 닫음. [θ_low, θ_high] 사이는
+        직전 상태 유지 → 경계 진동 방지 (배치_생애 §5: 밸런스 맞으면 합류 중단). 방향
+        (prefill/decode)은 큐 head 의 성질이 자동 결정 — idle 자원에 맞는 일을 끌어옴.
 
         가능량 = min(seq 여유, KV 여유). FIFO. KV 안 맞는 head 만나면 중단(head-of-line
         은 다음 완료 경계에서 캐파 회수 후 재시도).
@@ -397,10 +403,18 @@ class SchedulerCore:
         """
         tel = self.admission.idle_telemetry
         theta_high = self.config.admission.idle_theta_high
-        gpu_idle = tel.gpu_idle_fraction()
-        pim_idle = tel.pim_idle_fraction()
-        if gpu_idle <= theta_high and pim_idle <= theta_high:
-            return set()  # 양쪽 다 포화 → 게이트 닫힘 (밸런스 맞음)
+        theta_low = self.config.admission.idle_theta_low
+        idle_signal = max(tel.gpu_idle_fraction(), tel.pim_idle_fraction())
+        # Hysteresis deadband — 닫힘→θ_high 초과 시 열고, 열림→θ_low 미만 시 닫음.
+        # 사이 구간은 _join_gate_open 직전 상태 유지.
+        if self._join_gate_open:
+            if idle_signal < theta_low:
+                self._join_gate_open = False
+        else:
+            if idle_signal > theta_high:
+                self._join_gate_open = True
+        if not self._join_gate_open:
+            return set()  # 게이트 닫힘 (양쪽 포화 또는 deadband 하한 미달)
         seq_room = self.config.admission.max_batch_size - len(active_req_ids)
         if seq_room <= 0:
             return set()

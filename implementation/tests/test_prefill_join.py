@@ -137,3 +137,62 @@ class TestDecodeJoin:
         prefill_chunk, decode_tokens, _ = scheduler_core._populate_mb_phases(active_reqs, 512)
         assert set(decode_tokens.keys()) == {0, 1, 2}
         assert prefill_chunk == {}
+
+
+class TestHysteresis:
+    """STEP 5 — 합류 게이트 hysteresis deadband (θ_high=0.3, θ_low=0.05 default).
+
+    신호 = max(gpu_idle, pim_idle). 닫힘→θ_high 초과 시 열림, 열림→θ_low 미만 시 닫힘,
+    [θ_low, θ_high] 사이는 직전 상태 유지 (경계 진동 방지).
+    """
+
+    def _push(self, scheduler_core, k=5):
+        rq = scheduler_core.request_queue
+        for i in range(k):
+            rq.push(Request(id=i, prompt_tokens=[0] * 1000, kv_length=1000, max_tokens=10))
+
+    def test_opens_above_theta_high(self, scheduler_core):
+        """닫힘 상태에서 신호 > θ_high → 열림 (합류 발동)."""
+        self._push(scheduler_core)
+        _set_gpu_idle(scheduler_core.admission.idle_telemetry, 0.4)  # > 0.3
+        assert scheduler_core._join_gate_open is False
+        joined = scheduler_core._try_join({99})
+        assert len(joined) == 5
+        assert scheduler_core._join_gate_open is True
+
+    def test_stays_closed_in_deadband(self, scheduler_core):
+        """닫힘 상태에서 신호가 deadband(0.05~0.3) 안 → 닫힘 유지 (합류 안 함)."""
+        self._push(scheduler_core)
+        _set_gpu_idle(scheduler_core.admission.idle_telemetry, 0.2)  # θ_low < 0.2 < θ_high
+        assert scheduler_core._join_gate_open is False
+        joined = scheduler_core._try_join({99})
+        assert joined == set()
+        assert scheduler_core._join_gate_open is False
+        assert len(scheduler_core.request_queue) == 5
+
+    def test_stays_open_in_deadband(self, scheduler_core):
+        """열림 상태에서 신호가 deadband 안 → 열림 유지 (합류 계속)."""
+        self._push(scheduler_core)
+        scheduler_core._join_gate_open = True
+        _set_gpu_idle(scheduler_core.admission.idle_telemetry, 0.2)
+        joined = scheduler_core._try_join({99})
+        assert len(joined) == 5
+        assert scheduler_core._join_gate_open is True
+
+    def test_closes_below_theta_low(self, scheduler_core):
+        """열림 상태에서 신호 < θ_low → 닫힘 (합류 중단)."""
+        self._push(scheduler_core)
+        scheduler_core._join_gate_open = True
+        _set_gpu_idle(scheduler_core.admission.idle_telemetry, 0.03)  # < 0.05
+        joined = scheduler_core._try_join({99})
+        assert joined == set()
+        assert scheduler_core._join_gate_open is False
+        assert len(scheduler_core.request_queue) == 5
+
+    def test_pim_direction_opens(self, scheduler_core):
+        """신호 = max(gpu, pim) — pim 만 idle 이어도 열림 (양방향 대칭)."""
+        self._push(scheduler_core)
+        _set_pim_idle(scheduler_core.admission.idle_telemetry, 0.4)
+        joined = scheduler_core._try_join({99})
+        assert len(joined) == 5
+        assert scheduler_core._join_gate_open is True

@@ -300,7 +300,7 @@ def default_dummy_config() -> Config:
             ctx_tier_short_max=8_000,
             ctx_tier_mid_max=32_000,
             deadband_width={"short": 1.0, "mid": 2.0, "long": 3.0},
-            idle_theta_low=0.1,
+            idle_theta_low=0.05,           # Phase-1 STEP 5 — 합류 게이트 hysteresis 하한 rail
             idle_theta_high=0.3,
             request_queue_capacity=1024,
             max_batch_size=256,            # Phase-1 fix — seq 상한 (스윕 {256, 512})
