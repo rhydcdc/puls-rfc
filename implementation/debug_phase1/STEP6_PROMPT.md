@@ -108,6 +108,14 @@ PULS 스케줄러의 **근본 재설계**를 진행한다. 결론부터: 지금�
 3. **구현** — 스케줄링 레이어 교체(substrate 재사용). 단위테스트 + 회귀.
 4. **측정** — measure_steady 에 **TBT·TTFT 산출 추가**(decode 토큰당 cycle 시간 / 첫
    토큰까지 시간). 스케일 스펙트럼(T-S/T-GEN/agentic)으로 풀 모델의 TBT·TTFT 확인.
+   - **트레이스 포맷은 그대로**(`arrived_at, prefill, decode` = 실제 요청; 한 요청 안
+     prefill→decode 종속은 진짜). 재생성 불필요. 풀 모델은 *스케줄러*가 풀에서 매
+     iteration 선택하는 것이지 워크로드 표현이 바뀌는 게 아님.
+   - **단 도착 패턴 재고** — 현 트레이스는 버스트 도착(상대적으로 전부 동시)이라 풀에서도
+     "다 같이 prefill → 다 같이 decode" 전이만 보임. **풀 모델의 지속적 혼합 정상상태**를
+     보려면 도착을 *처리 시간축에 맞춰 흩뿌린(staggered)* 트레이스를 추가 — 일부 decode 중에
+     새 요청이 도착해 prefill → 항상 굴러가는 mix. 포맷 아니라 **도착 분포(arrival span)만**
+     길게 재생성. (필수 아님 — 버스트로도 동작하나 전이 구간만 관측됨.)
 5. **문서** — 배치_생애·README·REPORT 를 풀 모델로 갱신. README "Target Workload" =
    long-context agentic 재프레이밍.
 
