@@ -148,9 +148,12 @@ balance 4-factor 미발현을 합성 트레이스로 확증하고, 합류 경로
       되고 실제 배치 미반영인 버그 해소 → 실제 decode 요청이 배치에 들어가도록
 - [ ] 단위 테스트 (decode 합류 게이트/가능량)
 
-### STEP 4 — 3-b 회귀 (타깃 범위만)
-- [ ] 동일 타깃 모듈 테스트 재실행 (`test_admission/main_loop/completion/window/...`)
-- [ ] 깨진 테스트 업데이트/수정
+### STEP 4 — 3-b 회귀 (타깃 범위만) — 완료
+- [x] 가벼운 타깃 회귀 283 passed (admission/main_loop/completion/window/config/meta/
+      prefill_join/idle_telemetry 등)
+- [x] 풀 회귀 49 passed (lifecycle 17 실트레이스 포함·stress·e2e·acceptance) — 커밋 게이트
+- [x] balance_intra_A 시그니처 변경 영향 테스트 갱신 (test_admission·test_idle_telemetry)
+- [x] 커밋·푸시 완료 (71abfe4 소스, 24af380 문서) — origin/main 동기화
 
 ### STEP 5 — 재검증 (수정 후) — 새 검증 테스트 중심
 - [ ] 배치 크기 스윕 {256, 512} — 각각 idle_fraction + (대리)TTFT/TBT 관측
