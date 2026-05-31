@@ -12,3 +12,18 @@ def small_cap_config():
     cfg = default_dummy_config()
     adm = dataclasses.replace(cfg.admission, kv_capacity_aggregate=200_000)
     return dataclasses.replace(cfg, admission=adm)
+
+
+def small_cap_seqlimit_config():
+    """STEP 1 검증용 — KV 캐파 200K + seq 상한 2.
+
+    same 트레이스(trace_serial_tiny)를 small_cap_config(seq 무제한)와 비교:
+    - seq 무제한: 첫 mb 가 3개(180K) 점유 → 직렬 (max window=1)
+    - seq=2: 첫 mb 2개(120K), 남은 80K 로 mb1 1개(60K) 동시 생성 → max window>1
+    변수 하나(seq 상한)만 바꿔 mb 다중화 인과 분리.
+    """
+    cfg = default_dummy_config()
+    adm = dataclasses.replace(
+        cfg.admission, kv_capacity_aggregate=200_000, max_batch_size=2,
+    )
+    return dataclasses.replace(cfg, admission=adm)

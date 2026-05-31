@@ -90,24 +90,54 @@ balance 4-factor 미발현을 합성 트레이스로 확증하고, 합류 경로
 - [x] (정정) 근본 원인 = "한 tick=캐파까지 한 mb" → 직렬 처리. balance·staggering·
       합류 발현 무대 자체 부재 (단일 원인)
 
-### 수정 — 1차: 세 한계 분리
-- [ ] **배치 크기(seq 상한) 신설** — KV 캐파와 분리 (하드 천장). 동시 다중 mb 형성
+> 순서: **1차 수정 → 1차 회귀 → 2차 수정 → 2차 회귀 → 재검증**.
+> 1차에서 mb 다중화가 먼저 돼야 2차 합류가 의미를 가지므로 단계 분리.
+
+### STEP 1 — 수정 1차: 세 한계 분리 (동시 다중 mb 형성의 토대)
+> 코드 정독 결과 범위 조정: 직렬 처리의 직접 원인은 release/evict 가 아니라 **새 mb
+> 미생성**(첫 tick 에 가용 요청을 캐파까지 한 mb 로 다 admit → 큐 즉시 빔 → 이후
+> `layer1` 이 admit 대상 0 → `return None`). 따라서 핵심은 **seq 상한 하나**.
+> - 요청별 즉시 KV release 는 **이미 구현됨** (completion.finalize → kv.release,
+>   main_loop §351–353). STEP 1 에서 손댈 것 없음.
+> - evict 조건 변경("전원 완료 AND 큐 빔")은 **STEP 3 으로 이동** — 합류가 있어야
+>   "큐 있는 한 mb 유지"가 의미. STEP 1(합류 없음)에서 바꾸면 evict 만 지연되어
+>   캐파가 묶임.
+
+- [x] **배치 크기(seq 상한) 신설** — config `max_batch_size`(기본 256). 요청 개수
+- [x] 실제 배치 크기 = min(seq 상한, KV 캐파 허용분) — admission.layer1 루프에 적용
+- [x] **window = 3 고정 명시** — window.py 주석 보강 (DEFAULT_CAPACITY=3, 스윕 X)
+
+### STEP 2 — 1차 회귀 (타깃 범위만) — 완료
+- [x] 타깃 모듈 테스트 — **269 passed, 0 failed**
+- [x] 깨진 테스트 2건 업데이트: test_admission_tick_rescheduling(payload 6키, 사전버그)
+      + test_meta(_EXPECTED_ADMISSION_FIELDS 에 max_batch_size 추가)
+- [x] mb 다중화 인과 분리 검증 (`prove_multiplex.py` → `multiplex_result.txt`):
+      동일 트레이스·캐파, seq 상한만 다르게 → A(무제한)=직렬 window 1 /
+      B(seq 2)=다중 window 2. STEP 1 효과 확증.
+
+### STEP 3 — 수정 2차: 합류 경로 (양방향)
+- [ ] 신규 요청의 in-flight mb 합류 경로 신설 — admission 이 request_queue +
+      in_flight 둘 다 보도록. 합류 가능량 = min(seq 여유, KV 여유)
+- [ ] prefill 합류 (chunk 로 잘라서) + decode 합류 (통째로)
+- [ ] **합류 게이트 = 밸런스 in_band 조건** — 무조건 합류 아님. PIM/GPU 레이턴시
+      맞으면(in_band) 합류 중단 (배치_생애 §5 인과: 밸런스→게이트 닫힘→소진→종료)
+- [ ] **mb evict 조건 변경** — "전원 완료" → "전원 완료 AND 큐 빔" (STEP 1 에서 이동).
+      합류가 생겼으므로 큐 있는 한 mb 유지 (배치_생애 §5 종료 조건)
+- [ ] chunked decode 실효화 (`balance_intra_A` +1 이 실제 배치 반영되도록)
+
+### STEP 4 — 2차 회귀 (타깃 범위만)
+- [ ] 동일 타깃 모듈 테스트 재실행 (`test_admission/main_loop/completion/window/...`)
+- [ ] 깨진 테스트 업데이트/수정
+
+### STEP 5 — 재검증 (수정 후) — 새 검증 테스트 중심
 - [ ] 배치 크기 스윕 {256, 512} — 각각 idle_fraction + (대리)TTFT/TBT 관측
 - [ ] token budget closed-form 산출 (트레이스 decode/prefill 기반, 모델 미실행)
-- [ ] 기존 테스트 회귀 통과
-
-### 수정 — 2차: 합류 경로
-- [ ] 신규 요청의 in-flight mb 합류 경로 신설 (chunked prefill)
-- [ ] chunked decode 실효화 (`balance_intra_A` +1 이 실제 배치 반영되도록)
-- [ ] window capacity 활용 검토 (다중 mb 공존 확인)
-- [ ] 기존 테스트 회귀 통과
-
-### 재검증 (수정 후)
-- [ ] 캐파 압박 트레이스 재실행 — mb 다중화 + 동시 window>1 확인
 - [ ] T-L — GPU/종합 idle 감소 확인
 - [ ] T-M — 양방향 idle 동시 감소 확인
 - [ ] T-S — idle 불변 확인 (대조군, 과잉 수정 방지)
 - [ ] before/after 보고서 작성
+
+> 미수정 영역(RTL·evaluator·trace 생성 등)은 회귀 스킵.
 
 ## 7. 산출물
 
