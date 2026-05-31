@@ -71,6 +71,8 @@ _EXPECTED_ADMISSION_FIELDS = {
     "prefill_chunk_default",
     # Impl-10-pre-2 (B option) — PIM-GPU TSV BW contention margin (ARCH §3.5.3)
     "pim_slack_safety_margin",
+    # Phase-1 debug — 배치 크기(seq) 상한, KV 캐파와 분리한 하드 천장
+    "max_batch_size",
 }
 
 

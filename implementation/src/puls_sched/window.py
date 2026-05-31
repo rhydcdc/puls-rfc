@@ -11,7 +11,11 @@ class InFlightWindow:
     double-buffering 무효화 (μ-batch 직렬 강제, ARCH §5.7 F2 정의).
     """
 
-    DEFAULT_CAPACITY = 3                              # ARCH §6.7 — 3-μ-batch 기본 (Impl-1 보존)
+    # ARCH §6.7 — 3-μ-batch 기본 (Impl-1 보존). Phase-1 debug: window(동시 mb 개수)는
+    # staggering 깊이용 하드 천장으로 *작게 고정(3)* — 메모리(KV 캐파)로 안 잡는다.
+    # 메모리 한계까지 늘리면 동시 KV 가 다시 캐파 전체를 먹어 단일 mb 독점 병으로 회귀
+    # (배치_생애.md §세 한계 / REPORT_baseline §7b). 스윕 대상 아님.
+    DEFAULT_CAPACITY = 3
 
     def __init__(self, dag: DAG, config: Config | None = None):
         self._dag = dag

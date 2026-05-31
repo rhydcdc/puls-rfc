@@ -85,10 +85,11 @@ class TestSelfRescheduling:
         scheduler_core.queue.push(orig)
         scheduler_core.step()
         ticks = _admission_ticks(scheduler_core)
-        # Fresh composition — identity 다름 + 5 key 모두 존재 (composer schema)
+        # Fresh composition — identity 다름 + 6 key 모두 존재 (composer schema)
         assert ticks[0].payload is not orig.payload
         assert set(ticks[0].payload.keys()) == {
             "t_proj", "t_pim_fn", "a_cycle", "b_cycle", "ctx_tokens",
+            "gpu_op_time_per_token_us",
         }
 
     def test_idle_guard_with_in_flight(self, scheduler_core):

@@ -118,12 +118,17 @@ class Admission:
             if req is None:
                 break
             candidates.append(req)
+        # Phase-1 fix — 실제 배치 크기 = min(seq 상한, KV 캐파 허용분).
+        # seq 상한 도달 시 KV 여유와 무관하게 나머지는 다음 tick 으로 defer →
+        # 한 mb 독점 방지, 동시 다중 mb 형성 (REPORT_baseline §7b).
+        max_batch = self.admission_cfg.max_batch_size
         for req in candidates:
-            if self.kv_accountant.can_admit(req):
+            if len(decode_reqs) < max_batch and self.kv_accountant.can_admit(req):
                 self.kv_accountant.admit(req)
                 decode_reqs.append(req)
             else:
                 # Defer — queue 의 그 자리 (상대 순서 유지) 위 re-push
+                # (seq 상한 도달 또는 KV 부족 둘 중 하나)
                 if not self.request_queue.push(req):
                     raise RuntimeError(
                         f"admission re-push failed for req {req.id} "

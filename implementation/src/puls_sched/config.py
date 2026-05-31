@@ -69,6 +69,11 @@ class AdmissionConfig:
     tick_interval_us: float = 10.0
     prefill_chunk_default: int = 512
     pim_slack_safety_margin: float = 0.9
+    # Phase-1 debug fix — 배치 크기(seq) 상한. KV 캐파(메모리)와 분리한 하드 천장으로,
+    # 한 mb 의 최대 *요청 개수* 를 제한 (vLLM max_num_seqs 정합). 실제 배치 크기 =
+    # min(이 값, KV 캐파 허용분). admission 이 한 tick 에 가용 요청을 캐파까지 한 mb 로
+    # 몰아넣어 단일 mb 독점·직렬 처리되던 것을 해소 (debug_phase1/REPORT_baseline §7b).
+    max_batch_size: int = 256
 
 
 @dataclass(frozen=True)
@@ -298,6 +303,7 @@ def default_dummy_config() -> Config:
             idle_theta_low=0.1,
             idle_theta_high=0.3,
             request_queue_capacity=1024,
+            max_batch_size=256,            # Phase-1 fix — seq 상한 (스윕 {256, 512})
         ),
         ablation=AblationConfig(),
         calibration=CalibrationConfig(),
