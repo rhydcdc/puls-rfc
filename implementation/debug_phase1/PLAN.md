@@ -115,6 +115,20 @@ balance 4-factor 미발현을 합성 트레이스로 확증하고, 합류 경로
       동일 트레이스·캐파, seq 상한만 다르게 → A(무제한)=직렬 window 1 /
       B(seq 2)=다중 window 2. STEP 1 효과 확증.
 
+### STEP 2.5 — admission 구동 모델 수정 (이벤트 기반) ※ STEP 1 측정 중 발견
+> 발견(REPORT §10): admission tick 이 고정 10µs 타이머로 self-reschedule 되어, GPU 가
+> 긴 op(예 prefill chunk 8192) 도는 동안 admit 불가 상태에서 헛돈다 (KC 1건당 tick
+> 수~수십). 라이브락 아님(진행은 함) 이나 step·메모리 폭증. balance·합류가 강해질수록
+> chunk↑ → 더 자주 발생. STEP 3 전 선결 (합류도 admission 경로에 얹힘).
+
+- [x] **KERNEL_COMPLETION 에 admission 시도 추가** — 완료 = iteration 경계 = admit 기회
+- [x] **고정 타이머 self-push 제거** — `_schedule_next_admission_tick` 함수 삭제(orphan)
+- [x] **REQUEST_ARRIVAL 트리거 유지** — cold start 재기동 보존
+- [x] 재기동 단일 경로 = `_schedule_admission_tick_with_default_payload` (완료/도착 시)
+- [x] 타깃 회귀 284 passed — TestSelfRescheduling 4건 이벤트 기반으로 업데이트
+      (+ wiring 테스트 inspect 대상 함수명 갱신)
+- [x] light_pressure 헛도는 tick 제거 확증: **3,000,000+ (not drained) → 76,820 (완주)**
+
 ### STEP 3 — 수정 2차: 합류 경로 (양방향)
 - [ ] 신규 요청의 in-flight mb 합류 경로 신설 — admission 이 request_queue +
       in_flight 둘 다 보도록. 합류 가능량 = min(seq 여유, KV 여유)

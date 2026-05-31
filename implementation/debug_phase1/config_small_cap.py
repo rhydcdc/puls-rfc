@@ -27,3 +27,21 @@ def small_cap_seqlimit_config():
         cfg.admission, kv_capacity_aggregate=200_000, max_batch_size=2,
     )
     return dataclasses.replace(cfg, admission=adm)
+
+
+def light_pressure_config():
+    """STEP 1 idle 측정 가속용 — 캐파 압박 + ctx>56K 성질 유지, 빠른 완주.
+
+    prefill_chunk_default 를 크게(8192) 하여 prefill cycle 수를 ~16× 줄임 (60K/512=117
+    → 60K/8192≈8 cycle). idle 경향·mb 다중화 관찰엔 영향 적고 step 수만 대폭 감소.
+    KV 캐파 600K + seq 상한 4 로 동시 다중 mb 형성. (balance_pim_slack 은 이 base 위에서
+    추가 조정 — 측정 목적상 무방.)
+    """
+    cfg = default_dummy_config()
+    adm = dataclasses.replace(
+        cfg.admission,
+        kv_capacity_aggregate=600_000,
+        max_batch_size=4,
+        prefill_chunk_default=8192,
+    )
+    return dataclasses.replace(cfg, admission=adm)

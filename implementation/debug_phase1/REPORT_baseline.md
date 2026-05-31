@@ -250,3 +250,73 @@ decode 요청을 PIM 빈자리에 채우는 것은 *PIM 만* 일을 받는 것�
 - 2차 = 신규 요청의 in-flight 합류 경로.
 - 수정 후 trace_long_pressure 재실행 → mb 다중화·idle 변화 측정.
 - 최종 검증 = 풀 3종(T-S/T-L/T-M): T-S 대조군 idle 불변, T-L/T-M idle 감소.
+
+## 10. STEP 1 진행 결과 + ADMISSION_TICK 과다 self-reschedule 발견
+
+### 10.1 STEP 1 (seq 상한 분리) — mb 다중화 확증
+
+`max_batch_size` 신설 (config, 기본 256) + admission.layer1 에 min(seq 상한, KV
+허용분) 적용 + window 3 고정. 타깃 회귀 269 passed.
+
+인과 분리 검증 (`prove_multiplex.py`): 동일 trace(serial_tiny)·동일 KV 캐파(200K),
+**seq 상한만** 다르게 →
+- seq 무제한: 직렬, 동시 최대 window = 1 (baseline 재현)
+- seq = 2: 다중, 동시 최대 window = 2
+
+→ mb 다중화는 오직 seq 상한 덕. STEP 1 목표(동시 다중 mb 형성) 달성.
+
+### 10.2 발견 — ADMISSION_TICK 이 KERNEL_COMPLETION 1 건당 수~수십 회 헛돈다
+
+STEP 1 idle 측정 시도 중, prefill_chunk 를 크게(8192) 잡은 config 에서 완주가
+극단적으로 느리고 메모리가 8.9GB 까지 증가. 정밀 추적(`diag` 류) 결과:
+
+```
+[50k step]  clk=49,900   mb0 layer=23  O_PROJ=RUNNING  큐: ADMISSION_TICK 10 + KC 1, KC_ts=49,987
+[200k step] clk=199,620  mb0 layer=14  (다음 토큰으로 리셋됨 — 진행 중)
+[400k step] clk=399,271  mb0 layer=19
+```
+
+- **라이브락 아님** — clock·layer 모두 꾸준히 전진, mb 는 80 층을 돌며 토큰 생성.
+  (초기 "queue 11/in_flight 8 고정"만 보고 라이브락이라 본 것은 *오판*, 정정함.)
+- **진짜 문제 = admission tick 과다 self-reschedule**: tick 간격(10µs) ≪ O_PROJ
+  op_time(~87µs, prefill chunk 8192 × long ctx). GPU 가 한 op 도는 동안 admit 도
+  불가한 상태에서 tick 이 ~9 회 헛돌며 매번 새 tick self-push
+  (`_schedule_next_admission_tick`). KERNEL_COMPLETION 1 건 처리에 tick 수~수십 건
+  낭비 → step·메모리 폭증.
+
+### 10.3 왜 고쳐야 하는 실제 버그인가
+
+- prefill chunk 8192 는 측정 편의로 넣었으나 **실제로 발생 가능한 값**: (a)
+  `balance_pim_slack` 이 PIM-bound 시 chunk 를 동적으로 키움(ARCH 의도), (b)
+  production token budget 도 보통 2048–8192 (vLLM/Sarathi). balance·합류가 강해질수록
+  chunk 가 커져 더 자주 터짐.
+- 근본 원인 = **admission 을 고정 시간 간격(tick_interval_us) 타이머로 self-reschedule**
+  하는 설계. GPU 가 긴 op 로 바쁜 동안 진전 없는 tick 이 누적. 표준 스케줄러
+  (vLLM/Sarathi)는 admission 을 별도 타이머가 아니라 *iteration(배치 step) 경계*에서
+  호출하므로 이 문제가 없음.
+- STEP 3(합류)도 admission 경로에 얹히므로 **STEP 3 전에 선결**해야 함 (→ STEP 2.5 신설).
+
+### 10.4 STEP 2.5 수정 — 이벤트 기반 admission (완료)
+
+(b)안 채택 — admission 을 고정 타이머가 아니라 *이벤트 경계*에서만 재기동:
+
+1. **KERNEL_COMPLETION 에 admission 시도 추가** (main_loop) — 완료 = 자원이 비는
+   유일 시점 = admit 기회 (vLLM/Sarathi 식 iteration-boundary admission).
+2. **고정 타이머 self-push 제거** — `_schedule_next_admission_tick` 함수 자체 삭제
+   (orphan). ADMISSION_TICK 처리 후 다음 tick 을 +interval 에 self-push 하던 것 폐기.
+3. **REQUEST_ARRIVAL 트리거 유지** — idle 후 새 요청 도착 시 cold-start 재기동.
+
+재기동 단일 경로 = `_schedule_admission_tick_with_default_payload`
+(KERNEL_COMPLETION / REQUEST_ARRIVAL 에서만 호출).
+
+### 10.5 효과 — 헛도는 tick 제거 확증
+
+light_pressure 트레이스 (이전엔 prefill chunk 8192 로 안 끝나던 것) 재실행:
+
+```
+수정 전: HIT LIMIT 3,000,000 (not drained), 메모리 8.9GB
+수정 후: DRAINED at step 76,820  (완주, ~40× 감소)
+```
+
+→ 완주 불가의 원인이 admission tick 헛돌이였음이 확정. 타깃 회귀 284 passed
+(TestSelfRescheduling 4 건은 타이머 전제 → 이벤트 기반으로 업데이트).
