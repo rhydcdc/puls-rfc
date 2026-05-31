@@ -54,24 +54,25 @@ def test_balance_inter_ctx_tier_short_outside_mid_inside(admission, admission_co
 
 # --- balance_intra_A ---
 
+# STEP 3-b — balance_intra_A 는 prefill chunk 증량만 담당 (decode 조절은 _try_join 전담).
+# 시그니처: balance_intra_A(prefill_chunk_tokens) -> prefill_chunk_tokens.
+
 def test_balance_intra_gpu_idle_admits_prefill(admission, admission_config, idle_telemetry):
-    """Impl-10-pre-2 — ARCH §6.4 invert: GPU idle → prefill chunk admit (idle GPU 활용)."""
+    """GPU idle (PIM busy) → prefill chunk + n_sat (idle GPU 를 PREFILL_ATTN 으로 활용)."""
     idle_telemetry.reset(0.0)
     idle_telemetry.record_active("PIM", 0.0, 10.0)
     # gpu_idle = 1.0, pim_idle = 0.0; θ_high = 0.3
-    prefill, decode = admission.balance_intra_A(0, decode_request_count=2)
+    prefill = admission.balance_intra_A(0)
     assert prefill == admission_config.n_sat   # GPU 한테 일 더 줌 (prefill chunk)
-    assert decode == 2                          # decode 변경 0
 
 
-def test_balance_intra_pim_idle_admits_decode(admission, idle_telemetry):
-    """Impl-10-pre-2 — ARCH §6.4 invert: PIM idle → decode admit (idle PIM 활용)."""
+def test_balance_intra_pim_idle_no_prefill_change(admission, idle_telemetry):
+    """PIM idle (GPU busy) → prefill chunk 변경 0. decode 조절은 _try_join 전담 (여기 무관)."""
     idle_telemetry.reset(0.0)
     idle_telemetry.record_active("GPU", 0.0, 10.0)
-    # gpu_idle=0, pim_idle=1.0
-    prefill, decode = admission.balance_intra_A(0, decode_request_count=2)
+    # gpu_idle=0, pim_idle=1.0 → prefill 방향 게이트 닫힘
+    prefill = admission.balance_intra_A(0)
     assert prefill == 0                         # prefill chunk 변경 0
-    assert decode == 3                          # PIM 한테 일 더 줌 (decode)
 
 
 def test_balance_intra_both_below_theta_no_change(admission, idle_telemetry):
@@ -79,18 +80,16 @@ def test_balance_intra_both_below_theta_no_change(admission, idle_telemetry):
     idle_telemetry.reset(0.0)
     idle_telemetry.record_active("GPU", 0.0, 10.0)
     idle_telemetry.record_active("PIM", 0.0, 10.0)
-    prefill, decode = admission.balance_intra_A(0, decode_request_count=2)
+    prefill = admission.balance_intra_A(0)
     assert prefill == 0
-    assert decode == 2
 
 
 def test_balance_intra_both_above_theta_no_change(admission, idle_telemetry):
     # No activity → both idle 1.0 → ambiguous → no change (conservative)
     idle_telemetry.reset(0.0)
     idle_telemetry.record_active("GPU", 10.0, 10.0)  # zero-duration window extend
-    prefill, decode = admission.balance_intra_A(0, decode_request_count=2)
+    prefill = admission.balance_intra_A(0)
     assert prefill == 0
-    assert decode == 2
 
 
 # --- layer1 ---

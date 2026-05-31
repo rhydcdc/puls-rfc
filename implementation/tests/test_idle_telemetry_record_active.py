@@ -143,7 +143,11 @@ def test_dispatcher_real_idle_telemetry_accumulates(
 
 def test_balance_intra_A_activates_via_dispatch_chain(dummy_config):
     """Cross-module — dispatcher.dispatch_gpu → idle_telemetry → admission.balance_intra_A
-    의 진정 활성. GPU 만 busy, PIM idle → balance 가 prefill_chunk + n_sat 산출."""
+    의 진정 활성.
+
+    STEP 3-b — balance_intra_A 는 prefill chunk 증량만 담당 (decode 조절은 _try_join 전담).
+    여기선 GPU busy(idle low)·PIM idle high → prefill 방향 게이트 닫힘 → prefill 변경 0
+    확인. (decode +1 무실효 로직 제거됨, 새 시그니처: balance_intra_A(prefill)->prefill.)"""
     from puls_sched.clock import Clock
     from puls_sched.dag import DAG
     from puls_sched.event_queue import EventQueue
@@ -171,10 +175,10 @@ def test_balance_intra_A_activates_via_dispatch_chain(dummy_config):
     node = dag.get_node(0, NodeType.QKV)
     node.transition_to(NodeState.READY)
     d.dispatch_gpu(node)
-    # Impl-10-pre-2 — ARCH §6.4 invert: PIM idle > theta_high AND gpu_idle <= theta_high → decode + 1 (PIM 한테 일 더)
-    new_chunk, new_decode = admission.balance_intra_A(prefill_chunk_tokens=100, decode_request_count=4)
+    # GPU busy (idle low) → prefill 방향 게이트 닫힘 → prefill chunk 변경 0.
+    # (PIM idle 시 decode 조절은 _try_join 이 전담 — balance_intra_A 무관, test_prefill_join 참조)
+    new_chunk = admission.balance_intra_A(prefill_chunk_tokens=100)
     assert new_chunk == 100         # prefill 변경 0 (GPU 가 busy 상태)
-    assert new_decode == 5          # PIM HIGH idle → decode + 1 (PIM 한테 일 추가)
 
 
 # ---- Determinism ----

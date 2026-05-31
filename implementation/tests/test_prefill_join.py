@@ -1,18 +1,19 @@
-"""STEP 3-a — prefill 합류 (진행 중 mb 에 큐의 신규 요청 backfill).
+"""STEP 3 — 양방향 합류 (진행 중 mb 에 큐의 신규 요청 backfill).
 
-배치_생애 §4 합류 + §5 게이트. `_try_join_prefill`:
-- 게이트: gpu_idle > idle_theta_high (GPU 빈자리 있을 때만; PIM-bound 구간)
+배치_생애 §4 합류 + §5 게이트. `_try_join`:
+- 게이트: gpu_idle > θ OR pim_idle > θ (어느 한쪽이라도 놀면 합류; 양쪽 포화면 닫힘)
 - 가능량: min(seq 여유, KV 여유), FIFO
-- KV admit + in_flight 등록 + PREFILL 전이
+- KV admit + in_flight 등록 + (PENDING 이면) PREFILL 전이
+- prefill/decode 분류는 _populate_mb_phases 가 prompt 유무로 자동 (끌어오기만)
 """
 from puls_sched.request import Request, RequestState
 
 
 def _set_gpu_idle(tel, frac):
-    """idle_telemetry 의 gpu_instance_a idle fraction 을 frac 으로 설정.
+    """GPU 만 idle=frac, PIM 포화(idle 0). prefill 합류 방향.
 
-    gpu_idle = 1 − gpu_active/span. gpu_active=10, span 을 pim active 로 확장 →
-    gpu_idle = 1 − 10/span = frac.
+    gpu active=10, pim active=span(=10/(1−frac)) → window_end=span →
+    gpu_idle = 1−10/span = frac, pim_idle = 1−span/span = 0.
     """
     tel.reset(0.0)
     if frac >= 1.0:
@@ -23,6 +24,17 @@ def _set_gpu_idle(tel, frac):
     tel.record_active("pim_instance_a", 0.0, span)
 
 
+def _set_pim_idle(tel, frac):
+    """PIM 만 idle=frac, GPU 포화(idle 0). decode 합류 방향 (위 대칭)."""
+    tel.reset(0.0)
+    if frac >= 1.0:
+        return
+    active = 10.0
+    span = active / (1.0 - frac)
+    tel.record_active("pim_instance_a", 0.0, active)
+    tel.record_active("gpu_instance_a", 0.0, span)
+
+
 class TestPrefillJoin:
     def test_join_fires_when_gpu_idle(self, scheduler_core):
         """GPU idle > theta_high → 큐의 신규 요청이 mb 에 prefill 합류."""
@@ -30,7 +42,7 @@ class TestPrefillJoin:
         for i in range(5):
             rq.push(Request(id=i, prompt_tokens=[0] * 1000, kv_length=1000, max_tokens=10))
         _set_gpu_idle(scheduler_core.admission.idle_telemetry, 0.9)
-        joined = scheduler_core._try_join_prefill({99})  # 기존 active 1개 가정
+        joined = scheduler_core._try_join({99})  # 기존 active 1개 가정
         assert len(joined) == 5
         assert len(rq) == 0
         for rid in joined:
@@ -44,7 +56,7 @@ class TestPrefillJoin:
         for i in range(5):
             rq.push(Request(id=i, prompt_tokens=[0] * 1000, kv_length=1000, max_tokens=10))
         _set_gpu_idle(scheduler_core.admission.idle_telemetry, 0.05)
-        joined = scheduler_core._try_join_prefill({99})
+        joined = scheduler_core._try_join({99})
         assert joined == set()
         assert len(rq) == 5
         assert scheduler_core.kv_accountant.used == 0
@@ -57,7 +69,7 @@ class TestPrefillJoin:
         _set_gpu_idle(scheduler_core.admission.idle_telemetry, 0.9)
         cap = scheduler_core.config.admission.max_batch_size
         active = set(range(1000, 1000 + cap - 2))  # seq_room = 2
-        joined = scheduler_core._try_join_prefill(active)
+        joined = scheduler_core._try_join(active)
         assert len(joined) == 2
         assert len(rq) == 8
 
@@ -68,11 +80,60 @@ class TestPrefillJoin:
         rq.push(Request(id=0, prompt_tokens=[0] * 10, kv_length=cap, max_tokens=10))   # 캐파 전부
         rq.push(Request(id=1, prompt_tokens=[0] * 10, kv_length=1000, max_tokens=10))  # 안 들어감
         _set_gpu_idle(scheduler_core.admission.idle_telemetry, 0.9)
-        joined = scheduler_core._try_join_prefill({99})
+        joined = scheduler_core._try_join({99})
         assert joined == {0}
         assert len(rq) == 1  # head-of-line, 다음 완료 경계에서 재시도
 
     def test_join_empty_queue_noop(self, scheduler_core):
         """큐 비면 합류 0 (no-op)."""
         _set_gpu_idle(scheduler_core.admission.idle_telemetry, 0.9)
-        assert scheduler_core._try_join_prefill({99}) == set()
+        assert scheduler_core._try_join({99}) == set()
+
+
+class TestDecodeJoin:
+    """STEP 3-b — decode 방향 합류 (GPU 포화·PIM idle 구간)."""
+
+    def test_join_fires_when_pim_idle(self, scheduler_core):
+        """PIM idle > theta_high (GPU 포화) → 큐의 신규 요청 합류 (게이트 OR 의 PIM 쪽)."""
+        rq = scheduler_core.request_queue
+        for i in range(5):
+            rq.push(Request(id=i, prompt_tokens=[0] * 1000, kv_length=1000, max_tokens=10))
+        _set_pim_idle(scheduler_core.admission.idle_telemetry, 0.9)
+        joined = scheduler_core._try_join({99})
+        assert len(joined) == 5
+        assert len(rq) == 0
+        assert scheduler_core.kv_accountant.used == 5000
+
+    def test_join_gated_off_when_both_saturated(self, scheduler_core):
+        """gpu·pim 둘 다 포화(idle ≤ θ) → 합류 안 함 (게이트 닫힘 = 밸런스 맞음)."""
+        rq = scheduler_core.request_queue
+        for i in range(5):
+            rq.push(Request(id=i, prompt_tokens=[0] * 1000, kv_length=1000, max_tokens=10))
+        tel = scheduler_core.admission.idle_telemetry
+        # gpu active=pim active=span → 양쪽 idle 0
+        tel.reset(0.0)
+        tel.record_active("gpu_instance_a", 0.0, 100.0)
+        tel.record_active("pim_instance_a", 0.0, 100.0)
+        assert tel.gpu_idle_fraction() == 0.0 and tel.pim_idle_fraction() == 0.0
+        joined = scheduler_core._try_join({99})
+        assert joined == set()
+        assert len(rq) == 5
+        assert scheduler_core.kv_accountant.used == 0
+
+    def test_decode_req_classified_to_decode_tokens(self, scheduler_core):
+        """prompt 없는(decode 단계) 합류 req 는 _populate_mb_phases 가 decode_tokens 로 분류.
+
+        합류 자체는 prefill/decode 무구분(끌어오기). 분류는 prompt 유무로 자동 —
+        prompt=[] req 는 prefill 단계 없이 바로 decode_tokens 에 들어가 PIM 을 채운다.
+        """
+        rq = scheduler_core.request_queue
+        for i in range(3):
+            rq.push(Request(id=i, prompt_tokens=[], kv_length=500, max_tokens=10))
+        _set_pim_idle(scheduler_core.admission.idle_telemetry, 0.9)
+        joined = scheduler_core._try_join(set())
+        assert joined == {0, 1, 2}
+        # _populate_mb_phases 가 prompt 없는 req 를 decode_tokens 로 분류
+        active_reqs = [scheduler_core.in_flight_requests[r] for r in joined]
+        prefill_chunk, decode_tokens, _ = scheduler_core._populate_mb_phases(active_reqs, 512)
+        assert set(decode_tokens.keys()) == {0, 1, 2}
+        assert prefill_chunk == {}

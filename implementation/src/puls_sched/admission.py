@@ -43,26 +43,23 @@ class Admission:
             return prefill_chunk_tokens + self.admission_cfg.n_sat
         return prefill_chunk_tokens
 
-    def balance_intra_A(
-        self,
-        prefill_chunk_tokens: int,
-        decode_request_count: int,
-    ) -> tuple[int, int]:
-        """Impl-10-pre-2 — ARCH §6.4 invert: idle 자원에 일 더 추가 (사용자 logic 정합).
+    def balance_intra_A(self, prefill_chunk_tokens: int) -> int:
+        """Impl-10-pre-2 — ARCH §6.4 invert: GPU idle 시 prefill chunk 증량.
 
-        - GPU idle > θ_high, PIM busy → admit prefill chunk → GPU 윈도우 채움
-          (idle GPU 를 PREFILL_ATTN 으로 활용, PIM decode-attn 과 동시)
-        - PIM idle > θ_high, GPU busy → admit additional decode → PIM 윈도우 채움
-          (idle PIM 을 decode-attn 으로 활용, GPU projection 과 동시)
+        - GPU idle > θ_high (PIM busy) → prefill chunk + n_sat → idle GPU 를
+          PREFILL_ATTN 으로 채움 (PIM decode-attn 과 동시).
+
+        STEP 3-b — 옛 decode 방향(PIM idle 시 decode_count +1)은 **제거**. 그 +1 은
+        spec.n(통계)에만 반영되고 실제 배치 decode 요청은 안 늘리는 무실효였음
+        (REPORT §11 영역). decode 합류는 이제 `_try_join`(매 완료 경계, 실효 있게)이
+        전담 — 역할 분리. balance_intra_A 는 prefill chunk 증량만 담당.
         """
         gpu_idle = self.idle_telemetry.gpu_idle_fraction()
         pim_idle = self.idle_telemetry.pim_idle_fraction()
         theta_high = self.admission_cfg.idle_theta_high
         if gpu_idle > theta_high and pim_idle <= theta_high:
-            return prefill_chunk_tokens + self.admission_cfg.n_sat, decode_request_count
-        if pim_idle > theta_high and gpu_idle <= theta_high:
-            return prefill_chunk_tokens, decode_request_count + 1
-        return prefill_chunk_tokens, decode_request_count
+            return prefill_chunk_tokens + self.admission_cfg.n_sat
+        return prefill_chunk_tokens
 
     def balance_pim_slack(
         self,
@@ -143,11 +140,10 @@ class Admission:
         prefill_chunk_tokens = self.balance_inter_AB(
             prefill_chunk_tokens, a_cycle, b_cycle, ctx_tokens,
         )
-        prefill_chunk_tokens, decode_count = self.balance_intra_A(
-            prefill_chunk_tokens, len(decode_reqs),
-        )
+        prefill_chunk_tokens = self.balance_intra_A(prefill_chunk_tokens)
 
-        n = self.mfu_floor(decode_count)
+        # STEP 3-b — decode 조절은 _try_join 전담. n 은 실제 admit 된 decode 수의 MFU floor.
+        n = self.mfu_floor(len(decode_reqs))
         # Impl-10-pre-2 — PIM-time-driven adaptive *total* chunk budget.
         # t_gpu_base = t_proj (= t_qkv + t_oproj) — GPU non-attention 영역 시간.
         # chunk_total = max(0, t_pim × margin − t_proj) / per_token
