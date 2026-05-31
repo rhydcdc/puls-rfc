@@ -19,6 +19,7 @@ class DAG:
             NodeType.PREFILL_ATTN: {NodeType.QKV},                              # I1
             NodeType.DECODE_ATTN: {NodeType.QKV},                               # I2
             NodeType.O_PROJ: {NodeType.PREFILL_ATTN, NodeType.DECODE_ATTN},     # I3
+            NodeType.FFN: {NodeType.O_PROJ},                                    # Phase-2 — inter-AB (F3): B FFN after A O_PROJ
         }
 
     def remove_micro_batch(self, micro_batch_id: int) -> None:

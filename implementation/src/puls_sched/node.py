@@ -7,6 +7,9 @@ class NodeType(Enum):
     PREFILL_ATTN = auto()
     DECODE_ATTN = auto()
     O_PROJ = auto()
+    # Phase-2 — Instance B FFN stage (inter-AB pipeline, ARCH §3.4 / §5.7 F3).
+    # Instance A 4 노드 뒤 단일 B 노드. O_PROJ → FFN 종속 (A 출력이 B 입력).
+    FFN = auto()
 
 
 class NodeState(Enum):

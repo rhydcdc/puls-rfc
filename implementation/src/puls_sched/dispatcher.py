@@ -2,12 +2,12 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional, TYPE_CHECKING
 
 from puls_sched.clock import Clock
-from puls_sched.config import Config, compute_gpu_op_time_s
+from puls_sched.config import Config, compute_ffn_op_time_s, compute_gpu_op_time_s
 from puls_sched.dag import DAG
 from puls_sched.event import Event, EventType
 from puls_sched.event_queue import EventQueue
 from puls_sched.idle_telemetry import IdleTelemetry
-from puls_sched.invariants import check_I1, check_I2, check_I3, check_I4, check_I5
+from puls_sched.invariants import check_I1, check_I2, check_I3, check_I4, check_I5, check_I6
 from puls_sched.micro_batch import MicroBatch
 from puls_sched.node import Node, NodeState, NodeType
 from puls_sched.pim_emulator import PIMExecutor
@@ -20,6 +20,8 @@ GPU_NODE_TYPES: frozenset[NodeType] = frozenset(
     {NodeType.QKV, NodeType.PREFILL_ATTN, NodeType.O_PROJ}
 )
 PIM_NODE_TYPES: frozenset[NodeType] = frozenset({NodeType.DECODE_ATTN})
+# Phase-2 — Instance B FFN 자원 (inter-AB 파이프라인, ARCH §3.4 / §5.7 F3).
+INSTANCE_B_NODE_TYPES: frozenset[NodeType] = frozenset({NodeType.FFN})
 
 GPU_PRIORITY_ORDER: tuple[NodeType, ...] = (
     NodeType.O_PROJ,
@@ -41,6 +43,7 @@ class Dispatcher:
     micro_batches: dict[int, MicroBatch] = field(default_factory=dict)  # Impl-5 — Q1-bis lookup
     gpu_busy: bool = False
     pim_busy: bool = False
+    instance_b_busy: bool = False                       # Phase-2 — Instance B (FFN) 자원 (I6)
     _dispatch_callbacks: list[DispatchCallback] = field(default_factory=list)  # Impl-8 — D1 hook (evaluator 등록 점)
     # Impl-10-pre-1 O8.2 — optional IdleTelemetry wiring. None 시 record_active skip (backward-compat 영역).
     idle_telemetry: Optional[IdleTelemetry] = None
@@ -119,6 +122,11 @@ class Dispatcher:
         candidates = self._ready_of_types(PIM_NODE_TYPES)
         return candidates[0][1] if candidates else None
 
+    def pick_instance_b(self) -> Node | None:
+        """Phase-2 — ready FFN 노드 선택 (oldest μ-batch first, _ready_of_types 가 정렬)."""
+        candidates = self._ready_of_types(INSTANCE_B_NODE_TYPES)
+        return candidates[0][1] if candidates else None
+
     def _op_time(self, node: Node) -> float:
         """Per-mb spec-derived op_time. Stage 1 fixed lookup 폐기 (Stage 2 Impl-10 main).
 
@@ -140,6 +148,11 @@ class Dispatcher:
                 mb = MicroBatch(id=node.micro_batch_id, decode_tokens={0: 0})
             # Stage 2 — per-mb spec-derived (seconds → microseconds for clock unit)
             return compute_gpu_op_time_s(node.type, mb, self.config.calibration, self.config.model) * 1e6
+        if node.type is NodeType.FFN:
+            # Phase-2 — Instance B FFN spec-derived (inter-AB, ARCH §3.4 / §5.7 F3).
+            if mb is None:
+                mb = MicroBatch(id=node.micro_batch_id, decode_tokens={0: 0})
+            return compute_ffn_op_time_s(mb, self.config.calibration, self.config.model) * 1e6
         # PIM (decode-attn).
         if self.config.ablation.f1_disabled:
             # F1 ablation — GPU fallback reference (Impl-11 영역). DECODE_ATTN spec-derived 영원
@@ -202,6 +215,30 @@ class Dispatcher:
             self.idle_telemetry.record_active("pim_instance_a", t_start, t_start + op_time)
         self._fire_dispatch(node, resource="PIM")    # Impl-8 — D1 hook (evaluator 통지). F1 ablation 시에도 resource="PIM" 유지 (I5 invariant 정합)
 
+    def dispatch_instance_b(self, node: Node) -> None:
+        """Phase-2 — Instance B FFN dispatch (inter-AB 파이프라인, ARCH §3.4 / §5.7 F3).
+
+        O_PROJ → FFN 종속은 refresh_ready 가 보장 (FFN READY = O_PROJ DONE). I6 = B 자원
+        동시 1 op. gpu_instance_b activity 기록 (이전 instance_pipeline.dispatch telemetry 대체).
+        """
+        check_I6(self.instance_b_busy)
+        node.transition_to(NodeState.RUNNING)
+        self.instance_b_busy = True
+        op_time = self._op_time(node)
+        t_start = self.clock.now
+        self.queue.push(Event(
+            timestamp=t_start + op_time,
+            type=EventType.KERNEL_COMPLETION,
+            payload={
+                "micro_batch_id": node.micro_batch_id,
+                "node_type": node.type,
+                "resource": "INSTANCE_B",
+            },
+        ))
+        if self.idle_telemetry is not None:
+            self.idle_telemetry.record_active("gpu_instance_b", t_start, t_start + op_time)
+        self._fire_dispatch(node, resource="INSTANCE_B")
+
     def on_completion(self, event: Event) -> None:
         mb_id: int = event.payload["micro_batch_id"]
         ntype: NodeType = event.payload["node_type"]
@@ -212,6 +249,8 @@ class Dispatcher:
             self.gpu_busy = False
         elif resource == "PIM":
             self.pim_busy = False
+        elif resource == "INSTANCE_B":
+            self.instance_b_busy = False
         else:
             raise ValueError(f"unknown resource: {resource}")
 
@@ -225,3 +264,7 @@ class Dispatcher:
             node = self.pick_pim()
             if node is not None:
                 self.dispatch_pim(node)
+        if not self.instance_b_busy:
+            node = self.pick_instance_b()
+            if node is not None:
+                self.dispatch_instance_b(node)

@@ -124,6 +124,8 @@ class SchedulerCore:
                         self.dispatcher.gpu_busy = False
                     elif resource == "PIM":
                         self.dispatcher.pim_busy = False
+                    elif resource == "INSTANCE_B":
+                        self.dispatcher.instance_b_busy = False
                     self.dispatcher.tick()
                     # STEP 2.5 — 완료 = iteration 경계 = admit 기회 (event-driven admission).
                     if self.enable_admission_tick_rescheduling:
@@ -305,7 +307,10 @@ class SchedulerCore:
         return fn
 
     def _maybe_advance_forward_pass(self, event: Event, eos_seen: bool = False) -> None:
-        """KERNEL_COMPLETION (O_PROJ done) → LayerState.advance → L 도달 시 token decode signal.
+        """KERNEL_COMPLETION (FFN done) → LayerState.advance → L 도달 시 token decode signal.
+
+        Phase-2 — trigger = FFN 완료(= layer 종료, inter-AB F3). 이전엔 O_PROJ 였으나 B-FFN
+        을 스케줄 노드로 모델링하며 layer 경계가 FFN 완료로 이동.
 
         Q5 — consumer 는 main_loop 영역. Dispatcher / forward_pass 침범 0.
         Q6 (c) — eos_seen=True 명시 시 EOS branch 발동 (외부 caller / test fixture path).
@@ -320,15 +325,16 @@ class SchedulerCore:
         재산출 (남은 prefill 영역 위 새 chunk 영역).
         """
         node_type = event.payload.get("node_type")
-        if node_type is not NodeType.O_PROJ:
+        # Phase-2 — layer advance trigger 를 O_PROJ → FFN 으로 이동 (inter-AB, F3).
+        # 한 layer = QKV → attn → O_PROJ → FFN. FFN(Instance B) 완료 = 그 layer 종료.
+        # B-side timing·gpu_instance_b 기록은 이제 dispatcher.dispatch_instance_b 가 담당
+        # (옛 instance_pipeline.dispatch telemetry 호출 대체).
+        if node_type is not NodeType.FFN:
             return
         mb_id = event.payload.get("micro_batch_id")
         mb = self.dispatcher.micro_batches.get(mb_id) if mb_id is not None else None
         if mb is None:
             return  # defensive — mb already unregistered
-        # Impl-10-pre-1 (A) — per-layer A→B chain wiring (production hot path)
-        if self.instance_pipeline is not None:
-            self.instance_pipeline.dispatch(mb)
         token_signal = self.layer_state.advance(mb)
         if not token_signal:
             # Impl-9 — 다음 layer 의 fresh dispatch 위 DAG nodes 재생성. ARCH §3.4 L × cycle 정합.
