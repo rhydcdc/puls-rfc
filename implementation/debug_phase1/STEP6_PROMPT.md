@@ -109,13 +109,20 @@ PULS 스케줄러의 **근본 재설계**를 진행한다. 결론부터: 지금�
 4. **측정** — measure_steady 에 **TBT·TTFT 산출 추가**(decode 토큰당 cycle 시간 / 첫
    토큰까지 시간). 스케일 스펙트럼(T-S/T-GEN/agentic)으로 풀 모델의 TBT·TTFT 확인.
    - **트레이스 포맷은 그대로**(`arrived_at, prefill, decode` = 실제 요청; 한 요청 안
-     prefill→decode 종속은 진짜). 재생성 불필요. 풀 모델은 *스케줄러*가 풀에서 매
-     iteration 선택하는 것이지 워크로드 표현이 바뀌는 게 아님.
-   - **단 도착 패턴 재고** — 현 트레이스는 버스트 도착(상대적으로 전부 동시)이라 풀에서도
-     "다 같이 prefill → 다 같이 decode" 전이만 보임. **풀 모델의 지속적 혼합 정상상태**를
-     보려면 도착을 *처리 시간축에 맞춰 흩뿌린(staggered)* 트레이스를 추가 — 일부 decode 중에
-     새 요청이 도착해 prefill → 항상 굴러가는 mix. 포맷 아니라 **도착 분포(arrival span)만**
-     길게 재생성. (필수 아님 — 버스트로도 동작하나 전이 구간만 관측됨.)
+     prefill→decode 종속은 진짜). 요청 *타입*은 하나(prefill→decode) — "decode-only 풀"·
+     "prefill-only 풀"은 *같은 풀의 스냅샷 분포*일 뿐 별도 워크로드가 아님. 풀 모델은
+     *스케줄러*가 풀에서 매 iteration 선택하는 것이지 워크로드 표현이 바뀌는 게 아님.
+   - **★ 측정은 warm-start seed(B)로 — 결정.** 정상상태만 본다(리뷰어·실서버 = 정상
+     상태). 따라서:
+     - **(A) 빈 상태 + staggered 도착 + warmup** — 초반에 **GPU 대량 prefill·PIM 유휴**
+       (decode 풀 쌓는 cold-start) 구간을 거쳐야 정상상태 도달. 그 cold-start는 어차피
+       *버림*. 비싸고(수백만 step warmup) 도착률≈처리율 튜닝도 필요 → **굳이 갈 이유 없음.**
+     - **(B) warm-start seed (채택)** — t=0 에 *이미 decode 중인 요청들*(KV 길이·남은
+       decode) 을 사전 seed + 신규 도착. **즉시 정상상태**, 혼합 비율 직접 제어, warmup
+       저렴. measure 하네스에 "사전 decode 풀 seed" init 기능 추가(트레이스 포맷 아니라
+       초기상태 확장).
+     - **caveat**: seed 가 **현실 정상상태 분포**(ctx 길이·decode 진행도 분포)를 대표해야
+       편향 없음. 분포는 워크로드에서 유도(또는 A 를 1회 돌려 관측한 정상상태로 seed).
 5. **문서** — 배치_생애·README·REPORT 를 풀 모델로 갱신. README "Target Workload" =
    long-context agentic 재프레이밍.
 
