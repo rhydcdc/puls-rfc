@@ -1,0 +1,6 @@
+=== steady idle: TL_join_on ===
+trace=debug_phase1/data/trace_long.csv
+join=ON batch=default theta_high=default theta_low=default
+warmup_steps=22 measure_steps=200000 converged=True drained=False
+mb_count=1 max_window=1/3 samples=10
+idle gpu_a=0.0058 pim_a=0.9368 gpu_b=0.0000

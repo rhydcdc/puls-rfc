@@ -1,0 +1,10 @@
+=== join-vs-admission race (KV_CAP=250, trace=debug_phase1/data/trace_tiny_race.csv) ===
+
+join=OFF  mb_count=3  max_window=2  steps=11532
+    mb=0 clock=10.10 kv_used_at_register=110 queue=4
+    mb=1 clock=10.20 kv_used_at_register=220 queue=2
+    mb=2 clock=4046.56 kv_used_at_register=220 queue=0
+
+join=ON   mb_count=2  max_window=2  steps=11532
+    mb=0 clock=10.10 kv_used_at_register=110 queue=4
+    mb=1 clock=10.20 kv_used_at_register=220 queue=2

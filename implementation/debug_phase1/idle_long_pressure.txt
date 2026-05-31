@@ -1,0 +1,5 @@
+=== idle 측정: long_pressure ===
+config=puls_sched.config:default_dummy_config
+trace=debug_phase1/data/trace_long_pressure.csv
+drain=True steps=5740320 mb_count=4 max_window=3/3
+idle gpu_a=0.0004 pim_a=0.9795 gpu_b=0.0000

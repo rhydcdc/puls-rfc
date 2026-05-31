@@ -388,3 +388,76 @@ per-mb KV 예산 = KV캐파 / 2 (= 2M) 을 admission.layer1 + `_try_join` 양쪽
 재확증 (`diag_join_race`, per-mb 예산 적용 후): 합류 ON 이 **mb=1·window=1 → mb=2·
 window=2** 로 회복. F2 동시 활성 2개 달성. 단위 43 passed, 빠른 정합성 회귀 61 passed
 (KV no-leak·invariant·완료·integration·f4).
+
+## 13. balance_pim_slack 단위 버그 (ns vs µs) 발견·수정 — agentic 측정 중
+
+STEP 5 현실적 agentic 트레이스(ctx>56K + 긴 decode) 측정 중, 합류 ON 에서 GPU 가
+극단 과포화(gpu_a idle≈0, pim_a idle≈98%)되는 현상을 추적해 발견.
+
+### 13.1 버그 — admission balance 경로의 ns/µs 불일치
+
+- `PIMExecutor.op_time()` 은 **ns** 반환 (tile_time_ns 기반).
+- dispatcher 는 실행 타이밍에서 PIM op_time 을 `× 1e-3`(ns→µs)로 정정해 GPU(초→µs)와
+  일관 (dispatcher._op_time, Stage 2 정정).
+- **그러나 admission balance 경로는 그 정정을 누락**: `_make_t_pim_fn` 이 op_time 을 ns
+  그대로 반환 → `balance_pim_slack` 이 `gpu_slack_us = t_pim(ns)×margin − t_proj(µs)` 로
+  **ns 와 µs 를 뺌** → t_pim 이 1000× 부풀어 `chunk_optimal` 과대(예 ~7900 토큰) →
+  prefill chunk 예산 폭증 → **GPU 가 prefill 로 과포화, PIM 유휴**.
+
+### 13.2 수정 — `_make_t_pim_fn` 에 ×1e-3 (ns→µs)
+
+dispatcher 와 동일 convention 적용. 한 줄. 단위테스트 신설
+(`test_compose_payload_t_pim_fn_returns_microseconds` — fn(n) == op_time(ns)×1e-3 고정).
+타깃 회귀(admission/chunk/payload-wiring/main_loop/integration) 68+12 passed.
+
+### 13.3 측정 단서 — agentic OFF/ON (warmup decode_frac 0.9, 순수 고ctx decode)
+
+`trace_agentic` (prompt ~69K 전부 >56K, decode ~20K, N=30):
+
+| | gpu_a idle | pim_a idle | 해석 |
+|---|---|---|---|
+| OFF (합류X) | 0.343 | 0.458 | 순수 decode → **PIM 활용(유휴 98%→46%)**, 둘 다 ~40% |
+| ON (합류O, **버그 전**) | 0.002 | 0.977 | GPU 과포화·PIM 유휴 (단위 버그 영향) |
+| ON (합류O, **버그 수정 후**) | 0.002 | 0.977 | 버그 전과 **bit-identical** (수정 무효) |
+
+- **확정**: 순수 고ctx decode 에서 PIM 은 실제로 bound·활용됨(OFF pim idle 46%). 이전
+  관측 PIM idle 98% 는 prefill flood 구간의 산물이었음.
+- **단위 수정은 agentic 측정에 무효**(bit-identical): 고ctx 혼합은 t_proj 가 커서
+  `t_pim×margin − t_proj < 0` → chunk_optimal=0 → `max(base 512, 0)=512` 로 귀결, t_pim
+  이 ns/µs(1000×차)든 둘 다 음수라 동일. 즉 agentic GPU 과포화의 원인은 단위 버그가
+  아니라 **(a) base chunk 512 의 고ctx prefill flood + (b) join 의 backlog prefill 충전
+  (연속배칭 throughput 동작)**. 단위 수정은 양의 슬랙 regime 에서 발현하는 별개 버그라 유지.
+
+### 13.4 재해석 — ON 은 의도대로 동작 (throughput-max)
+
+ON 의 GPU 유휴 0.34→0.002 는 **합류(연속배칭)가 GPU 유휴를 backlog prefill 로 메운
+가치**다. PIM 유휴가 높은 건 decode-attn 이 본질적으로 싸서(물리)이지 버그 아님.
+"둘 다 낮은 유휴"는 backlog 가 있는 한 구조적으로 불가 — join 이 GPU throughput 을
+우선하는 것이 정상. PIM 의 가치는 가동률이 아니라 op-level(Aux2 버스 절감·F5).
+
+## 14. 스케일 스펙트럼 — 모든 규모에서 메커니즘 건전 (단위 수정 후)
+
+전 스케일에서 스케줄러가 건전 동작하는지 검증 (T-S 최단 / T-GEN 일반 / agentic 고ctx).
+전부 default config (chunk 512, θ 0.3/0.05, batch 256).
+
+| trace | ctx | gpu_a idle | pim_a idle | mb / window | 해석 |
+|---|---|---|---|---|---|
+| T-S ON | ~8K | 0.0002 | 0.9943 | 3 / 3·3 | 저ctx → GPU-bound (PIM 일감 微, 정상) |
+| T-GEN ON | ~13K | 0.0002 | 0.9935 | 3 / 3·3 | 저ctx → GPU-bound |
+| T-GEN OFF | ~13K | 0.0010 | 0.9913 | 3 / 3·3 | OFF≈ON (저ctx 합류 무관) |
+| agentic OFF | ~70K+ | 0.343 | 0.458 | 3 / 3·3 | 순수 decode → **PIM 활용(유휴 46%)** |
+| agentic ON | ~70K+ | 0.002 | 0.977 | 3 / 3·3 | join 이 GPU throughput 충전 |
+
+결론:
+1. **메커니즘은 스케일 무관 건전** — 모든 trace 에서 mb=3·window 3/3 (staggering·다중 mb·
+   per-mb 예산·합류 작동), 과포화·라이브락 0, GPU 잘 활용.
+2. **PIM 활용은 물리(ctx/56,160)를 따름** — <56K 면 PIM 유휴(decode-attn 싸서, 정상),
+   >56K 순수 decode 면 PIM 활용(46%). ARCH 56K 임계와 정확히 일치.
+3. **join = GPU throughput 가치** — GPU 유휴가 존재하는 곳(agentic OFF 34%)을 backlog
+   prefill 로 메움(→0.2%).
+4. 저/중 스케일 PULS 가치는 PIM 가동률이 아니라 다른 가속원(인스턴스 분리·Aux1 등);
+   PIM 특화 가치는 고ctx(타깃 agentic 장기추론)에 집중 — 타깃 정합.
+
+> 산출물: `measure_steady.py`(엄밀판 측정), `gen_agentic.py`·`gen_general.py`·
+> `gen_step5_traces.py`(트레이스), `diag_join_race.py`·`diag_mb_timeline.py`·
+> `diag_optime.py`(진단), `steady_*.txt`·`race_result.txt`(결과).

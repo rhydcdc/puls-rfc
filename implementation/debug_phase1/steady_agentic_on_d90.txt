@@ -1,0 +1,6 @@
+=== steady idle: agentic_on_d90 ===
+trace=debug_phase1/data/trace_agentic.csv
+join=ON batch=default chunk=default theta_high=default theta_low=default
+warmup_steps=3586620 measure_steps=100000 converged=True drained=False
+mb_count=3 max_window=3/3 samples=5
+idle gpu_a=0.0024 pim_a=0.9768 gpu_b=0.0000
