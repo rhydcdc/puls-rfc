@@ -74,31 +74,45 @@ balance 4-factor 미발현을 합성 트레이스로 확증하고, 합류 경로
 
 ## 6. 체크리스트
 
-### 합성
-- [ ] CSV 생성 스크립트 작성 (`debug_phase1/`)
-- [ ] T-S 생성 — short 몰림, decode 고분산, 도착 포화
-- [ ] T-L 생성 — long 몰림, 56K–150K, KV캐파 내 동시성 확보
-- [ ] T-M 생성 — short+long 혼합, prefill 분산 실 트레이스급
-- [ ] 분포 sanity (ctx/decode min·mean·max, 동시 admit 추정)
+### 합성 — 완료
+- [x] CSV 생성 스크립트 작성 (`generate_traces.py`)
+- [x] T-S 생성 — short 몰림(ctx>56K 0%), decode 고분산(97–1226), 도착 포화
+- [x] T-L 생성 — long 몰림(ctx>56K 100%), 58K–150K, 동시 admit ~37.6
+- [x] T-M 생성 — short+long ≈3:7(ctx>56K 72%), prefill heavy-tail 755K
+- [x] 분포 sanity (ctx/decode min·mean·max, 동시 admit 추정)
+- [x] 캐파 압박 트레이스 추가 (`gen_long_pressure.py` — 누적 KV 7.88M > 4M)
 
-### Baseline (수정 전)
-- [ ] T-S/T-L/T-M 실행, idle 3-key + dispatch_trace 저장
-- [ ] T-L에서 PIM 바운드·GPU 유휴 구간 확인
-- [ ] 신규 prefill 미합류 / `+1` 무실효 확증
+### Baseline (수정 전) — 완료
+- [x] 축소 T-L 실행, idle 3-key + dispatch_trace 저장 (`REPORT_baseline.md` §2–6)
+- [x] 근본 원인 정밀 특정 — 단일 mb 귀결 (`trace_single_mb.py`, §5–6)
+- [x] 캐파 압박에도 합류 부재 확증 (`prove_no_join.py`, §7 — join=False)
+- [x] 직렬 mb 처리 확증 (`prove_serial_fast.py`, §7b — window 내내 1)
+- [x] (정정) 근본 원인 = "한 tick=캐파까지 한 mb" → 직렬 처리. balance·staggering·
+      합류 발현 무대 자체 부재 (단일 원인)
 
-### 수정
-- [ ] 합류 경로 신설 (chunked prefill)
-- [ ] 합류 경로 신설 (chunked decode)
-- [ ] window capacity 한도 검토
+### 수정 — 1차: 세 한계 분리
+- [ ] **배치 크기(seq 상한) 신설** — KV 캐파와 분리 (하드 천장). 동시 다중 mb 형성
+- [ ] 배치 크기 스윕 {256, 512} — 각각 idle_fraction + (대리)TTFT/TBT 관측
+- [ ] token budget closed-form 산출 (트레이스 decode/prefill 기반, 모델 미실행)
+- [ ] 기존 테스트 회귀 통과
+
+### 수정 — 2차: 합류 경로
+- [ ] 신규 요청의 in-flight mb 합류 경로 신설 (chunked prefill)
+- [ ] chunked decode 실효화 (`balance_intra_A` +1 이 실제 배치 반영되도록)
+- [ ] window capacity 활용 검토 (다중 mb 공존 확인)
 - [ ] 기존 테스트 회귀 통과
 
 ### 재검증 (수정 후)
+- [ ] 캐파 압박 트레이스 재실행 — mb 다중화 + 동시 window>1 확인
 - [ ] T-L — GPU/종합 idle 감소 확인
 - [ ] T-M — 양방향 idle 동시 감소 확인
-- [ ] T-S — idle 불변 확인 (대조군)
+- [ ] T-S — idle 불변 확인 (대조군, 과잉 수정 방지)
 - [ ] before/after 보고서 작성
 
 ## 7. 산출물
 
-- `debug_phase1/data/` — 합성 CSV 3종
-- `debug_phase1/` — 생성 스크립트, baseline·재검증 결과, 최종 보고서
+- `debug_phase1/data/` — 합성 CSV (T-S/T-L/T-M + 압박 + 직렬검증 tiny)
+- `debug_phase1/*.py` — 생성·계측 스크립트 (generate_traces, gen_long_pressure,
+  analyze, trace_single_mb, prove_no_join, prove_serial_fast, config_small_cap)
+- `debug_phase1/REPORT_baseline.md` — baseline 관측·근본 원인·수정 설계
+- `debug_phase1/serial_result.txt` — 직렬 처리 검증 결과

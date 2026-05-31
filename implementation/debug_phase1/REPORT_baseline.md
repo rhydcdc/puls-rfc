@@ -147,17 +147,22 @@ capacity 3 이 완전 무용. mb0 가 도는 동안 PIM 이 놀아도 mb1(아직
 현재 구현은 KV 캐파(메모리) 하나를 배치 크기 한계로도 겸용하여 단일 mb 독점을
 초래한다. 목적이 다른 세 한계를 분리한다.
 
-| 한계 | 성격 | 역할 |
-|---|---|---|
-| **KV 캐파** | 하드 | OOM 방지 (인스턴스 전체 동시 보유 KV 한계, 여러 mb 공유) |
-| **배치 크기 (seq 상한)** | 하드 | head-of-line blocking 방지 (한 mb 의 최대 요청 수) |
-| **token budget** | 소프트 기본값 | PULS 동적성이 사는 곳 (balance 가 PIM/GPU idle 보고 동적 조절) |
+| 한계 | 성격 | 역할 | 정하는 법 |
+|---|---|---|---|
+| **KV 캐파** | 하드 | OOM 방지 (인스턴스 전체 동시 보유 KV, 여러 mb 공유) | 메모리 (4M 유지) |
+| **배치 크기 (seq 상한)** | 하드 | head-of-line blocking 방지 (한 mb 의 최대 *요청 개수*) | 스윕 {256, 512} |
+| **window (배치 개수)** | 하드 | staggering 깊이 (동시 생존 mb 수) | **작게 고정 (3)**, 메모리로 안 잡음 |
+| **token budget** | 소프트 기본값 | PULS 동적성 (balance 가 PIM/GPU idle 보고 동적 조절) | closed-form 산출 |
 
 - **KV 캐파 = 하드** — OOM 방지. 그대로 4M 유지.
-- **배치 크기(seq 상한) = 하드** — head-of-line blocking 방지. 신설.
+- **배치 크기(seq 상한) = 하드** — head-of-line 방지. 신설. *요청 개수* (KV 길이 아님,
+  vLLM `max_num_seqs` 와 동일).
+- **window(배치 개수) = 하드, 작게 고정(3)** — staggering 은 mb 2~3 개면 충분(PIM 도는
+  동안 GPU 빈자리 채움 = double-buffering F2). 메모리 한계까지 늘리면(`KV캐파/배치크기`)
+  동시 KV 가 다시 캐파 전체가 되어 단일 mb 독점 병으로 회귀 → **금지**.
 - **token budget = 소프트 기본값** — balance 4-factor 가 동적 조절. PULS 동적성의 핵심.
-  실제 모델을 돌리지 않아도 트레이스의 decode 토큰 수 + prefill 길이로 closed-form
-  산출 가능 (per-token FLOPs × batch / GPU peak, PIM 임계 56K/65536 동반).
+  실제 모델 미실행, 트레이스의 decode 토큰 수 + prefill 길이로 closed-form 산출
+  (per-token FLOPs × batch / GPU peak, PIM 임계 56K/65536 동반).
 
 상한과 그 안의 balance 는 직교 — 상한은 천장, balance 는 천장 아래 공간의 동적
 조절. 충돌하지 않으며, 상한이 오히려 balance 가 작동할 무대를 만든다.
@@ -165,6 +170,76 @@ capacity 3 이 완전 무용. mb0 가 도는 동안 PIM 이 놀아도 mb1(아직
 표준 정합: vLLM `max_num_seqs`(seq 상한) / `max_num_batched_tokens`(token budget),
 Sarathi-Serve token budget(decode + chunked prefill 혼합). PULS 는 Sarathi 의 PIM
 확장. 현 구현이 두 한계를 겸용한 것이 오히려 비표준.
+
+## 8b. 운영 의미론 — 배치 구성·합류·종료·밸런스
+
+본 절은 수정의 동작 의미를 확정한다 (구현 전 합의).
+
+### 실제 배치 크기 = 두 하드 한계의 min
+
+```
+실제 배치 크기 = min(seq 상한, KV 캐파가 허용하는 요청 수)
+```
+
+- long-context (avg kv 100K): KV 캐파 4M / 100K ≈ 40 < seq 상한 256 → **KV 캐파가 binding**.
+- short-context (avg kv 10K): 4M / 10K = 400 > 256 → **seq 상한이 binding**.
+
+→ "seq 상한 256 이어도 KV 가 먼저 차면 배치가 작아진다" 는 정상. 둘 중 빡빡한 쪽이 이긴다.
+
+### 합류 가능량 = 두 여유의 min
+
+```
+합류 가능량 = min(seq 상한 − 현재 요청 수, KV 캐파 여유 / 신규 요청 kv)
+```
+
+- 합류 대상 = **request_queue 의 신규 요청** (다른 mb 에서 빼오는 것이 *아님*).
+- 트리거 = 요청 완료 → KV release → 여유 발생 → 큐에서 끌어와 끼움.
+- long-context 는 보통 KV 여유가 binding, short 는 seq 자리가 binding.
+
+### 연속 배칭 vs 밸런스 — 직교
+
+- **연속 배칭 (합류)** = "*누구를* 배치에 넣을까" — 자리(seq+KV) 나는 대로 큐에서 들임.
+- **밸런스 4-factor** = "들어온 요청들의 *일을 어떻게 쪼갤까*" — prefill chunk 크기를
+  PIM/GPU idle 보고 동적 조절.
+- 합류가 넣고, 밸런스가 그 안에서 쪼갠다. 한쪽이 다른 쪽을 대체하지 않아 충돌 없음.
+
+### 밸런스 입력 = 미래 decode 길이 아님, *현재 KV 길이*
+
+- decode 는 매 cycle 토큰 1 개씩 (autoregressive, 쪼갤 수 없는 최소 단위).
+- 한 토큰의 attention 시간 = **지금 그 요청의 KV 길이**(prefill + 기생성분)로 확정 →
+  미래에 몇 토큰 더 나올지 *예측 불필요*.
+- 밸런스는 매 cycle "현재 살아있는 decode 요청들 × 각자 현재 KV → PIM 시간 확정 →
+  GPU prefill chunk 조절" 하는 **상태 기반 피드백 루프**. 요청이 EOS 로 빠지면 다음
+  cycle 에 다시 계산 (자기 보정).
+- 트레이스의 `max_tokens`(예 350)는 *종료 시점* 결정용일 뿐 밸런스 입력 아님. 실제
+  서버의 가변 decode 길이/EOS 여도 밸런스 로직은 그대로 작동.
+- 용어 주의: "chunked decode" 는 한 요청의 decode 를 쪼개는 것이 *아니라* 여러 요청
+  decode 토큰을 한 배치에 **모으는(batching)** 것. 기존 스케줄러에 "chunked decode"
+  가 없는 이유도 예측 문제가 아니라 decode 가 쪼갤 수 없는 최소 단위이기 때문.
+
+### 종료 시점 — 요청 vs mb 구분
+
+- **개별 요청** = `decoded_count >= max_tokens` 도달 시 확정 종료 + KV 즉시 release.
+  영원히 안 끝나는 일 없음.
+- **mb** = (a) 합류할 신규 요청 없음(큐 빔) **AND** (b) 안의 요청이 모두 완료 — 두 조건
+  동시 성립 시 evict. 큐에 일감이 있는 한 합류로 유지 = 연속 배칭 정상 동작 (무한 아님).
+- **mb 가 영원히 안 끝나는 경우** = 도착률이 처리율을 *영구* 초과해야 성립 = 시스템
+  과부하(overload). 정상 운영(도착률 < 처리율)에선 큐가 주기적으로 비어 evict 됨.
+  영구 초과는 mb 종료 문제가 아니라 큐 무한 적체(DDoS 급)로, admission control
+  (`request_queue_capacity`)이 거부할 영역. 정상 밸런스의 고려 대상 아님.
+
+### decode 합류의 비용 — GPU projection + KV 캐시 동반 증가
+
+decode 요청을 PIM 빈자리에 채우는 것은 *PIM 만* 일을 받는 것이 아니다.
+
+- decode 요청 1 개도 매 cycle **QKV + O_PROJ 를 GPU 에서** 수행 (GPU_NODE_TYPES).
+  PIM 이 받는 건 decode-attn 하나뿐. → decode N 개 추가 = **GPU projection 도 N 에
+  비례 증가** (요청당 ~0.2288 µs).
+- decode 요청이 살아있으려면 그 **KV 캐시가 메모리에 상주**해야 함 (kv_length). decode
+  를 많이 채우려면 그만큼 **KV 캐파 여유가 커야** 함 — 부족하면 캐파에 막혀 못 채움.
+- 함의: "PIM 에 decode 때려박으면 idle 해소" 가 단순 성립하지 않음. GPU 가 같이 커지므로
+  **컨텍스트가 충분히 길 때(>56K)** 만 PIM 증가분이 GPU 증가분을 추월 (PIM/GPU =
+  ctx/56,160, N 약분). 그 긴 컨텍스트 decode 를 다수 담으려면 KV 캐파가 받쳐줘야 함.
 
 ## 9. 다음 단계
 
