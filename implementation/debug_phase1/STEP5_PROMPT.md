@@ -95,5 +95,6 @@ PULS 스케줄러 Phase-1 디버깅의 STEP 5(재검증·스윕)를 진행한다
   heredoc 또는 -F 파일 사용.
 - 수정 후 의도 정합 여부를 배치_생애.md 기준으로 자가검증해라.
 
-현재 상태: origin/main = 3b8f9e2 (STEP 1~4 전부 푸시·동기화). working tree 깨끗.
+현재 상태: STEP 1~4 전부 커밋·푸시·origin/main 동기화 완료. working tree 깨끗
+(untracked analysis/ · idle_long_pressure.txt · measure_idle.py 는 무관).
 시작 전 위 문서들 다 읽고, STEP 5 접근 계획을 먼저 제시해라.
