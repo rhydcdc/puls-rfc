@@ -362,17 +362,53 @@ class SchedulerCore:
         """
         budget = mb.prefill_chunk_budget if mb.prefill_chunk_budget > 0 else self.config.admission.prefill_chunk_default
         active_req_ids = set(mb.prefill_chunk.keys()) | set(mb.decode_tokens.keys())
-        active_reqs = [
-            self.in_flight_requests[rid]
-            for rid in active_req_ids
-            if rid in self.in_flight_requests
-        ]
+        active_req_ids = {rid for rid in active_req_ids if rid in self.in_flight_requests}
+        # STEP 3-a — prefill 합류. PIM 바쁘고 GPU 노는 구간에서 큐의 신규 요청을 이 mb 에
+        # 끌어와 GPU 빈자리를 prefill 로 채움 (배치_생애 §4). 게이트·가능량은 헬퍼에서.
+        joined_ids = self._try_join_prefill(active_req_ids)
+        active_req_ids |= joined_ids
+        active_reqs = [self.in_flight_requests[rid] for rid in active_req_ids]
         new_prefill_chunk, new_decode_tokens, new_prefill_processed = self._populate_mb_phases(
             active_reqs, budget,
         )
         mb.prefill_chunk = new_prefill_chunk
         mb.decode_tokens = new_decode_tokens
         mb.prefill_processed = new_prefill_processed   # Impl-10 main — re-composition causal ctx refresh
+
+    def _try_join_prefill(self, active_req_ids: set[int]) -> set[int]:
+        """STEP 3-a — 진행 중 mb 에 큐의 신규 요청을 prefill 로 합류.
+
+        배치_생애 §4 (합류) + §5 (게이트). 연속 배칭의 backfill — 자리 나면 큐에서 들임.
+
+        게이트 = `gpu_idle > idle_theta_high` (GPU 빈자리 있을 때만; GPU 포화면 prefill
+        합류 무의미 → balance_intra_A 의 prefill 방향과 일관). PIM-bound(=GPU idle) 구간
+        에서만 발동 → GPU 를 prefill 로 채워 idle 해소.
+
+        가능량 = min(seq 여유, KV 여유). FIFO. KV 안 맞는 head 만나면 중단(head-of-line
+        은 다음 완료 경계에서 캐파 회수 후 재시도).
+
+        Returns: 합류된 신규 요청 id 집합 (kv_accountant.admit + in_flight 등록 완료 상태).
+        """
+        tel = self.admission.idle_telemetry
+        if tel.gpu_idle_fraction() <= self.config.admission.idle_theta_high:
+            return set()  # GPU 포화 → 게이트 닫힘
+        seq_room = self.config.admission.max_batch_size - len(active_req_ids)
+        if seq_room <= 0:
+            return set()
+        joined: set[int] = set()
+        while len(joined) < seq_room:
+            req = self.request_queue.peek_oldest()
+            if req is None:
+                break
+            if not self.kv_accountant.can_admit(req):
+                break  # KV 부족 → 합류 중단
+            self.request_queue.pop_oldest()
+            self.kv_accountant.admit(req)
+            if req.state == RequestState.PENDING:
+                req.transition_to(RequestState.PREFILL)
+            self.in_flight_requests[req.id] = req
+            joined.add(req.id)
+        return joined
 
     def _populate_mb_phases(
         self, reqs, chunk_budget_total: int,
