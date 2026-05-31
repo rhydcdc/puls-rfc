@@ -142,11 +142,12 @@ balance 4-factor 미발현을 합성 트레이스로 확증하고, 합류 경로
       이 prefill_chunk 까지 보도록 + 직접구동 2건 prompt=[] isolate
 - [x] 회귀 42 passed (lifecycle 17·stress·e2e·determinism·structural·f4). 푸시 1080705
 
-### STEP 3-b — 합류 경로: decode 방향 (GPU 바쁠 때 PIM 빈자리 채움)
-- [ ] decode 합류 (통째로 — autoregressive, 못 자름) — pim_idle > theta_high 게이트
-- [ ] **chunked decode 실효화** — `balance_intra_A` 의 decode +1 이 spec.n(통계)에만 반영
-      되고 실제 배치 미반영인 버그 해소 → 실제 decode 요청이 배치에 들어가도록
-- [ ] 단위 테스트 (decode 합류 게이트/가능량)
+### STEP 3-b — 합류 경로: decode 방향 (GPU 바쁠 때 PIM 빈자리 채움) — 완료
+- [x] decode 합류 — `_try_join` 게이트 양방향 일반화 (gpu_idle>θ OR pim_idle>θ).
+      decode 는 통째로(autoregressive), prompt 유무로 _populate_mb_phases 자동 분류
+- [x] **chunked decode 실효화** — `balance_intra_A` 의 무실효 decode +1 제거.
+      decode 조절은 _try_join 전담(실효 있게, 매 완료 경계). 시그니처 단순화
+- [x] 단위 테스트 — test_prefill_join 에 decode 방향 3건 추가 (8건). 커밋 71abfe4
 
 ### STEP 4 — 3-b 회귀 (타깃 범위만) — 완료
 - [x] 가벼운 타깃 회귀 283 passed (admission/main_loop/completion/window/config/meta/
