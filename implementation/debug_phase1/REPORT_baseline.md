@@ -320,3 +320,24 @@ light_pressure 트레이스 (이전엔 prefill chunk 8192 로 안 끝나던 것)
 
 → 완주 불가의 원인이 admission tick 헛돌이였음이 확정. 타깃 회귀 284 passed
 (TestSelfRescheduling 4 건은 타이머 전제 → 이벤트 기반으로 업데이트).
+
+## 11. STEP 3 합류 전 before 수치 — 풀 트레이스 (trace_long_pressure, 80 req)
+
+STEP 2.5 후, 이전엔 완주 불가하던 80 req 압박 트레이스를 default config 로 측정:
+
+```
+drain=True  steps=5,740,320  mb_count=4  max_window=3/3
+idle:  gpu_instance_a=0.04%   pim_instance_a=97.95%   gpu_instance_b=0.00%
+```
+
+관측:
+- **완주** — 이전(3M step not drained, 8.9GB) 대비 STEP 2.5 효과로 정상 종료(메모리 <1GB).
+- **mb 다중화 작동** — max_window 3/3 (window cap 까지 참).
+- **PIM idle 97.95%** = STEP 3 합류 전 before 수치. GPU A 만석, PIM 거의 유휴.
+  → 이 트레이스는 prefill-dominant(decode 24–64 로 짧음)라 PIM 채울 decode 일감이 희소.
+
+해석:
+- 이 트레이스에선 합류해도 PIM idle 이 크게 안 떨어질 수 있음 (decode 일감 자체가 적음).
+- **합류 효과는 decode 비중 큰 트레이스(T-M / T-L)에서 드러남**. STEP 3 후 after 측정은
+  T-M/T-L 로 (decode 분산 높고 long-ctx → PIM-bound 구간 형성).
+- mb_count=4 는 KV 캐파(4M)가 seq 상한(256)보다 binding 이라 정상 (long-ctx).

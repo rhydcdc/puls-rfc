@@ -129,27 +129,49 @@ balance 4-factor 미발현을 합성 트레이스로 확증하고, 합류 경로
       (+ wiring 테스트 inspect 대상 함수명 갱신)
 - [x] light_pressure 헛도는 tick 제거 확증: **3,000,000+ (not drained) → 76,820 (완주)**
 
-### STEP 3 — 수정 2차: 합류 경로 (양방향)
-- [ ] 신규 요청의 in-flight mb 합류 경로 신설 — admission 이 request_queue +
-      in_flight 둘 다 보도록. 합류 가능량 = min(seq 여유, KV 여유)
-- [ ] prefill 합류 (chunk 로 잘라서) + decode 합류 (통째로)
-- [ ] **합류 게이트 = 밸런스 in_band 조건** — 무조건 합류 아님. PIM/GPU 레이턴시
-      맞으면(in_band) 합류 중단 (배치_생애 §5 인과: 밸런스→게이트 닫힘→소진→종료)
-- [ ] **mb evict 조건 변경** — "전원 완료" → "전원 완료 AND 큐 빔" (STEP 1 에서 이동).
-      합류가 생겼으므로 큐 있는 한 mb 유지 (배치_생애 §5 종료 조건)
-- [ ] chunked decode 실효화 (`balance_intra_A` +1 이 실제 배치 반영되도록)
+### STEP 3-a — 합류 경로: prefill 방향 (PIM 바쁠 때 GPU 빈자리 채움) — 완료
+- [x] 신규 요청의 in-flight mb 합류 경로 신설 — `_try_join_prefill` (`_recompose_mb` 내).
+      request_queue 에서 들임. 합류 가능량 = min(seq 여유, KV 여유), FIFO
+- [x] prefill 합류 (chunk 로 잘라서) — joined req = KV admit + in_flight + PREFILL 전이
+- [x] **합류 게이트 = gpu_idle > idle_theta_high** (GPU 빈자리 있을 때만; PIM-bound 구간).
+      GPU 포화면 게이트 닫힘 (배치_생애 §4·§5)
+- [x] **mb evict 조건 변경** — "전원 완료" → recompose(자기재구성+합류) 후 prefill_chunk·
+      decode_tokens 둘 다 비면 evict (배치_생애 §5: 완료 AND 합류 불가). 커밋 1080705
+- [x] 단위 5 (test_prefill_join): 게이트 on/off, seq-bound, KV-bound, empty noop
+- [x] 사전버그 7 (test_cross_module_lifecycle, 제 작업 무관) 수정 — `_drive_until_done`
+      이 prefill_chunk 까지 보도록 + 직접구동 2건 prompt=[] isolate
+- [x] 회귀 42 passed (lifecycle 17·stress·e2e·determinism·structural·f4). 푸시 1080705
 
-### STEP 4 — 2차 회귀 (타깃 범위만)
+### STEP 3-b — 합류 경로: decode 방향 (GPU 바쁠 때 PIM 빈자리 채움)
+- [ ] decode 합류 (통째로 — autoregressive, 못 자름) — pim_idle > theta_high 게이트
+- [ ] **chunked decode 실효화** — `balance_intra_A` 의 decode +1 이 spec.n(통계)에만 반영
+      되고 실제 배치 미반영인 버그 해소 → 실제 decode 요청이 배치에 들어가도록
+- [ ] 단위 테스트 (decode 합류 게이트/가능량)
+
+### STEP 4 — 3-b 회귀 (타깃 범위만)
 - [ ] 동일 타깃 모듈 테스트 재실행 (`test_admission/main_loop/completion/window/...`)
 - [ ] 깨진 테스트 업데이트/수정
 
 ### STEP 5 — 재검증 (수정 후) — 새 검증 테스트 중심
 - [ ] 배치 크기 스윕 {256, 512} — 각각 idle_fraction + (대리)TTFT/TBT 관측
+- [ ] **합류 게이트 임계(θ_high) 스윕 {0.3, 0.1}** — 목적이 "유휴율 0 수렴"이므로 30%는
+      느슨(최대 30% 유휴 용인). 10%로 조이면 목적 충실하나 합류 잦아 진동 위험 → 실측
+      비교. 게이트 기준 = 유휴율(idle_fraction), 레이턴시(in_band)와 동치이나 목적 지표라
+      더 직접적 (배치_생애 §5).
+- [ ] **hysteresis 부활 (idle_theta_low)** — 현재 θ_low(0.1)는 *미사용 placeholder*
+      (로직 0개). 진동 방지 위 "θ_high(예 0.1) 초과 시 합류, θ_low(예 0.05) 미만 시 멈춤"
+      이중 임계 구현. 단일 임계(현)는 경계 진동 위험 → 10%로 조일 때 특히 필요.
+      θ_high 스윕과 함께 평가 (조이는 것이 정말 idle 더 낮추는지 실측 후 채택).
+- [ ] (참고) pim_slack 안전마진(0.9 = t_pim×0.9, PIM 을 compute-bound 뒤 은닉)은 생존 중
+      — balance_pim_slack 의 prefill chunk 산식. 이번 변경 무관, 유지.
 - [ ] token budget closed-form 산출 (트레이스 decode/prefill 기반, 모델 미실행)
 - [ ] T-L — GPU/종합 idle 감소 확인
 - [ ] T-M — 양방향 idle 동시 감소 확인
 - [ ] T-S — idle 불변 확인 (대조군, 과잉 수정 방지)
 - [ ] before/after 보고서 작성
+- [ ] **배치_생애.md 갱신** — 스윕 확정값 반영: 배치 크기 상한, 합류 게이트 θ_high(+
+      hysteresis θ_low) 최종값을 문서의 "세 한계" / §5 게이트에 구체값으로 명시.
+      (현재는 기호·예시값 → 스윕 후 확정값으로)
 
 > 미수정 영역(RTL·evaluator·trace 생성 등)은 회귀 스킵.
 
