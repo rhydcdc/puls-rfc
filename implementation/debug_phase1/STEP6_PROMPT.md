@@ -1,219 +1,152 @@
-# STEP 6 작업 프롬프트 (새 대화용) — 밸런스를 PIM-시간 기준으로 + TBT 측정
+# STEP 6 작업 프롬프트 (새 대화용) — ★ 근본 재설계: persistent-mb → 풀(pool) 모델
 
 아래 내용을 새 대화창에 그대로 붙여넣으세요.
 
 ---
 
-PULS 스케줄러 디버깅의 STEP 6 을 진행한다. 핵심 주제: **밸런스 게이트 기준을
-"유휴율" → "PIM 시간 vs GPU 시간"으로 바꾸고, 지표를 idle → TBT 로 전환**한다.
-수정 전에 아래 문서·코드를 **꼼꼼히 다 읽고** 맥락을 완전히 파악한 뒤 시작해라.
-맨 아래 작업 습관 당부를 반드시 지켜라(이번 세션에 같은 실수 여러 번 했다).
+PULS 스케줄러의 **근본 재설계**를 진행한다. 결론부터: 지금까지의 Phase-1 디버깅
+(STEP 1~5.5)에서 고쳐온 문제들(단일 mb 독점, 합류 cannibalization, per-mb KV 예산,
+유휴율 게이트, TBT 폭증)은 **전부 "요청을 micro-batch 컨테이너에 생애째 가둔" 모델의
+부작용**이었다. 올바른 모델은 **전역 풀 + 매 iteration 혼합 배치 선택(Sarathi-Serve 식)**
+이고, 이게 PULS 가 *원래 표방한* 설계다(ARCH §6.1 "phase mix", README "Sarathi 의 PIM
+확장"). **persistent-mb 코드를 더 재거나 고치지 말고, 풀 모델로 코어를 재설계한 뒤
+측정한다.**
 
-## 먼저 읽을 것 (순서대로)
+> 시작 전 아래 문서·코드를 꼼꼼히 다 읽고, **맨 먼저 이 결론을 ARCH §6 정독으로
+> 검증**해라(맹신 금지 — μ-batch window 가 persistent 의도였는지 per-iteration 의도였는지).
+> 맨 아래 작업 습관 당부를 반드시 지켜라.
 
-1. `README.md` / `ARCHITECTURE.md` — PULS 아키텍처 전체. 특히 ARCH **§5.3(compute-bound
-   window 중 PIM overlap), §5.6(intra-instance double-buffering = F2), §6.3(PIM completion
-   computed at dispatch), §6.4(adaptive admission)**. F2 의 본질 = "한 자원의 일을 다른
-   자원의 더 긴 시간 *그늘에* 숨겨 cycle 을 안 늘리고 throughput 을 얻음".
-2. `배치_생애.md` (repo 최상위) — 배치 생애 설계. **세 한계 + per-mb KV 예산(네 번째 강제)**,
-   양방향 합류, 게이트, 종료. **밸런스의 진짜 정의를 STEP 6 에서 이 문서에 다시 써야 함**
-   (현재는 "유휴율" 뉘앙스 → "prefill 을 PIM 시간 그늘에 숨겨 TBT 보존"으로).
-3. `implementation/debug_phase1/PLAN.md` — STEP 1~5.5 체크리스트.
-4. `implementation/debug_phase1/REPORT_baseline.md` — **§12(race·per-mb 예산), §13(ns/µs
-   단위 버그), §14(스케일 스펙트럼)** 이 이번 세션 핵심. 반드시 정독.
-5. 핵심 소스: `implementation/src/puls_sched/` 의
-   - `admission.py` — `balance_pim_slack`(시간 기준 chunk 산식, **여기가 STEP 6 핵심**),
-     `balance_intra_A`(유휴율 기준), `balance_inter_AB`, `layer1`.
-   - `main_loop.py` — `_make_t_pim_fn`(ns→µs 수정됨), `_compose_admission_payload`(t_proj·
-     t_pim_fn·per_token 산출), `_recompose_mb`(매 cycle 재구성, **budget freeze 지점**),
-     `_try_join`(유휴율 게이트), `_per_mb_kv_budget`(=KV캐파/`_STAGGERING_TARGET_MB`=2).
-   - `dispatcher.py` — `_op_time`(GPU=초×1e6 µs, **PIM=op_time(ns)×1e-3** µs). cycle 구조.
-   - `pim_emulator.py` — `op_time` 은 **ns 반환**(tile_time_ns 기반, sequence-parallel 2048ch).
-   - `config.py` — `AdmissionConfig`(prefill_chunk_default=512, idle_theta_high=0.3,
-     idle_theta_low=0.05, max_batch_size=256), `compute_gpu_op_time_s`(per-op 초 산출).
+## 0. 가장 먼저 — 이 재설계 방향을 검증하라
 
-## 이번 세션(STEP 5)에서 밝혀진 것 — 반드시 숙지
+이전 세션이 도달한 결론이나, **새 세션은 추측을 검증부터 한다**(가설이 여러 번 빗나갔다):
+- **ARCH §6 전체(특히 §6.1 μ-batch Composition, §6.2 DAG, §6.3 dispatch, §5.6
+  double-buffering)를 정독** → "μ-batch = 풀에서 매 iteration 선택한 혼합 배치"가
+  맞는지, 아니면 persistent 컨테이너 의도였는지 확정.
+- 핵심 인용 (line 330): *"A μ-batch contains **different requests in a phase mix**"* /
+  (line 275) *"prefill and decode **coexist within the same batch**"* / (line 279) PULS =
+  **Sarathi-Serve 의 PIM 확장**(token budget 로 decode+chunked prefill 혼합).
+- 검증 결과 풀 모델이 맞으면 §아래 설계로 진행. 아니면 사용자와 재논의.
 
-### A. PIM 유휴는 워크로드·물리 함수지 버그가 아니다 (지표가 틀렸었다)
+## 1. 왜 persistent-mb 가 근본 문제였나 (이번 세션 결론)
 
-- PIM(decode-attn)은 2048채널 sequence-parallel 이라 **고ctx 에서도 빠르다** (ctx 70K,
-  27요청 decode-attn ≈ **7.74µs**). GPU projection(QKV+O_PROJ) ≈ **6.18µs** →
-  순수 decode 에선 **PIM/GPU = ctx/56,160 = 1.25 (PIM-bound)**.
-- 그러나 **PREFILL_ATTN = O(chunk×ctx)** 라 고ctx 에서 폭발적 (3요청·chunk 170·ctx 70K ≈
-  **444µs**, PIM 의 57배). → **prefill 이 조금이라도 있으면 GPU 가 압도 → PIM 유휴.**
-- 결론: **PIM-bound(PIM 바쁨)는 오직 `ctx>56K + 순수 decode(prefill 없음)`** 한 구간뿐.
-  나머지는 GPU-bound·PIM 유휴가 *정상*. "PIM 유휴율 낮추기"는 애초에 틀린 목표였다.
+- **현 코드**: admission 이 요청 묶음을 한 mb 로 만들고, 그 mb 가 *함께 prefill → 함께
+  decode* 하는 생애를 강제(`_recompose_mb` 가 같은 요청 집합을 매 cycle 재구성).
+  → 한 mb 안 요청이 **같은 생애 단계**라 초기엔 전부 prefill / 후기엔 전부 decode.
+  지속적 혼합이 안 됨. 그걸 억지로 섞으려 `_try_join`(유휴율 게이트)을 붙임.
+- **거기서 STEP 1~5.5 문제 전부 파생**: 단일 mb 캐파 독점 → per-mb KV 예산(KV/2),
+  freed KV 를 한 mb 가 backfill → 합류 cannibalization, 유휴율 게이트 → TBT 폭증, …
+  **전부 mb-컨테이너의 부작용.** 풀 모델이면 애초에 안 생긴다.
 
-### B. 스케일 스펙트럼 (수정된 코드, 엄밀판 측정, 전부 mb=3·window 3/3)
+## 2. 올바른 모델 — 전역 풀 + 매 iteration 혼합 배치 (Sarathi 식)
 
-```
-              gpu_a idle  pim_a idle   ctx       해석
-T-S ON:        0.0002      0.9943      ~8K       저ctx → GPU-bound (PIM 일감 微, 정상)
-T-GEN ON:      0.0002      0.9935      ~13K      저ctx → GPU-bound
-T-GEN OFF:     0.0010      0.9913      ~13K      OFF≈ON (저ctx 합류 무관)
-agentic OFF:   0.343       0.458       ~70K+     순수 decode → PIM 활용(유휴 46%)! 둘 다 ~60%
-agentic ON:    0.002       0.977       ~70K+     합류가 GPU 를 prefill 로 채움
-```
-- agentic OFF(둘 다 ~60% 활용) = **balance/staggering 이 만든 F2 regime** (PIM 이 한 mb
-  decode-attn 하는 동안 GPU 가 다른 mb projection overlap). 메커니즘은 작동한다.
-- agentic ON = 합류가 GPU 유휴(34%)를 backlog prefill 로 채움. **하지만 이게 문제다(아래).**
+- **전역 풀(running set)**: 요청들이 각자 단계로 존재 — *prefill 중*(남은 프롬프트 chunk
+  필요) / *decode 중*(이미 prefill 끝, 매 step 1토큰). 요청별 생애(prefill→decode)는
+  *요청의 속성*일 뿐, **배치 멤버십과 분리**된다.
+- **매 iteration 배치 = 풀에서 선택**:
+  - 살아있는 **decoder 전부**의 decode 토큰(→ PIM decode-attn) — TBT 위해 매 step 진행.
+  - 거기에 **prefill chunk** 를 **GPU 시간이 PIM 시간과 같아질 만큼만**(슬랙에 숨겨) 추가.
+  - prefill 끝난 요청은 **풀에 decode-only 로 복귀** → 다음 iteration 부터 PIM 채움.
+- **F2 staggering** = 연속 iteration 배치를 2-μ-batch lookahead 로 overlap(PIM 이 M
+  attention 하는 동안 GPU 가 M+1 QKV) — ARCH §5.6/§6.3. persistent 컨테이너 불필요,
+  *연속 배치가 곧 M·M+1*.
 
-### C. ★ 핵심 문제 — 합류의 GPU 충전이 TBT 를 폭증시킨다
+## 3. 왜 이게 TBT·TTFT 를 동시에 잡나 (+ 유휴율=시간 동치)
 
-cycle = `t_qkv + max(t_prefill_attn, t_pim) + t_oproj`. 고ctx 에서:
-```
-OFF (prefill 없음):  cycle ≈ max(6µs, 7.74µs) = 7.74µs   → TBT ≈ 7.74µs × 80층 ≈ 0.6 ms/token
-ON  (prefill flood): cycle ≈ 6 + 444 + ... ≈ 567µs       → TBT ≈ 567µs × 80 ≈ 45 ms/token (~75×!)
-```
-- GPU 100% 활용은 **좋은 게 아니라** prefill 이 PIM 슬랙을 넘어 cycle 을 늘려
-  **decoder 의 TBT 를 파괴**한 것. (mixed batch 라 decoder 가 같은 cycle 의 prefill 뒤에서
-  대기.) PIM 은 7.74µs 에 끝내고 GPU 가 prefill 444µs 가는 동안 논다 = 그 대기가 TBT.
+- **TBT**: 모든 decoder 가 매 iteration 1토큰 → TBT = iteration 시간 ≈ t_pim
+  (prefill 을 슬랙에 숨기니 cycle 안 늘어남). 바운드. (동시 decoder 수가 배치 한도
+  넘으면 admission control 로 큐잉 — 표준 throughput/latency trade-off.)
+- **TTFT**: prefill 이 decode 가 만든 GPU 슬랙에 숨어 진행 → TBT 안 깨고 prefill 진척.
+- **유휴율 vs 시간**: 풀 모델 + **순간(per-iteration) 유휴**면 둘은 *동일*하다 —
+  GPU 순간 유휴 = (t_pim − t_gpu)/t_pim → 이를 0 으로 = t_gpu→t_pim = 시간 균형.
+  이전 세션이 "유휴율 나쁘다"고 본 건 **누적(cumulative) 유휴 + mb 파편화**의 산물.
+  → 단, t_pim 은 dispatch 전 *계산*되므로(§6.3 computed wait) **시간 기준이 선제·정확**
+  (per-iteration 유휴는 1틱 지연 반응형). 수렴점은 같으니 **시간 기준으로 구현**.
 
-### D. ★ STEP 6 의 본질 — 게이트 기준을 유휴율 → PIM 시간으로
+## 4. 이번 디버깅에서 *가져갈* 것 (carry-over — 재설계에도 유효)
 
-밸런스의 *진짜* 정의(F2): **한 사이클에서 t_pim 과 t_gpu 를 재서, PIM 이 더 길면 그
-슬랙(t_pim − t_gpu)만큼만 GPU 에 prefill 을 끼워 cycle 을 안 늘리고(=TBT 보존) throughput
-획득. GPU 가 더 길면 그 슬랙에 decode-attn(싸다)을 더 채워 batch↑**. 유휴율이 아니라
-*시간*이 기준이어야 한다 (ARCH §5.3/§5.6).
+- **단위**: `PIMExecutor.op_time` = **ns**, clock·GPU op_time = **µs**. dispatcher 가 PIM
+  ×1e-3(`_op_time`), `_make_t_pim_fn` 도 ×1e-3(STEP 5 에서 수정, commit 1a1feb5).
+  새 코드 시간 비교 시 단위 맞춰라.
+- **op-time 물리(ctx 70K, diag_optime 로 직접 산출)**:
+  - PIM decode-attn(27요청) ≈ **7.74µs**, GPU projection(QKV+O_PROJ) ≈ **6.18µs** →
+    순수 decode 에선 PIM/GPU = ctx/56,160 = 1.25 (**PIM-bound**).
+  - **PREFILL_ATTN = O(chunk×ctx)** 폭발적 — 3요청·chunk170·ctx70K ≈ **444µs**(PIM 의
+    57배). **prefill 조금만 있어도 GPU 압도.** → prefill 은 *반드시 PIM 슬랙 안에*.
+- **지표 = TBT·TTFT (idle 아님)**. idle_telemetry 는 측정·진단용으로만.
+- **밸런스의 진짜 정의** = "유휴율 맞추기"가 아니라 **"prefill 을 PIM 시간 그늘에 숨겨
+  cycle(TBT) 안 늘리고 throughput"**. 풀 모델에서 매 iteration prefill = max(0, t_pim −
+  t_gpu)/per_token.
+- **멤버십(어떤 요청, = 용량/큐) vs 사이클 일(prefill 얼마, = 시간) 분리** (배치_생애 §두 축).
+- **PIM 가동률은 워크로드·물리 함수**(ctx/56K) — 저ctx GPU-bound·PIM 유휴는 정상.
+  PIM 가치는 가동률 아니라 op-level(Aux2 버스절감·F5). 타깃 = **long-context agentic**.
+- **decode 는 충전 불가(부산물)** — 풀에서도 decode 일감은 "이미 prefill 끝난 요청"이
+  공급. 밸런스 레버는 **prefill 양**뿐(§D-3 논리 유효).
+- **스케일 스펙트럼 실측**(REPORT §14): T-S/T-GEN(저ctx) GPU-bound·PIM 유휴 / agentic
+  OFF(고ctx 순수 decode) PIM 활용(유휴 46%·둘 다 ~60%) / agentic ON 합류가 GPU 과포화.
 
-현 코드가 어긋난 3 지점:
-1. **`balance_pim_slack` 의 `max(base 512, chunk_optimal)` floor** — 고ctx 에서 optimal≈1
-   인데 base 512 가 덮어써 슬랙 초과 → TBT 폭증. **floor 제거/재설계 필요.**
-2. **`mb.prefill_chunk_budget` 가 admission 시점에 한 번 산출 후 freeze** — in-flight mb 는
-   매 사이클 t_pim 이 변해도 재계산 안 함(`_recompose_mb`). **매 recompose 재계산 필요.**
-3. **합류 게이트(`_try_join`: gpu_idle>θ OR pim_idle>θ)·`balance_intra_A`(gpu_idle>θ_high)
-   가 유휴율 기준** — "한 사이클 prefill 양"을 누적 유휴%로 결정. **양은 시간 슬랙으로,
-   유휴율은 "언제 admit/합류할지(용량 게이트)"에만** 쓰도록 분리.
+## 5. 무엇이 *moot* 되나 (persistent-mb 밴드에이드 — 풀 모델이면 불필요)
 
-(주의: 단위 버그(§13)는 이미 고쳤으나 agentic 측정엔 무효였다 — t_proj 가 커서 슬랙이
-음수 → 어느 단위든 chunk_optimal=0 → base 512. 즉 floor 가 진짜 범인. 단위 수정은
-양의 슬랙 regime 위해 유지.)
+> 코드 *substrate* (op-time 산식, dispatcher, PIMExecutor, KVAccountant, Completion, DAG
+> 노드, IdleTelemetry, InstancePipeline)는 재사용. **스케줄링/구성 레이어만 교체.**
 
-### D-2. ★★ 멤버십(용량) vs 밸런스(시간) 분리 — 유휴율을 *기준*에서 제거
+- `_per_mb_kv_budget`·`_STAGGERING_TARGET_MB`(per-mb KV 예산) — 풀이면 KV 는 전역 풀
+  한계라 per-mb 분할 불필요.
+- `_try_join` + 유휴율 게이트 + hysteresis(idle_theta_low/high) — 풀이면 멤버십=용량,
+  밸런스=시간이라 합류·게이트 개념 자체가 없어짐(매 iteration 풀에서 재선택).
+- `balance_intra_A`(유휴율 chunk 증량) — 시간 기준 prefill 사이징으로 대체.
+- persistent `MicroBatch` 컨테이너·`_recompose_mb`·window 의 mb 등록/evict — per-iteration
+  배치 형성으로 대체. (단위 수정 1a1feb5 는 유효, 나머지 STEP 1~5.5 의 mb 관련 변경은
+  상당수 대체됨 — REPORT 가 그 여정을 기록.)
 
-스케줄러가 정하는 건 사실 **두 개이고 서로 다른 축**인데 현 코드가 유휴율로 섞어놨다:
+## 6. 할 일 (검증 → 설계 → 구현 → 측정)
 
-- **(1) 멤버십 = "어떤 요청을 배치에 넣을까"** → **용량 함수**: seq cap(256) + KV 캐파 +
-  per-mb KV 예산 + 큐 비었나. 자리 나면 채움 = 연속배칭. **유휴율 불필요.** ("놀까봐
-  가져온다"가 아니라 "자리 나서 채운다".)
-- **(2) 사이클 내 일 배분 = "한 사이클에 prefill 얼마"** → **시간 함수**: PIM 슬랙
-  (t_pim − t_gpu)만큼만 → cycle 안 늘림 → **TBT 보존**. 이게 밸런스.
+1. **검증** — ARCH §6 정독, 풀 모델 해석 확정(§0). 아니면 사용자와 재논의.
+2. **설계** — running pool(prefill-queue + decode-set) + per-iteration 배치 형성기:
+   - decoder 전부 선택(또는 배치 한도까지) + prefill = PIM 슬랙(시간 기준, base floor 없음).
+   - F2 = 2-μ-batch lookahead(연속 배치 overlap). admission control(동시 decoder 한도).
+   - prefill→decode 전이 시 풀 복귀. TTFT↔TBT 정책(슬랙 0 시 최소 prefill 보장 여부).
+3. **구현** — 스케줄링 레이어 교체(substrate 재사용). 단위테스트 + 회귀.
+4. **측정** — measure_steady 에 **TBT·TTFT 산출 추가**(decode 토큰당 cycle 시간 / 첫
+   토큰까지 시간). 스케일 스펙트럼(T-S/T-GEN/agentic)으로 풀 모델의 TBT·TTFT 확인.
+5. **문서** — 배치_생애·README·REPORT 를 풀 모델로 갱신. README "Target Workload" =
+   long-context agentic 재프레이밍.
 
-**유휴율은 input(기준)이 아니라 output(결과)이어야 한다.** 시간 균형(t_pim≈t_gpu)을
-맞추면 유휴율은 그 *결과로* 자연히 낮아진다. 유휴율을 *기준*으로 두면 "놀까봐 GPU 에
-계속 prefill 끼워넣는" 반응 피드백 → 과주입 → TBT 폭증(C 절).
+## 7. 코드 지도 (현재)
 
-→ **할 일**: 유휴율을 *판단 기준*에서 제거.
-- `_try_join` 게이트(`gpu_idle>θ OR pim_idle>θ`) → **용량 기준으로**(자리+큐). hysteresis
-  (θ_low/high)도 게이트 제거되면 moot.
-- `balance_intra_A`(`gpu_idle>θ_high` → chunk += n_sat) → **시간 기준 prefill 사이징으로 흡수.**
-- **종료** = "큐 빔 + in-flight 완료"(용량/큐 기준)로 자연 처리 — 게이트 닫힘에 의존 X.
-- **`idle_telemetry` 자체는 유지** — 측정/진단/보고용(시간 균형 잘 됐는지 *관측*). 기준 아님.
-- 착수 시 **`grep -rn idle src/` 로 모든 사용처 확인** 후 기준-용도만 제거(측정-용도 보존),
-  종료·evict 로직이 게이트에 의존하지 않는지 검증.
+- `src/puls_sched/` — `admission.py`(layer1·balance_*), `main_loop.py`(mb 관리·
+  _recompose_mb·_try_join·_make_t_pim_fn·_compose_admission_payload), `dispatcher.py`
+  (_op_time: GPU 초×1e6, PIM ns×1e-3·cycle 구조), `pim_emulator.py`(op_time=ns),
+  `micro_batch.py`, `window.py`, `config.py`(AdmissionConfig), `idle_telemetry.py`,
+  `kv_accountant.py`, `completion.py`, `dag.py`, `forward_pass.py`, `run.py`.
+- `debug_phase1/` — `measure_steady.py`(엄밀판 측정), `diag_optime.py`(op-time 직접
+  산출 — 출력 단위 ns/µs 주의), `gen_agentic.py`/`gen_general.py`/`gen_step5_traces.py`
+  (트레이스), REPORT_baseline.md §12~14, 배치_생애.md(repo 최상위).
 
-핵심: **요청을 많이 admit 해도(용량 허용) 사이클당 prefill 은 PIM 슬랙으로 제한되니
-TBT 보존.** 멤버십과 사이클 일을 분리하면 "많이 담되 천천히 prefill"(TTFT↔TBT trade-off는
-별도 정책 knob 판단).
-
-### D-3. ★★ 비대칭 — "PIM에 decode 충전"은 환상, 밸런스 레버는 prefill 감축뿐
-
-흔한 오해: "PIM 유휴율이 높으면(예 97%) 대칭적으로 decode를 더 충전해 유휴를 낮추면
-되지 않나?" → **불가능하다. prefill 과 decode 는 비대칭이다.**
-
-- **prefill = 충전 가능** — 큐의 새 요청에서 끌어옴.
-- **decode = 충전 불가** — decode 일감은 *이미 prefill 끝난 배치 안 요청*이 매 사이클
-  1토큰씩 만드는 **부산물**. 큐엔 "decode 준비된 요청"이 없다(다 미처리 프롬프트).
-  → **PIM에 decode를 추가할 소스 자체가 없다.**
-- 코드 확인: `balance_intra_A` 의 decode 방향(+1)은 STEP 3-b 에서 **무실효라 제거**
-  (prefill 증량만 남음). `_populate_mb_phases`(main_loop ~L476) 는 큐 요청을
-  `remaining = len(prompt) − prefill_processed > 0` → **항상 prefill 로 분류**.
-
-그래서 **PIM 유휴(GPU-bound일 때)는 decode 추가로 못 고친다**:
-- PIM 97% 유휴의 원인은 *decoder 가 적어서*가 아니라 **GPU가 prefill로 flood돼 cycle이
-  길어서**(decoder는 있고 decode-attn 7.74µs가 GPU prefill 444µs 대비 작을 뿐).
-- 요청을 더 admit 해도 그들도 **prefill 부터** 해야 해 GPU를 더 flood → PIM 여전히 유휴.
-
-→ **밸런스의 유일한 레버 = prefill 을 PIM 슬랙까지 *줄이는* 것(시간 기준).** "decode 충전"은
-환상이다. 그리고 이게 유휴율 게이트를 못 쓰는 또 다른 이유: 유휴율 피드백은 **prefill 추가
-한 방향으로만** 작동하는 **일방향 래칫**(GPU 놀면 prefill↑, 근데 PIM 놀면 넣을 게 없음)
-→ prefill만 쌓여 flood. 균형은 오직 prefill 을 *줄여야* 나는데 유휴율은 줄이질 못한다.
-
-(예외: 멀티턴처럼 *이미 KV 있는* 요청이 큐로 돌아오는 워크로드면 decode-fill 이 실재 —
-단일패스 트레이스엔 없음. STEP 6 는 단일패스 기준.)
-
-## STEP 6 에서 할 일 (측정부터, 추측 금지)
-
-> 이번 세션에 가설이 5번 빗나갔다. **반드시 측정으로 확인**하며 진행해라.
-
-1. **measure_steady 에 TBT 산출 추가** — decode 토큰당 평균 cycle 시간
-   (= 측정 구간 clock_span / 그 구간 생성된 decode 토큰 수, 또는 per-request 평균).
-   idle 은 보조로 남기되 **주 지표 = TBT**.
-2. **현 코드 OFF/ON TBT 측정** (agentic) → "ON TBT ~75× 악화" 가설 실측 검증.
-3. **시간 기준 balance 로 수정**:
-   - prefill 양 = max(0, t_pim − t_gpu)/per_token, **base floor 제거**(슬랙 0 → prefill 0 =
-     순수 decode → TBT 최소). 단 TTFT(신규 prefill 진행) 와의 trade-off 고려 — 최소
-     보장량을 둘지 설계 판단.
-   - **매 `_recompose_mb` 에서 현재 t_pim/t_gpu 로 재계산**(freeze 해제).
-   - 유휴율 게이트는 admit/합류 *시점*에만, *양*은 시간 슬랙으로.
-   - 대칭: GPU-bound 면 decode 를 PIM 슬랙에 더(decode-attn 싸서 GPU 그늘에 숨음).
-   - 단위테스트 + 회귀 동반.
-4. **TBT 재측정** → 시간 기준 balance 가 TBT 보존하며 throughput 얻는지 확인.
-5. **문서 갱신**: 배치_생애 §밸런스 정의(유휴율→PIM 시간 그늘), README "Target Workload"
-   재프레이밍(주 타깃 = **long-context agentic**: 큰 prefill + 큰 decode; PIM 가치는
-   가동률 아니라 op-level Aux2·F5), REPORT §15.
-
-## 중요한 사전 지식 (헷갈리기 쉬운 것)
-
-- **임계 56,160**: 순수 decode 의 t_pim/t_gpu_proj = ctx/56,160. ctx>56K 면 PIM-bound.
-- **단위**: `PIMExecutor.op_time` = **ns**. clock·GPU op_time = **µs**. dispatcher 가 PIM 을
-  ×1e-3, `_make_t_pim_fn` 도 ×1e-3(수정 완료). 새 코드에서 시간 비교 시 단위 맞춰라.
-- **타깃 워크로드 = long-context agentic** (사용자 확정): 긴 컨텍스트 읽고(prefill 큼) +
-  긴 추론 생성(decode 큼). causal 비대칭(prefill-attn 은 평균 절반 ctx, decode-attn 은
-  full ctx)으로 **decode ≈ prompt 절반이면 decode-attn 일이 prefill-attn 에 맞먹음**.
-- **PIM 가동률은 목표가 아니다** — 적은 decode-attn 을 *얼마나 싸게*(버스 절감 Aux2,
-  per-token TBT) 하느냐가 가치. 저/중 ctx 에선 PIM 유휴가 정상.
-- **합류는 연속배칭(throughput) / 밸런스는 cycle 내 일 배분(TBT)** — 직교하나 현재
-  합류가 유휴 보고 prefill 을 과주입해 TBT 를 깬다.
-
-## 측정 운영 (`measure_steady.py`)
-
-- 엄밀판: 워밍업(decode 진입까지 `--warmup-decode-frac`, 기본 0.5; 순수 decode 보려면
-  0.9) → `idle_telemetry.reset` → 수렴(Δ<0.005) 정지. 완주 안 함.
-- 인자: `--trace --label --batch --theta-high --theta-low --chunk --no-join
-  --warmup-decode-frac`. config 무수정 override.
-- 트레이스: `data/trace_agentic.csv`(고ctx 장기추론, 주력), `trace_general.csv`(일반),
-  `trace_ts.csv`(short), `trace_tdec/tm.csv`. 생성: `gen_agentic.py`·`gen_general.py`·
-  `gen_step5_traces.py`.
-- 진단: `diag_optime.py`(op_time 직접 산출 — 단, 출력에 ns/µs 주의), `diag_join_race.py`.
-- 실행 예: `cd implementation && PYTHONIOENCODING=utf-8 python debug_phase1/measure_steady.py
-  --trace debug_phase1/data/trace_agentic.csv --label X --warmup-decode-frac 0.9`
-
-## 현재 상태 (커밋 4개, 미푸시)
+## 8. 현재 상태 (커밋 7개, 미푸시 — 로컬)
 
 ```
-3bcbaaa docs(phase1): STEP 5 scale-spectrum measurements + findings
-1a1feb5 fix(phase1): correct ns/us unit in balance t_pim_fn
-b9f3ffc feat(phase1): per-mb KV budget to restore F2 μ-batch staggering
-9368edf feat(phase1): revive idle_theta_low as join-gate hysteresis deadband
+113c4e2 docs: STEP6 §D-3 (구버전 프롬프트, 이 파일로 대체됨)
+04807bd docs: 두 축(멤버십=용량 / 밸런스=시간 / 유휴율=결과)
+e1e0cd2 docs: (구) STEP 6 핸드오프
+3bcbaaa docs: STEP 5 스케일 스펙트럼 + 발견
+1a1feb5 fix: ns/µs 단위 (balance t_pim_fn)   ← 유효(carry-over)
+b9f3ffc feat: per-mb KV 예산                  ← 풀 모델이면 대체
+9368edf feat: hysteresis deadband             ← 풀 모델이면 대체
 ```
-- working tree 깨끗 (untracked: `analysis/`, `_scratch_*` 무관).
-- **4 커밋 origin/main 미푸시** — 필요시 푸시 먼저.
-- 테스트: prefill_join 13, admission+chunk+payload 68+12, 빠른 정합성 61, lifecycle+e2e 18
-  — 전부 passed. **풀 회귀는 STEP 6 커밋 게이트에서 1회.**
+working tree 깨끗(untracked `analysis/`·`_scratch_*` 무관). 테스트: 풀 회귀는 재설계
+커밋 게이트에서. (배치_생애 §두 축, REPORT §12~14 가 결론 기록.)
 
-## 작업 습관 당부 (이번 세션 실수 — 꼭 지켜라)
+## 9. 작업 습관 당부 (이번 세션 실수 — 꼭 지켜라)
 
-- **모든 bash 명령에 `cd /c/Users/rhs02/Desktop/puls-rfc/implementation &&` 붙여라.**
-  cwd 가 안정적으로 유지 안 됨 — 이번에 5번쯤 빠뜨려 크래시/엉뚱한 디렉터리.
-- **`run_in_background` 안에서 `&` 쓰지 마라** — detach 되어 완료 알림이 깨진다.
-- **추측하지 말고 측정해라.** PIM 유휴 원인·decode 지배·op_time 등 **가설이 5번 빗나갔다.**
-  op_time 같은 건 `diag_optime` 로 직접 산출해 확인(단위 ns/µs 조심).
-- **한 메시지에 도구 과병렬 금지** (cascade 취소). 무거운 측정은 백그라운드 하나씩.
+- **모든 bash 에 `cd /c/Users/rhs02/Desktop/puls-rfc/implementation &&` 붙여라**
+  (cwd 불안정 — 5번쯤 빠뜨려 크래시).
+- **`run_in_background` 안에서 `&` 금지**(detach → 알림 깨짐).
+- **추측 말고 측정/코드로 확인**(이번 세션 가설 5번 빗나감; op-time 은 `diag_optime`로,
+  단위 ns/µs 조심).
+- **한 메시지에 도구 과병렬 금지**(cascade 취소). 무거운 측정은 백그라운드 하나씩.
 - **변경하면 바로 커밋.** 회귀는 개발 중 가벼운 타깃만, 커밋 직전 풀 1회.
-- **PYTHONIOENCODING=utf-8 + 파일 출력** (콘솔 cp949 유니코드 깨짐). 커밋 메시지는 bash heredoc.
-- **PowerShell here-string·`->`·유니코드 깨짐 주의.**
-- 수정 후 의도 정합을 **배치_생애.md / ARCH §5.3·§5.6 기준**으로 자가검증.
+- **PYTHONIOENCODING=utf-8 + 파일 출력**(콘솔 cp949 깨짐). 커밋 메시지는 bash heredoc.
+- **재설계는 큰 변경 — substrate 재사용, 스케줄링 레이어만 교체.** ARCH §6 정독부터.
 
-시작 전 위 문서들 다 읽고, **(1) TBT 측정 추가 → (2) 현 OFF/ON TBT 실측 → (3) 시간 기준
-balance 수정 설계**의 접근 계획을 먼저 제시해라.
+시작 전 위 문서들 다 읽고(특히 **ARCH §6 검증**), **(0) 풀 모델 해석 확정 → (1) 설계 →
+(2) 구현 → (3) TBT·TTFT 측정**의 접근 계획을 먼저 제시해라.
