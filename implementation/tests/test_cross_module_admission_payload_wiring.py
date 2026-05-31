@@ -226,7 +226,11 @@ def test_payload_composition_deterministic(tmp_path):
 # ---- ADMISSION_TICK self-rescheduling 이 진정 payload 사용 ----
 
 def test_self_rescheduled_tick_carries_fresh_payload(tmp_path):
-    """_schedule_next_admission_tick 이 prev payload 그대로 propagate 아님 — fresh compose."""
+    """admission 재기동 시 prev payload 그대로 propagate 아님 — fresh compose.
+
+    STEP 2.5 — 고정 타이머 self-push(`_schedule_next_admission_tick`) 폐기 후
+    재기동은 `_schedule_admission_tick_with_default_payload`(완료/도착 시) 단일 경로.
+    """
     from puls_sched.event import Event, EventType
     run = Run.init(
         config_module="puls_sched.config:default_dummy_config",
@@ -237,13 +241,7 @@ def test_self_rescheduled_tick_carries_fresh_payload(tmp_path):
     for _ in range(40):
         if not run.scheduler.step():
             break
-    # Queue 에 다음 ADMISSION_TICK 가 self-rescheduled 됨 — payload 검사
-    ticks = [
-        e for e in run.scheduler.queue._heap
-        if hasattr(e, "type") and e.type is EventType.ADMISSION_TICK
-    ]
-    # Heap structure 직접 inspection 회피 — 대신 payload composer 가 호출 site 정합 검증.
-    # 정확 검증: _schedule_next_admission_tick body 위 _compose_admission_payload 호출 확인.
+    # 재기동 경로 body 위 _compose_admission_payload 호출 확인 (fresh compose).
     import inspect
-    src = inspect.getsource(run.scheduler._schedule_next_admission_tick)
+    src = inspect.getsource(run.scheduler._schedule_admission_tick_with_default_payload)
     assert "_compose_admission_payload" in src

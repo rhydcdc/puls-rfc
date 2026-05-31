@@ -115,11 +115,17 @@ class SchedulerCore:
                     elif resource == "PIM":
                         self.dispatcher.pim_busy = False
                     self.dispatcher.tick()
+                    # STEP 2.5 — 완료 = iteration 경계 = admit 기회 (event-driven admission).
+                    if self.enable_admission_tick_rescheduling:
+                        self._schedule_admission_tick_with_default_payload()
                     return
                 self.dispatcher.on_completion(event)
                 # Impl-6 (Q5) — O_PROJ done 분기 → LayerState.advance → L 도달 시 token decode signal
                 self._maybe_advance_forward_pass(event)
                 self.dispatcher.tick()
+                # STEP 2.5 — 완료 시 admission (자원이 비는 유일 시점). 고정 타이머 self-push 폐기.
+                if self.enable_admission_tick_rescheduling:
+                    self._schedule_admission_tick_with_default_payload()
             case EventType.REQUEST_ARRIVAL:
                 req = event.payload["request"]
                 self.request_queue.push(req)
@@ -136,8 +142,8 @@ class SchedulerCore:
                 # Auto-evict (window.admit overflow) 는 *defensive* 영역으로 격하.
                 if len(self.window.current_ids()) >= self.window.capacity:
                     self._fire_admission_tick(None, a_cycle, b_cycle, ctx_tokens)
-                    if self.enable_admission_tick_rescheduling:
-                        self._schedule_next_admission_tick(event)
+                    # STEP 2.5 — window full 이면 다음 완료(evict) 시 admission 재기동.
+                    # 고정 타이머 self-push 폐기 (헛도는 tick 차단).
                     return
                 spec = self._invoke_admission(event)
                 self._fire_admission_tick(spec, a_cycle, b_cycle, ctx_tokens)
@@ -167,31 +173,15 @@ class SchedulerCore:
                     self.dispatcher.register(mb)
                     self.window.admit(mb_id)
                     self.dispatcher.tick()
-                # Impl-9 Q1 — self-rescheduling. spec=None 도 chain 유지 (idle termination guard 가 stop 결정).
-                # opt-in flag (Run.init 가 enable) — isolated unit test 와 의미 분리 (R14).
-                if self.enable_admission_tick_rescheduling:
-                    self._schedule_next_admission_tick(event)
-
-    def _schedule_next_admission_tick(self, prev_event: Event) -> None:
-        """Impl-9 Q1 — ADMISSION_TICK 처리 직후 다음 tick auto-push.
-
-        ARCH §6.4 'per-iteration basis' 정합. Idle termination guard:
-        request_queue + in_flight_requests 동시 empty 시 self-push 중단 (Run.loop 3 조건 정합).
-
-        Impl-10-pre-1 (B)~(B''') — prev_event.payload 영원 propagate (0 영원 trivial) → *진정 측정
-        payload* 재구성 (`_compose_admission_payload`). 5 개 입력 모두 scheduler 자기 상태에서 산출.
-        """
-        if len(self.request_queue) == 0 and len(self.in_flight_requests) == 0:
-            return
-        next_t = self.clock.now + self.config.admission.tick_interval_us
-        self.queue.push(Event(
-            timestamp=next_t,
-            type=EventType.ADMISSION_TICK,
-            payload=self._compose_admission_payload(),
-        ))
+                # STEP 2.5 — 고정 타이머 self-push 폐기. 다음 admission 은 완료
+                # (KERNEL_COMPLETION) 또는 신규 도착(REQUEST_ARRIVAL) 시 재기동.
 
     def _schedule_admission_tick_with_default_payload(self) -> None:
-        """REQUEST_ARRIVAL 위 admission chain 재기동.
+        """완료(KERNEL_COMPLETION) / 신규 도착(REQUEST_ARRIVAL) 시 admission 재기동.
+
+        STEP 2.5 — 고정 타이머 self-push (`_schedule_next_admission_tick`) 폐기 후
+        admission 의 유일한 재기동 경로. 이벤트 기반: 자원이 비는 시점(완료)과 새 일감
+        도착 시점에만 admission tick push → 헛도는 tick 제거 (REPORT §10).
 
         Impl-10-pre-1 (B)~(B''') — 'default' = scheduler 자기 상태 위 *진정 측정 payload*.
         """
