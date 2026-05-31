@@ -116,6 +116,32 @@ ON  (prefill flood): cycle ≈ 6 + 444 + ... ≈ 567µs       → TBT ≈ 567µs
 TBT 보존.** 멤버십과 사이클 일을 분리하면 "많이 담되 천천히 prefill"(TTFT↔TBT trade-off는
 별도 정책 knob 판단).
 
+### D-3. ★★ 비대칭 — "PIM에 decode 충전"은 환상, 밸런스 레버는 prefill 감축뿐
+
+흔한 오해: "PIM 유휴율이 높으면(예 97%) 대칭적으로 decode를 더 충전해 유휴를 낮추면
+되지 않나?" → **불가능하다. prefill 과 decode 는 비대칭이다.**
+
+- **prefill = 충전 가능** — 큐의 새 요청에서 끌어옴.
+- **decode = 충전 불가** — decode 일감은 *이미 prefill 끝난 배치 안 요청*이 매 사이클
+  1토큰씩 만드는 **부산물**. 큐엔 "decode 준비된 요청"이 없다(다 미처리 프롬프트).
+  → **PIM에 decode를 추가할 소스 자체가 없다.**
+- 코드 확인: `balance_intra_A` 의 decode 방향(+1)은 STEP 3-b 에서 **무실효라 제거**
+  (prefill 증량만 남음). `_populate_mb_phases`(main_loop ~L476) 는 큐 요청을
+  `remaining = len(prompt) − prefill_processed > 0` → **항상 prefill 로 분류**.
+
+그래서 **PIM 유휴(GPU-bound일 때)는 decode 추가로 못 고친다**:
+- PIM 97% 유휴의 원인은 *decoder 가 적어서*가 아니라 **GPU가 prefill로 flood돼 cycle이
+  길어서**(decoder는 있고 decode-attn 7.74µs가 GPU prefill 444µs 대비 작을 뿐).
+- 요청을 더 admit 해도 그들도 **prefill 부터** 해야 해 GPU를 더 flood → PIM 여전히 유휴.
+
+→ **밸런스의 유일한 레버 = prefill 을 PIM 슬랙까지 *줄이는* 것(시간 기준).** "decode 충전"은
+환상이다. 그리고 이게 유휴율 게이트를 못 쓰는 또 다른 이유: 유휴율 피드백은 **prefill 추가
+한 방향으로만** 작동하는 **일방향 래칫**(GPU 놀면 prefill↑, 근데 PIM 놀면 넣을 게 없음)
+→ prefill만 쌓여 flood. 균형은 오직 prefill 을 *줄여야* 나는데 유휴율은 줄이질 못한다.
+
+(예외: 멀티턴처럼 *이미 KV 있는* 요청이 큐로 돌아오는 워크로드면 decode-fill 이 실재 —
+단일패스 트레이스엔 없음. STEP 6 는 단일패스 기준.)
+
 ## STEP 6 에서 할 일 (측정부터, 추측 금지)
 
 > 이번 세션에 가설이 5번 빗나갔다. **반드시 측정으로 확인**하며 진행해라.
