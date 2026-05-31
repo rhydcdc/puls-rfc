@@ -343,16 +343,17 @@ class SchedulerCore:
                 self.in_flight_requests.pop(req_id, None)
         # 다음 token 의 forward pass 위 reset (multi-token decode 정합)
         mb.current_layer_index = 0
-        # Impl-10-pre-2 (O9.1) — mb 영역의 모든 req 활동 영역 추적 (prefill_chunk + decode_tokens)
-        all_req_ids = set(mb.prefill_chunk.keys()) | set(mb.decode_tokens.keys())
-        mb_has_active_reqs = any(rid in self.in_flight_requests for rid in all_req_ids)
-        if not mb_has_active_reqs:
+        # STEP 3 — recompose 가 (1) mb 자기 잔여 req 재구성 + (2) 큐 신규 req 합류
+        # (_try_join_prefill) 를 함께 수행. evict 판정은 그 *결과* 위에서:
+        # 배치_생애 §5 — mb evict = 안의 req 모두 완료 AND 합류할 신규 req 없음(큐 빔/게이트
+        # 닫힘). 즉 recompose 후에도 prefill_chunk·decode_tokens 가 모두 비었을 때만 evict.
+        # (큐 비는 정상 종료 경로는 합류 0 → 기존과 동일하게 evict.)
+        self._recompose_mb(mb)
+        if mb.prefill_chunk or mb.decode_tokens:
+            self.dag.reset_micro_batch(mb.id)
+        else:
             self.window.evict(mb.id)
             self.dispatcher.unregister(mb.id)
-        else:
-            # Re-compose mb.prefill_chunk + mb.decode_tokens — 다음 cycle 영역 위 갱신 (Sarathi 정합)
-            self._recompose_mb(mb)
-            self.dag.reset_micro_batch(mb.id)
 
     def _recompose_mb(self, mb: MicroBatch) -> None:
         """Impl-10-pre-2 (O9.1 + B) — mb 의 다음 L-cycle 위 prefill_chunk + decode_tokens 갱신.

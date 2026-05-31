@@ -83,15 +83,22 @@ def _drive_until_done(core, mb_id):
 
     Impl-9 — mb 의 모든 req finalize 시 dispatcher.unregister 호출됨 (Q9 carry-over 해소).
     Loop 진입 전 mb 가 이미 evict 된 경우 즉시 종료 (defensive).
+
+    STEP 3 fix — chunked prefill 구조: prompt 있는 req 는 admit 직후 prefill_chunk 에만
+    있고 decode_tokens 엔 없다 (prefill 단계 먼저). 종료 조건을 decode_tokens 뿐 아니라
+    prefill_chunk 까지 포함한 mb 전체 활성 req 기준으로 — 안 그러면 prefill 단계 req 를
+    끝까지 안 몰아 완료 누락 (사전 버그). guard: 무한 루프 방지 상한.
     """
-    while (
-        mb_id in core.dispatcher.micro_batches
-        and any(
-            r_id in core.in_flight_requests
-            for r_id in core.dispatcher.micro_batches[mb_id].decode_tokens.keys()
-        )
-    ):
+    guard = 0
+    while mb_id in core.dispatcher.micro_batches:
+        mb = core.dispatcher.micro_batches[mb_id]
+        active = set(mb.prefill_chunk.keys()) | set(mb.decode_tokens.keys())
+        if not any(r_id in core.in_flight_requests for r_id in active):
+            break
         _decode_one_token(core, mb_id)
+        guard += 1
+        if guard > 100_000:
+            raise RuntimeError(f"_drive_until_done exceeded guard for mb {mb_id}")
 
 
 # ============================================================================
@@ -226,20 +233,30 @@ def test_completion_does_not_corrupt_other_mbs():
 
 
 def test_partial_completion_in_micro_batch():
-    """mb 위 3 decode req — 1 finalize → mb.decode_tokens 의 key 그대로 (Q9·Q10 책임 분리)"""
+    """mb 위 3 decode req — 1 finalize → 완료 req 만 다음 cycle 배치에서 빠짐.
+
+    STEP 3 — *decode 단계* mb 의 완료 동작 검증이므로 순수 decode req(prompt_tokens=[])로
+    표현. chunked prefill 구조에선 prompt 있는 req 가 prefill 단계를 먼저 거치므로
+    (decode_tokens 가 admit 직후 비어 있음), 이 테스트 의도(decode 일부 완료)는 prompt
+    없는 req 로 isolate 한다.
+
+    책임 분리: Completion.finalize 는 mb dict 를 직접 안 건드린다. 단 그 후
+    _recompose_mb 가 in_flight 잔존 req 로 decode_tokens 를 재구성하므로, 완료된 req(0)는
+    빠지고 살아있는 req(1,2)만 다음 cycle 배치에 남는다 (정상 동작).
+    """
     core = _make_scheduler_core()
     for i, mx in enumerate([1, 5, 5]):
-        r = Request(id=i, prompt_tokens=[0], kv_length=50, max_tokens=mx)
+        r = Request(id=i, prompt_tokens=[], kv_length=50, max_tokens=mx)
         core.request_queue.push(r)
     core._handle(_admission_event())
     mb_id = core._next_mb_id - 1
     mb = core.dispatcher.micro_batches[mb_id]
-    before_keys = set(mb.decode_tokens.keys())
     _decode_one_token(core, mb_id)
     # id=0 finalize, 나머지 alive
     assert 0 not in core.in_flight_requests
-    # 단 mb.decode_tokens 의 key 는 그대로 (Completion 이 dict 수정 안 함)
-    assert set(mb.decode_tokens.keys()) == before_keys
+    assert 1 in core.in_flight_requests and 2 in core.in_flight_requests
+    # 완료된 0 은 다음 cycle 배치에서 빠지고 살아있는 1·2 만 유지 (recompose)
+    assert set(mb.decode_tokens.keys()) == {1, 2}
 
 
 def test_lifecycle_chain_deterministic_1000_iter():
@@ -306,10 +323,14 @@ def test_real_trace_capacity_bumped_500_req_no_leak():
 # ============================================================================
 
 def test_finalized_req_in_mb_decode_tokens_no_effect_on_next_decode():
-    """req_0 finalize 후 req_1 의 progress 가 영향 0 (Q9 책임 분리 의 correctness)"""
+    """req_0 finalize 후 req_1 의 progress 가 영향 0 (Q9 책임 분리 의 correctness)
+
+    STEP 3 — decode 단계 동작 검증이므로 순수 decode req(prompt_tokens=[])로 표현.
+    prompt 있으면 첫 cycle 이 prefill 로 소비되어 cycle↔decode 토큰 1:1 이 깨짐.
+    """
     core = _make_scheduler_core()
-    r0 = Request(id=0, prompt_tokens=[0], kv_length=50, max_tokens=2)
-    r1 = Request(id=1, prompt_tokens=[0], kv_length=60, max_tokens=5)
+    r0 = Request(id=0, prompt_tokens=[], kv_length=50, max_tokens=2)
+    r1 = Request(id=1, prompt_tokens=[], kv_length=60, max_tokens=5)
     core.request_queue.push(r0)
     core.request_queue.push(r1)
     core._handle(_admission_event())
