@@ -162,20 +162,65 @@ balance 4-factor 미발현을 합성 트레이스로 확증하고, 합류 경로
       느슨(최대 30% 유휴 용인). 10%로 조이면 목적 충실하나 합류 잦아 진동 위험 → 실측
       비교. 게이트 기준 = 유휴율(idle_fraction), 레이턴시(in_band)와 동치이나 목적 지표라
       더 직접적 (배치_생애 §5).
-- [ ] **hysteresis 부활 (idle_theta_low)** — 현재 θ_low(0.1)는 *미사용 placeholder*
-      (로직 0개). 진동 방지 위 "θ_high(예 0.1) 초과 시 합류, θ_low(예 0.05) 미만 시 멈춤"
-      이중 임계 구현. 단일 임계(현)는 경계 진동 위험 → 10%로 조일 때 특히 필요.
-      θ_high 스윕과 함께 평가 (조이는 것이 정말 idle 더 낮추는지 실측 후 채택).
+- [x] **hysteresis 부활 (idle_theta_low)** — 완료 (commit 9368edf). θ_low 0.1→**0.05**
+      확정 (θ_high 스윕 두 값 0.1·0.3 모두보다 작아 양쪽 유효 deadband). 신호 =
+      max(gpu_idle, pim_idle), 닫힘→θ_high 초과 시 열고 열림→θ_low 미만 시 닫는 latch
+      (`_join_gate_open`). **범위 = 합류 게이트(`_try_join`)만** (balance_intra_A 연속조절은
+      무관). README 'adaptive admission with hysteresis deadband' 명시 기능 완성이라
+      *측정 무관 채택* (진동 트레이스/순간신호 전환 대비 보험). 단위 13 passed
+      (latch 전이 5 신규), 타깃 회귀 152 passed.
+> **측정 프로토콜 결정 — 완주 안 함, 수렴 기반 조기 종료 (엄밀판).** 완주는 (a) 비용
+> 과대 (T-L decode 2000×80층) + (b) 막판 도착 끊긴 ramp-down 꼬리가 idle 오염. 대신
+> *워밍업(전 도착 주입 완료까지) → idle_telemetry.reset → 정상상태 윈도우에서 누적 idle
+> 이 수렴(Δ<ε)하면 정지*. before/after·스윕에 **동일 프로토콜** 적용(delta 가 결론).
+> 스크립트 = `debug_phase1/measure_steady.py`.
 - [ ] (참고) pim_slack 안전마진(0.9 = t_pim×0.9, PIM 을 compute-bound 뒤 은닉)은 생존 중
       — balance_pim_slack 의 prefill chunk 산식. 이번 변경 무관, 유지.
 - [ ] token budget closed-form 산출 (트레이스 decode/prefill 기반, 모델 미실행)
-- [ ] T-L — GPU/종합 idle 감소 확인
-- [ ] T-M — 양방향 idle 동시 감소 확인
-- [ ] T-S — idle 불변 확인 (대조군, 과잉 수정 방지)
-- [ ] before/after 보고서 작성
+- [ ] **트레이스 재설계** — 구 T-L/long_pressure 는 prefill 지배라 (a) prefill 구간엔 decode
+      일감 부재 → 합류가 PIM 못 채움, (b) 측정이 prefill 구간에 갇힘. 합류 효과의 핵심 =
+      **decode-bound 정상상태에서 prefill backlog 로 GPU 를 채움**. 그에 맞춰 재설계:
+  - **T-DEC (주 demonstrator)** — ctx 58–72K(임계 바로 위 → decode PIM-bound, prefill 은
+    짧음), decode 200–800(고분산, prefill ~115cyc 지배 → run 이 decode-bound), N≈80(ΣKV>4M →
+    prefill backlog 상존), 포화 도착. 합류 ON 시 backlog prefill 이 GPU 채워 **GPU idle 급감** 기대.
+  - **T-M (현실성)** — 혼합 short+long · decode 분산. PULS 타깃(agentic·멀티턴·KV 길이 분산)에
+    가장 근접. 양방향(PIM·GPU 동시 채움) 확인.
+  - **T-S (대조군)** — short, idle 불변 확인 (과잉 수정 방지).
+- [ ] **before/after idle (독립 run 운영)** — 트레이스마다 합류 OFF/ON
+      (`measure_steady --no-join` vs 기본). **각 조합 = 독립 run · 독립 라벨 파일**
+      (`steady_<label>.txt`), **순차 실행, 결과 나올 때마다 개별 보고**. 먼저
+      `TDEC_off`/`TDEC_on` 가늠 → run 단가 확정 + 효과 확인 후 T-M·스윕으로 확장 (헛돌이 방지).
+      합격: T-DEC GPU idle↓(주), T-M 양방향↓, T-S 불변.
+- [ ] before/after 보고서 작성 (`REPORT_step5.md`)
 - [ ] **배치_생애.md 갱신** — 스윕 확정값 반영: 배치 크기 상한, 합류 게이트 θ_high(+
       hysteresis θ_low) 최종값을 문서의 "세 한계" / §5 게이트에 구체값으로 명시.
       (현재는 기호·예시값 → 스윕 후 확정값으로)
+
+> **STEP 5.5 선결 — idle 측정 항목(T-L/T-M/T-S·스윕)은 STEP 5.5 후 재개.** STEP 5
+> 측정 시도 중 race 진단(`diag_join_race.py` → `race_result.txt`)으로 단일 mb 독점의
+> 잔여 원인이 드러남(아래).
+
+### STEP 5.5 — per-mb KV 예산 (F2 staggering 복원) ※ STEP 5 측정 중 발견
+> 발견: STEP 1(seq 상한)은 **short-context 다중화만** 풀었고, **long-context 는 한 mb 가
+> KV캐파(4M) 전체를 독점**(42req=3.99M)해 mb 1 형성 불가 → window=1. 거기에 합류가 풀린
+> KV 를 그 mb 에 backfill 해 단일 mb 영구화. `diag_join_race.py` 확증: 동일 트레이스·KV캐파
+> 에서 합류 OFF=mb 2개 / ON=mb 1개. **ARCH 정합 위반** — §5.6/F2 double-buffering 은
+> "mb M 의 PIM attention 중 GPU 가 mb **M+1** QKV 처리" = 서로 다른 μ-batch 간 동시
+> 실행이라 **≥2 mb 필수**(line 287·290·312), window={M-1,M,M+1} 3-state(line 369·436).
+> 배치_생애 §세한계 "KV 를 여러 배치가 나눠 쓴다"가 *의도만 있고 강제 장치 부재*였음.
+
+- [x] **per-mb KV 예산 = KV캐파 / 동시활성목표(2)** (4M/2 = 2M). divisor 는 window(3) 아니라
+      **2** 로 확정: F2 는 동시 2개(M·M+1)면 충족, window 3번째는 빠지는 M-1 전이 여유. /3 은
+      mb 가 n_sat=16 아래(long-ctx ~13req)로 작아져 sub-MFU → **/2 가 배치 포화 유지 + "2
+      active + 1 여유" 정합**. `_STAGGERING_TARGET_MB=2`, window.capacity 로 clamp(F2 ablation
+      cap=1 시 분모 1 → 단일 mb). 의도("나눠 쓴다")의 강제화.
+- [x] **admission.layer1 적용** — `max_mb_kv_tokens` 한도까지만 admit (빈 mb 첫 req 예외 = 단일
+      거대요청 starvation 방지). 초과분 defer → 다음 tick 에 mb 1·2 형성.
+- [x] **`_try_join` 적용** — 합류도 그 mb 의 KV 예산 한도까지만 (다른 mb 몫 잠식 차단, race 해소).
+- [x] 단위 테스트 — layer1 분할·첫 req 예외 + _try_join per-mb cap. admission+prefill_join **43 passed**.
+- [x] tiny trace window 확증 — `diag_join_race`: 합류 ON 이 mb=1·window=1 → **mb=2·window=2** 회복.
+- [ ] 정합성 회귀(KV no-leak·invariant·lifecycle e2e) 통과 → **per-mb 예산 독립 커밋**.
+- [ ] 문서 갱신 — 배치_생애 §세한계에 "per-mb KV 예산(KV캐파/2)" 네 번째 강제 명시, REPORT 에 race 발견 기록.
 
 > 미수정 영역(RTL·evaluator·trace 생성 등)은 회귀 스킵.
 

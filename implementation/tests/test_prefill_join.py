@@ -73,16 +73,18 @@ class TestPrefillJoin:
         assert len(joined) == 2
         assert len(rq) == 8
 
-    def test_join_bounded_by_kv(self, scheduler_core):
-        """KV 여유 부족 시 head 에서 중단 (가능량 = min(seq, KV))."""
+    def test_join_bounded_by_per_mb_kv(self, scheduler_core):
+        """STEP 5.5 — 합류도 per-mb KV 예산(= KV캐파/2)까지만. 초과 head 에서 중단."""
         rq = scheduler_core.request_queue
-        cap = scheduler_core.kv_accountant.capacity
-        rq.push(Request(id=0, prompt_tokens=[0] * 10, kv_length=cap, max_tokens=10))   # 캐파 전부
-        rq.push(Request(id=1, prompt_tokens=[0] * 10, kv_length=1000, max_tokens=10))  # 안 들어감
+        per_mb = scheduler_core._per_mb_kv_budget()   # 4M // 2 = 2,000,000
+        # kv 500K × 5 → 4개(2.0M = 예산) 합류, 5번째(2.5M > 예산) 중단
+        for i in range(5):
+            rq.push(Request(id=i, prompt_tokens=[0] * 10, kv_length=500_000, max_tokens=10))
         _set_gpu_idle(scheduler_core.admission.idle_telemetry, 0.9)
         joined = scheduler_core._try_join({99})
-        assert joined == {0}
-        assert len(rq) == 1  # head-of-line, 다음 완료 경계에서 재시도
+        assert 4 * 500_000 <= per_mb < 5 * 500_000   # 예산 관계 sanity (2.0M)
+        assert len(joined) == 4
+        assert len(rq) == 1  # 5번째는 예산 초과 → 다음 mb 몫으로 보존
 
     def test_join_empty_queue_noop(self, scheduler_core):
         """큐 비면 합류 0 (no-op)."""

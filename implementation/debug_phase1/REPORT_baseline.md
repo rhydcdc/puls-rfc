@@ -341,3 +341,50 @@ idle:  gpu_instance_a=0.04%   pim_instance_a=97.95%   gpu_instance_b=0.00%
 - **합류 효과는 decode 비중 큰 트레이스(T-M / T-L)에서 드러남**. STEP 3 후 after 측정은
   T-M/T-L 로 (decode 분산 높고 long-ctx → PIM-bound 구간 형성).
 - mb_count=4 는 KV 캐파(4M)가 seq 상한(256)보다 binding 이라 정상 (long-ctx).
+
+## 12. STEP 5 재검증 착수 — race 발견 + per-mb KV 예산 (STEP 5.5)
+
+STEP 5(수정 후 idle 측정) 착수 중 측정 방법과 잔여 버그 두 가지가 드러났다.
+
+### 12.1 측정 프로토콜 — 완주 대신 수렴 조기종료 (엄밀판)
+
+완주는 (a) 비용 과대(decode×80층), (b) 막판 도착 끊긴 ramp-down 꼬리가 idle 오염.
+대신 *워밍업(전 도착 주입까지) → idle_telemetry.reset → 정상상태에서 누적 idle 수렴
+(Δ<0.005)하면 정지*. before/after·스윕에 동일 프로토콜(`measure_steady.py`).
+
+### 12.2 race 발견 — 합류가 freed KV 를 backfill 해 단일 mb 독점
+
+축소 T-L·long_pressure 측정에서 합류 ON 인데도 mb_count=1·max_window=1 관측. 진단
+(`diag_join_race.py`, 동일 트레이스·KV캐파, 합류만 on/off):
+
+```
+join=OFF  mb_count=2     (요청 완료로 KV 풀리자 admission 이 mb 1 생성)
+join=ON   mb_count=1     (같은 완료 이벤트의 _try_join 이 freed KV 를 mb 0 에 먼저
+                          backfill → admission tick(+10µs) 도착 시 KV·큐 비어 mb 1 불가)
+```
+
+→ 합류가 매 완료마다 freed KV 를 가로채 단일 mb 로 수렴. **ARCH §5.6/F2 정합 위반** —
+F2 double-buffering 은 "mb M 의 PIM attention 중 GPU 가 mb M+1 QKV 처리" = 서로 다른
+μ-batch 동시 실행이라 ≥2 mb 필수. 단일 mb 면 F2 무대 자체가 없음.
+
+### 12.3 근본 — per-mb KV 미강제 (STEP 1 은 short-context 만 해결)
+
+STEP 1(seq 상한)은 short-context 다중화만 풀었다. long-context 는 한 mb 가 KV캐파(4M)
+전체를 독점(예 42req=3.99M)해 mb 1 형성 불가 → window=1. 배치_생애 §세한계 "KV 를
+여러 배치가 나눠 쓴다"가 *의도만 있고 강제 장치 부재*였음.
+
+### 12.4 수정 — per-mb KV 예산 = KV캐파 / 동시활성목표(2)
+
+per-mb KV 예산 = KV캐파 / 2 (= 2M) 을 admission.layer1 + `_try_join` 양쪽에 적용.
+
+- **분모 = 2** (window 3 아님): F2 는 동시 2개(M·M+1)면 충족, window 3번째 슬롯은 빠지는
+  M-1 전이 여유. /3 은 mb 가 n_sat=16 아래(long-ctx ~13req)로 작아져 sub-MFU →
+  **/2 가 배치 포화 유지 + "2 active + 1 여유" 정합**. `_STAGGERING_TARGET_MB=2`,
+  window.capacity 로 clamp(F2 ablation cap=1 → 분모 1 → 단일 mb).
+- **layer1** — mb 가 제 예산까지만 admit (빈 mb 첫 req 예외 = 단일 거대요청 starvation 방지),
+  초과분 defer → 다음 tick 에 mb 1·2 형성.
+- **_try_join** — 합류도 그 mb 예산 한도까지만 backfill (다른 mb 몫 잠식 차단, race 해소).
+
+재확증 (`diag_join_race`, per-mb 예산 적용 후): 합류 ON 이 **mb=1·window=1 → mb=2·
+window=2** 로 회복. F2 동시 활성 2개 달성. 단위 43 passed, 빠른 정합성 회귀 61 passed
+(KV no-leak·invariant·완료·integration·f4).

@@ -103,6 +103,7 @@ class Admission:
         b_cycle: float,
         ctx_tokens: int,
         gpu_op_time_per_token_us: float = 0.0,
+        max_mb_kv_tokens: int | None = None,
     ) -> MicroBatchSpec | None:
         decode_reqs: list[Request] = []
         # Impl-9 — Head-of-line skip (production scheduler 정합, vLLM/Sarathi 영역).
@@ -119,13 +120,24 @@ class Admission:
         # seq 상한 도달 시 KV 여유와 무관하게 나머지는 다음 tick 으로 defer →
         # 한 mb 독점 방지, 동시 다중 mb 형성 (REPORT_baseline §7b).
         max_batch = self.admission_cfg.max_batch_size
+        # STEP 5.5 — per-mb KV 예산 (= KV캐파 / window 상한, main_loop 위 산출). 한 mb 가
+        # KV캐파 전체를 독점해 동시 다중 mb(F2 staggering) 가 불가하던 것을 해소. 빈 mb 는
+        # 첫 req 무조건 허용(단일 거대요청 starvation 방지) 후 예산 적용. None = cap 없음(단위 test).
+        mb_kv = 0
         for req in candidates:
-            if len(decode_reqs) < max_batch and self.kv_accountant.can_admit(req):
+            fits_mb_kv = (
+                max_mb_kv_tokens is None
+                or not decode_reqs
+                or mb_kv + req.kv_length <= max_mb_kv_tokens
+            )
+            if (len(decode_reqs) < max_batch and self.kv_accountant.can_admit(req)
+                    and fits_mb_kv):
                 self.kv_accountant.admit(req)
                 decode_reqs.append(req)
+                mb_kv += req.kv_length
             else:
                 # Defer — queue 의 그 자리 (상대 순서 유지) 위 re-push
-                # (seq 상한 도달 또는 KV 부족 둘 중 하나)
+                # (seq 상한 / KV 부족 / per-mb 예산 초과 중 하나)
                 if not self.request_queue.push(req):
                     raise RuntimeError(
                         f"admission re-push failed for req {req.id} "

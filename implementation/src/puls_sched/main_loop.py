@@ -24,6 +24,12 @@ if TYPE_CHECKING:
 
 AdmissionTickCallback = Callable[["AdmissionSnapshot"], None]
 
+# STEP 5.5 — per-mb KV 예산의 분모 = 동시 활성 μ-batch 목표. ARCH §5.6/F2 는 동시 2개
+# (M 의 PIM attention ‖ M+1 의 QKV)면 충족; window 3번째 슬롯은 빠지는 M-1 전이 여유라
+# KV 를 가득 쓸 필요 없음. 그래서 KV캐파를 window(3) 가 아니라 2 로 나눔 — 배치가
+# n_sat 위로 포화 유지 + "2 active + 1 여유" 정합. window.capacity 보다 크지 않게 clamp.
+_STAGGERING_TARGET_MB = 2
+
 
 @dataclass
 class SchedulerCore:
@@ -418,15 +424,25 @@ class SchedulerCore:
         seq_room = self.config.admission.max_batch_size - len(active_req_ids)
         if seq_room <= 0:
             return set()
+        # STEP 5.5 — 합류도 이 mb 의 per-mb KV 예산 한도까지만. freed KV 를 한 mb 가
+        # 다 backfill 해 다른 mb 몫을 잠식(단일 mb 독점)하던 것을 차단 (diag_join_race).
+        per_mb_kv = self._per_mb_kv_budget()
+        mb_kv = sum(
+            self.in_flight_requests[rid].kv_length
+            for rid in active_req_ids if rid in self.in_flight_requests
+        )
         joined: set[int] = set()
         while len(joined) < seq_room:
             req = self.request_queue.peek_oldest()
             if req is None:
                 break
             if not self.kv_accountant.can_admit(req):
-                break  # KV 부족 → 합류 중단
+                break  # 전역 KV 부족 → 합류 중단
+            if mb_kv + req.kv_length > per_mb_kv:
+                break  # per-mb KV 예산 초과 → 이 mb 합류 중단 (다른 mb 몫 보존)
             self.request_queue.pop_oldest()
             self.kv_accountant.admit(req)
+            mb_kv += req.kv_length
             if req.state == RequestState.PENDING:
                 req.transition_to(RequestState.PREFILL)
             self.in_flight_requests[req.id] = req
@@ -471,6 +487,19 @@ class SchedulerCore:
                     prefill_processed[req.id] = req.prefill_processed
         return prefill_chunk, decode_tokens, prefill_processed
 
+    def _per_mb_kv_budget(self) -> int:
+        """STEP 5.5 — per-mb KV 예산 = KV캐파 / 동시 활성 목표(2).
+
+        한 mb 가 KV캐파 전체를 독점하면 동시 다중 mb(ARCH §5.6/F2 double-buffering,
+        window={M-1,M,M+1})가 불가 → 강제 분할. 배치_생애 §세한계 "여러 배치가 나눠
+        쓴다"의 강제 장치. 분모 = `_STAGGERING_TARGET_MB`(=2, F2 동시 활성 목표),
+        window.capacity 보다 크지 않게 clamp (F2 ablation 시 cap=1 → 분모 1 → 단일 mb).
+        """
+        divisor = min(_STAGGERING_TARGET_MB, self.window.capacity)
+        if divisor <= 0:
+            return self.kv_accountant.capacity
+        return self.kv_accountant.capacity // divisor
+
     def _invoke_admission(self, event: Event) -> MicroBatchSpec | None:
         t_proj = event.payload.get("t_proj", 0.0)
         t_pim_fn = event.payload.get("t_pim_fn", lambda n: 0.0)
@@ -481,6 +510,7 @@ class SchedulerCore:
         return self.admission.layer1(
             t_proj, t_pim_fn, a_cycle, b_cycle, ctx_tokens,
             gpu_op_time_per_token_us=gpu_op_time_per_token_us,
+            max_mb_kv_tokens=self._per_mb_kv_budget(),
         )
 
     def run_until_empty(self) -> int:

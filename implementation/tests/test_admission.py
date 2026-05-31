@@ -135,6 +135,35 @@ def test_layer1_stops_at_kv_capacity(request_queue, kv_accountant, admission_con
     assert len(request_queue) == 1
 
 
+def test_layer1_per_mb_kv_budget_splits(admission, request_queue):
+    """STEP 5.5 — max_mb_kv_tokens 한도까지만 admit, 초과분 defer (mb 강제 분할)."""
+    for i in range(5):
+        request_queue.push(_make_req(i, kv_length=500_000))
+    spec = admission.layer1(
+        t_proj=1e9, t_pim_fn=lambda n: 0.0,
+        a_cycle=10.0, b_cycle=10.0, ctx_tokens=100,
+        max_mb_kv_tokens=2_000_000,
+    )
+    assert spec is not None
+    assert len(spec.decode_requests) == 4   # 4×500K = 2.0M ≤ 예산
+    assert len(request_queue) == 1           # 5번째 defer → 다음 tick 의 mb 1 몫
+
+
+def test_layer1_per_mb_kv_first_req_exception(admission, request_queue):
+    """빈 mb 는 예산 초과 단일 거대요청도 1개 허용(starvation 방지), 이후 req 는 defer."""
+    request_queue.push(_make_req(0, kv_length=3_000_000))   # > 예산 2M
+    request_queue.push(_make_req(1, kv_length=500_000))
+    spec = admission.layer1(
+        t_proj=1e9, t_pim_fn=lambda n: 0.0,
+        a_cycle=10.0, b_cycle=10.0, ctx_tokens=100,
+        max_mb_kv_tokens=2_000_000,
+    )
+    assert spec is not None
+    assert len(spec.decode_requests) == 1    # 거대요청 단독 admit (첫 req 예외)
+    assert spec.decode_requests[0].id == 0
+    assert len(request_queue) == 1            # req1 은 이미 3M 초과라 defer
+
+
 def test_layer1_returns_microbatch_spec(admission, request_queue):
     request_queue.push(_make_req(0))
     spec = admission.layer1(
