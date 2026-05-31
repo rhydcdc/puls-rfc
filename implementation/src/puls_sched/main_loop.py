@@ -288,7 +288,12 @@ class SchedulerCore:
         """Impl-10-pre-1 (B'') — PIMExecutor.op_time closure (in_flight_requests 의 avg kv 위 동적).
 
         Impl-10-pre-2 — k_channels 매개변수 폐기 (sequence-parallel PIM 위 무의미).
-        Signature: fn(n_decode) → float.
+        Signature: fn(n_decode) → float (단위 = µs).
+
+        STEP 5 단위 버그 수정 — PIMExecutor.op_time() 은 ns 반환. balance_pim_slack 은 이를
+        t_proj(µs)와 빼므로 **µs 로 변환(× 1e-3)해야 함** (dispatcher._op_time 의 PIM ×1e-3
+        convention 과 동일). 미변환 시 t_pim 이 1000× 부풀어 prefill chunk 예산 과대 →
+        GPU 과포화·PIM 유휴. dispatcher 는 Stage 2 에 정정됐으나 이 admission 경로는 누락됐었음.
         """
         in_flight = self.in_flight_requests
         pim_executor = self.dispatcher.pim_executor
@@ -296,7 +301,7 @@ class SchedulerCore:
             if not in_flight or n_decode <= 0:
                 return 0.0
             avg_kv = max(1, sum(r.kv_length for r in in_flight.values()) // len(in_flight))
-            return pim_executor.op_time(kv_rows_total=n_decode * avg_kv)
+            return pim_executor.op_time(kv_rows_total=n_decode * avg_kv) * 1e-3  # ns → µs
         return fn
 
     def _maybe_advance_forward_pass(self, event: Event, eos_seen: bool = False) -> None:

@@ -72,6 +72,37 @@ def test_compose_payload_t_pim_fn_callable_and_non_trivial(tmp_path):
         assert result >= 0   # non-negative (정합 — PIMExecutor.op_time 산출값)
 
 
+def test_compose_payload_t_pim_fn_returns_microseconds(tmp_path):
+    """STEP 5 단위 버그 수정 — t_pim_fn 은 µs 반환 (= op_time(ns) × 1e-3).
+
+    balance_pim_slack 이 t_pim 을 t_proj(µs)와 빼므로 단위 일치 필수. dispatcher 의
+    PIM op_time ×1e-3 convention 과 동일. 미변환(ns) 시 1000× 부풀어 prefill chunk 과대.
+    """
+    run = Run.init(
+        config_module="puls_sched.config:default_dummy_config",
+        trace_path_or_synthetic="synthetic:5",
+        output_dir=tmp_path,
+        seed=42,
+    )
+    for _ in range(20):
+        if not run.scheduler.step():
+            break
+    sched = run.scheduler
+    if not sched.in_flight_requests:
+        return  # 방어 — in_flight 없으면 스킵
+    fn = sched._make_t_pim_fn()
+    pim = sched.dispatcher.pim_executor
+    n = 4
+    avg_kv = max(
+        1,
+        sum(r.kv_length for r in sched.in_flight_requests.values())
+        // len(sched.in_flight_requests),
+    )
+    expected_ns = pim.op_time(kv_rows_total=n * avg_kv)
+    assert fn(n) == expected_ns * 1e-3   # ns → µs 변환 확인
+    assert fn(n) > 0
+
+
 def test_compose_payload_t_pim_fn_zero_when_empty(tmp_path):
     """(B'') t_pim_fn 가 in_flight empty 시 0 (guard)."""
     run = Run.init(
