@@ -19,19 +19,19 @@ from puls_sched.request_queue import RequestQueue
 
 def test_request_prefill_processed_default_zero():
     """Request.prefill_processed default = 0 (PLAN §0.5 backward-compat)."""
-    req = Request(id=0, prompt_tokens=[1, 2, 3], kv_length=3)
+    req = Request(id=0, prompt_len=3, kv_length=3)
     assert req.prefill_processed == 0
 
 
 def test_request_prefill_processed_advances_monotonic():
     """prefill_processed 영역의 단조 증가 가정 검증."""
-    req = Request(id=0, prompt_tokens=list(range(1000)), kv_length=1000)
+    req = Request(id=0, prompt_len=1000, kv_length=1000)
     req.prefill_processed = 256
     assert req.prefill_processed == 256
     req.prefill_processed = 768
     assert req.prefill_processed == 768
     req.prefill_processed = 1000
-    assert req.prefill_processed == len(req.prompt_tokens)
+    assert req.prefill_processed == req.prompt_len
 
 
 # ---- Admission.layer1 — Hybrid base = prefill_chunk_default ----
@@ -47,7 +47,7 @@ def test_admission_layer1_uses_prefill_chunk_default_as_base(dummy_config):
         admission_cfg=cfg.admission, request_queue=rq, kv_accountant=kv,
         idle_telemetry=tel,
     )
-    req = Request(id=0, prompt_tokens=[0] * 100, kv_length=100, max_tokens=5)
+    req = Request(id=0, prompt_len=100, kv_length=100, max_tokens=5)
     rq.push(req)
     # S2 마이그레이션 — 옛 balance 인자(t_proj·a_cycle·ctx_tokens) 삭제(§2.5). former-v2 는
     # prefill = prefill_chunk_default 고정(동적 chunk 사이징 없음).
@@ -211,7 +211,7 @@ def test_prefill_chunk_op_time_deterministic(
 
 def _prefill_req(req_id: int, depth: int, headroom: int = 300) -> Request:
     """depth(prefill_processed) 까지 처리됐고 headroom 만큼 프롬프트 남은 prefill 요청."""
-    r = Request(id=req_id, prompt_tokens=[0] * (depth + headroom))
+    r = Request(id=req_id, prompt_len=(depth + headroom))
     r.prefill_processed = depth
     return r
 
@@ -257,8 +257,27 @@ def test_prefill_single_req_gets_budget(scheduler_core):
 
 def test_prefill_decode_only_no_chunk(scheduler_core):
     """프롬프트 소진(prefill_processed ≥ len) 요청은 decode_tokens 로, prefill_chunk 제외."""
-    done = Request(id=0, prompt_tokens=[0] * 100)
+    done = Request(id=0, prompt_len=100)
     done.prefill_processed = 100
     prefill_chunk, decode_tokens, _ = scheduler_core._populate_mb_phases([done], 256)
     assert 0 not in prefill_chunk
     assert decode_tokens == {0: 0}
+
+
+def test_prefill_steering_age_cap_forces_starved(scheduler_core):
+    """prefill_wait ≥ age_cap 인 요청은 steering 무시하고 강제 ≥1 토큰 (prefill starvation 0)."""
+    near = _prefill_req(0, 100_000)              # steering 이 독식할 ideal-근접
+    starved = _prefill_req(1, 400_000)           # off-ideal — steering 만이면 0
+    starved.prefill_wait = scheduler_core.config.admission.age_cap
+    prefill_chunk, _, _ = scheduler_core._populate_mb_phases([near, starved], 256)
+    assert len(prefill_chunk[1]) >= 1            # 강제 배정
+
+
+def test_prefill_steering_zero_token_req_keeps_membership(scheduler_core):
+    """★ steering 이 0토큰 준 요청도 prefill_chunk 에 빈 list 로 남음 — _recompose_mb 가 슬롯
+    멤버를 prefill_chunk 키로 도출하므로 키가 빠지면 in_flight 고아 → 영원히 안 끝남(회귀 가드)."""
+    near = _prefill_req(0, 100_000)
+    deep = _prefill_req(1, 2_000_000)            # 너무 깊어 steering 0토큰
+    prefill_chunk, _, _ = scheduler_core._populate_mb_phases([near, deep], 256)
+    assert 1 in prefill_chunk and prefill_chunk[1] == []    # 멤버십 유지(빈 chunk)
+    assert deep.prefill_wait == 1                            # 0토큰 → 대기 누적

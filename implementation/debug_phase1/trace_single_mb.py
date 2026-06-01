@@ -31,7 +31,7 @@ from puls_sched.trace import TraceReplayer
 rp = TraceReplayer.load("debug_phase1/data/trace_long_min.csv")
 total_kv = 0
 for r in rp.replay():
-    print(f"  req {r.id}: prefill={len(r.prompt_tokens)} kv_length={r.kv_length} arrival={r.arrival_time:.2f}")
+    print(f"  req {r.id}: prefill={r.prompt_len} kv_length={r.kv_length} arrival={r.arrival_time:.2f}")
     total_kv += r.kv_length
 print("  Σ kv_length =", total_kv, "<= KVcap?", total_kv <= cfg.admission.kv_capacity_aggregate)
 

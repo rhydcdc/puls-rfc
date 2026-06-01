@@ -6,7 +6,7 @@ from puls_sched.request import Request
 
 
 def _make_req(req_id: int, kv_length: int = 10) -> Request:
-    return Request(id=req_id, prompt_tokens=[1], kv_length=kv_length)
+    return Request(id=req_id, prompt_len=1, kv_length=kv_length)
 
 
 def test_request_arrival_pushes_to_queue(scheduler_core):

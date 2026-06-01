@@ -12,7 +12,7 @@ from puls_sched.request import Request, RequestState
 
 def _make_req(req_id: int = 0, kv_length: int = 10, max_tokens: int = 5,
               state: RequestState = RequestState.DECODE) -> Request:
-    r = Request(id=req_id, prompt_tokens=[0] * 5, kv_length=kv_length,
+    r = Request(id=req_id, prompt_len=5, kv_length=kv_length,
                 max_tokens=max_tokens)
     # transition to target state via valid path
     if state == RequestState.PREFILL or state == RequestState.DECODE:
@@ -142,7 +142,7 @@ def test_completion_finalize_double_raises(completion, kv_accountant):
 
 def test_completion_finalize_pending_raises(completion):
     """PENDING 상태 위 finalize 시도 reject"""
-    req = Request(id=0, prompt_tokens=[0] * 5, kv_length=10, max_tokens=5)
+    req = Request(id=0, prompt_len=5, kv_length=10, max_tokens=5)
     # state == PENDING (default)
     with pytest.raises(ValueError, match="PENDING"):
         completion.finalize(req)

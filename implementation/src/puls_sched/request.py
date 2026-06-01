@@ -20,7 +20,9 @@ _VALID_TRANSITIONS: dict[RequestState, set[RequestState]] = {
 @dataclass
 class Request:
     id: int
-    prompt_tokens: list[int]
+    # Phase-2 S4(a) — 토큰 *내용* 은 스케줄러가 안 씀(len 만). 실 1M-ctx 트레이스서
+    # prompt_tokens=[0]*num_prefill materialize 가 OOM 유발 → 길이(int)만 보존.
+    prompt_len: int
     decoded_tokens: list[int] = field(default_factory=list)
     kv_length: int = 0
     arrival_time: float = 0.0
@@ -31,10 +33,13 @@ class Request:
     completion_time: float | None = None
     # ---- Impl-10-pre-2 (O9.1) — prefill chunking position tracker ----
     prefill_processed: int = 0
-    # ---- Phase-2 former-v2 — age-cap 공정성 추적. former 가 한 batch 구성에서 이 요청을
-    # 선택하지 않으면 +1, 선택(admit)되면 의미 종료. wait ≥ age_cap 이면 steering 무시하고
-    # 강제 포함(OPERATING_POINT §3) → starvation 0. ----
+    # ---- Phase-2 former-v2 — age-cap 공정성 추적 (OPERATING_POINT §3) ----
+    # wait: decode admission(request_queue) 대기. former 가 이 요청을 batch 에 안 넣으면 +1,
+    #       admit 되면 종료. wait ≥ age_cap → steering 무시 강제 포함.
+    # prefill_wait: prefill 토큰 분배 대기(in-flight). 한 사이클서 토큰 0개 받으면 +1, 받으면
+    #       0 리셋. prefill_wait ≥ age_cap → 강제 토큰 배정 (prefill starvation 0).
     wait: int = 0
+    prefill_wait: int = 0
 
     def transition_to(self, new_state: RequestState) -> None:
         if new_state not in _VALID_TRANSITIONS[self.state]:

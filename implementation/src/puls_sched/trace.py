@@ -114,7 +114,7 @@ class TraceReplayer:
         for req_id, entry in enumerate(self.entries):
             yield Request(
                 id=req_id,
-                prompt_tokens=[0] * entry.num_prefill_tokens,
+                prompt_len=entry.num_prefill_tokens,   # S4(a) — len 만 보존(내용 미사용, OOM 회피)
                 kv_length=entry.num_prefill_tokens + entry.num_decode_tokens,
                 arrival_time=entry.arrived_at / rate_multiplier,
                 max_tokens=entry.num_decode_tokens,

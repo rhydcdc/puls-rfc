@@ -5,7 +5,7 @@ from puls_sched.request import Request
 
 
 def _make_req(req_id: int, kv_length: int) -> Request:
-    return Request(id=req_id, prompt_tokens=[1], kv_length=kv_length)
+    return Request(id=req_id, prompt_len=1, kv_length=kv_length)
 
 
 def test_admit_reduces_remaining():

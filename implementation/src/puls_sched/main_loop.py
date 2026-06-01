@@ -234,7 +234,7 @@ class SchedulerCore:
                 continue  # defensive
             chunk_used = len(mb.prefill_chunk[req_id])
             req.prefill_processed += chunk_used
-            if req.prefill_processed >= len(req.prompt_tokens) and req.state == RequestState.PREFILL:
+            if req.prefill_processed >= req.prompt_len and req.state == RequestState.PREFILL:
                 req.transition_to(RequestState.DECODE)
         # Decode token 생성 (decode_tokens 위 reqs 만)
         for req_id in list(mb.decode_tokens.keys()):
@@ -304,13 +304,14 @@ class SchedulerCore:
         prefill_processed: dict[int, int] = {}
         prefill_reqs = []
         for req in reqs:
-            remaining = len(req.prompt_tokens) - req.prefill_processed
+            remaining = req.prompt_len - req.prefill_processed
             if remaining > 0:
                 prefill_reqs.append((req, remaining))
             else:
                 decode_tokens[req.id] = 0
         if prefill_reqs and chunk_budget_total > 0:
             target_work = self.config.admission.prefill_kv_work_target_tokens
+            age_cap = self.config.admission.age_cap
             by_id = {req.id: req for req, _ in prefill_reqs}
             remaining = {req.id: rem for req, rem in prefill_reqs}
             alloc = {req.id: 0 for req, _ in prefill_reqs}
@@ -318,24 +319,38 @@ class SchedulerCore:
             W = 0      # 누적 depth-work = Σ(배정 토큰의 causal 깊이)
             t = 0      # 누적 배정 토큰
             while t < budget:
-                ideal = (target_work - W) / (budget - t)   # 다음 토큰이 있어야 할 깊이
                 cand = [rid for rid in alloc if alloc[rid] < remaining[rid]]
                 if not cand:
                     break
-                # 다음 토큰의 깊이 = prefill_processed + 이미 배정한 수 (causal)
-                pick = min(cand, key=lambda rid: abs(
-                    (by_id[rid].prefill_processed + alloc[rid]) - ideal))
+                # age-cap (decode 와 동형): 이번 사이클 토큰 0개인데 prefill_wait ≥ age_cap 으로
+                # 오래 기다린 요청은 steering 무시하고 강제 1 토큰 → prefill starvation 0.
+                aged = [rid for rid in cand
+                        if alloc[rid] == 0 and by_id[rid].prefill_wait >= age_cap]
+                if aged:
+                    pick = max(aged, key=lambda rid: by_id[rid].prefill_wait)   # 가장 오래 기다린 것
+                else:
+                    # steering: depth-합 25.6M 수렴 — 다음 토큰의 이상 깊이에 가장 가까운 요청.
+                    # 다음 토큰의 깊이 = prefill_processed + 이미 배정한 수 (causal).
+                    ideal = (target_work - W) / (budget - t)
+                    pick = min(cand, key=lambda rid: abs(
+                        (by_id[rid].prefill_processed + alloc[rid]) - ideal))
                 W += by_id[pick].prefill_processed + alloc[pick]
                 alloc[pick] += 1
                 t += 1
-            for rid, c in alloc.items():
+            for req, _ in prefill_reqs:
+                c = alloc[req.id]
+                # ★ 0토큰이어도 빈 chunk 로 *멤버십 유지* — _recompose_mb 가 슬롯 멤버를
+                # prefill_chunk∪decode_tokens 키로 도출하므로, 키가 빠지면 그 요청이 슬롯에서
+                # 누락돼 in_flight 고아가 됨(prefill_wait 누적 불가 → age-cap 무효). 빈 chunk 는
+                # op_time 0 이라 무해(test_dispatcher_prefill_attn_empty_chunk_fallback).
+                prefill_chunk[req.id] = list(range(
+                    req.prefill_processed, req.prefill_processed + c,
+                ))
+                prefill_processed[req.id] = req.prefill_processed
                 if c > 0:
-                    req = by_id[rid]
-                    prefill_chunk[rid] = list(range(
-                        req.prefill_processed, req.prefill_processed + c,
-                    ))
-                    # Impl-10 main — req.prefill_processed 시점 snapshot (causal ctx 산출 입력)
-                    prefill_processed[rid] = req.prefill_processed
+                    req.prefill_wait = 0          # 진행함 → 대기 리셋
+                else:
+                    req.prefill_wait += 1         # 토큰 0개 → 다음 사이클 age-cap 강제 후보
         return prefill_chunk, decode_tokens, prefill_processed
 
     def _per_mb_kv_budget(self) -> int:

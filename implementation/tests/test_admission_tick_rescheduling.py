@@ -23,7 +23,7 @@ def _admission_event(timestamp: float = 0.0) -> Event:
 def _make_request(req_id: int, arrival: float = 0.0) -> Request:
     return Request(
         id=req_id,
-        prompt_tokens=[0] * 256,
+        prompt_len=256,
         kv_length=256 + 32,
         arrival_time=arrival,
         max_tokens=32,

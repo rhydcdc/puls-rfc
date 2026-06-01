@@ -340,7 +340,7 @@ def test_meta_arch_3_3_kv_resident_invariant():
     from puls_sched.kv_accountant import KVAccountant
     from puls_sched.request import Request
     kv = KVAccountant(capacity=1000)
-    req = Request(id=0, prompt_tokens=[], kv_length=100)
+    req = Request(id=0, prompt_len=0, kv_length=100)
     kv.admit(req)
     assert kv.remaining == 900
     kv.release(req)

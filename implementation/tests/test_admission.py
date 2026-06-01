@@ -5,7 +5,7 @@ from puls_sched.request import Request
 
 
 def _make_req(req_id: int, kv_length: int = 10) -> Request:
-    return Request(id=req_id, prompt_tokens=[1], kv_length=kv_length)
+    return Request(id=req_id, prompt_len=1, kv_length=kv_length)
 
 
 # Phase-2 S1 — balance_intra_A(유휴율 기반 prefill 증량) 삭제됨.

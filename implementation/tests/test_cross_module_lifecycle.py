@@ -117,7 +117,7 @@ def test_trace_to_request_queue_chain():
 def test_admission_to_dispatch_to_completion_chain():
     """1 req end-to-end — admit → token signal × max_tokens → finalize → KV release"""
     core = _make_scheduler_core()
-    req = Request(id=0, prompt_tokens=[0] * 5, kv_length=100, max_tokens=3)
+    req = Request(id=0, prompt_len=5, kv_length=100, max_tokens=3)
     core.request_queue.push(req)
     initial = core.kv_accountant.remaining
     core._handle(_admission_event())
@@ -136,7 +136,7 @@ def test_50_req_full_lifecycle_kv_no_leak():
     # 50 req 를 5 batch 로 admit (window capacity=3 정합 위 3 mb 씩 처리)
     for i in range(50):
         max_t = random.choice([1, 2, 3])
-        req = Request(id=i, prompt_tokens=[0], kv_length=50, max_tokens=max_t)
+        req = Request(id=i, prompt_len=1, kv_length=50, max_tokens=max_t)
         core.request_queue.push(req)
         core._handle(_admission_event())
         mb_id = core._next_mb_id - 1
@@ -152,7 +152,7 @@ def test_50_req_full_lifecycle_all_completed():
     reqs = []
     for i in range(50):
         max_t = random.choice([1, 2, 3])
-        req = Request(id=i, prompt_tokens=[0], kv_length=50, max_tokens=max_t)
+        req = Request(id=i, prompt_len=1, kv_length=50, max_tokens=max_t)
         reqs.append(req)
         core.request_queue.push(req)
         core._handle(_admission_event())
@@ -170,7 +170,7 @@ def _run_lifecycle_with_seed(seed: int) -> tuple[int, list[float]]:
     reqs = []
     for i in range(20):
         max_t = random.choice([1, 2])
-        req = Request(id=i, prompt_tokens=[0], kv_length=50, max_tokens=max_t)
+        req = Request(id=i, prompt_len=1, kv_length=50, max_tokens=max_t)
         reqs.append(req)
         core.request_queue.push(req)
         core._handle(_admission_event())
@@ -215,12 +215,12 @@ def test_completion_does_not_corrupt_other_mbs():
     """mb_0 의 req finalize 가 mb_1 의 mb 상태에 영향 0"""
     core = _make_scheduler_core()
     # mb_0
-    r0 = Request(id=0, prompt_tokens=[0], kv_length=50, max_tokens=1)
+    r0 = Request(id=0, prompt_len=1, kv_length=50, max_tokens=1)
     core.request_queue.push(r0)
     core._handle(_admission_event())
     mb0_id = core._next_mb_id - 1
     # mb_1
-    r1 = Request(id=1, prompt_tokens=[0], kv_length=60, max_tokens=5)
+    r1 = Request(id=1, prompt_len=1, kv_length=60, max_tokens=5)
     core.request_queue.push(r1)
     core._handle(_admission_event())
     mb1_id = core._next_mb_id - 1
@@ -235,7 +235,7 @@ def test_completion_does_not_corrupt_other_mbs():
 def test_partial_completion_in_micro_batch():
     """mb 위 3 decode req — 1 finalize → 완료 req 만 다음 cycle 배치에서 빠짐.
 
-    STEP 3 — *decode 단계* mb 의 완료 동작 검증이므로 순수 decode req(prompt_tokens=[])로
+    STEP 3 — *decode 단계* mb 의 완료 동작 검증이므로 순수 decode req(prompt_len=0)로
     표현. chunked prefill 구조에선 prompt 있는 req 가 prefill 단계를 먼저 거치므로
     (decode_tokens 가 admit 직후 비어 있음), 이 테스트 의도(decode 일부 완료)는 prompt
     없는 req 로 isolate 한다.
@@ -246,7 +246,7 @@ def test_partial_completion_in_micro_batch():
     """
     core = _make_scheduler_core()
     for i, mx in enumerate([1, 5, 5]):
-        r = Request(id=i, prompt_tokens=[], kv_length=50, max_tokens=mx)
+        r = Request(id=i, prompt_len=0, kv_length=50, max_tokens=mx)
         core.request_queue.push(r)
     core._handle(_admission_event())
     mb_id = core._next_mb_id - 1
@@ -325,12 +325,12 @@ def test_real_trace_capacity_bumped_500_req_no_leak():
 def test_finalized_req_in_mb_decode_tokens_no_effect_on_next_decode():
     """req_0 finalize 후 req_1 의 progress 가 영향 0 (Q9 책임 분리 의 correctness)
 
-    STEP 3 — decode 단계 동작 검증이므로 순수 decode req(prompt_tokens=[])로 표현.
+    STEP 3 — decode 단계 동작 검증이므로 순수 decode req(prompt_len=0)로 표현.
     prompt 있으면 첫 cycle 이 prefill 로 소비되어 cycle↔decode 토큰 1:1 이 깨짐.
     """
     core = _make_scheduler_core()
-    r0 = Request(id=0, prompt_tokens=[], kv_length=50, max_tokens=2)
-    r1 = Request(id=1, prompt_tokens=[], kv_length=60, max_tokens=5)
+    r0 = Request(id=0, prompt_len=0, kv_length=50, max_tokens=2)
+    r1 = Request(id=1, prompt_len=0, kv_length=60, max_tokens=5)
     core.request_queue.push(r0)
     core.request_queue.push(r1)
     core._handle(_admission_event())

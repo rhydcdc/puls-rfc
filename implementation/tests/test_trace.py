@@ -144,12 +144,11 @@ def test_trace_replay_rate_negative_raises():
         list(r.replay(rate_multiplier=-1.0))
 
 
-def test_trace_replay_prompt_tokens_placeholder():
+def test_trace_replay_prompt_len():
     r = TraceReplayer.load(FIXTURES / "valid_minimal.csv")
     reqs = list(r.replay())
-    # pre-HW mode: prompt_tokens = [0] * num_prefill_tokens
-    assert len(reqs[0].prompt_tokens) == 100
-    assert all(tok == 0 for tok in reqs[0].prompt_tokens)
+    # S4(a) — prompt_len = num_prefill_tokens (토큰 내용 미materialize, OOM 회피)
+    assert reqs[0].prompt_len == 100
 
 
 # ============================================================================

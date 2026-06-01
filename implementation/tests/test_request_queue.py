@@ -5,7 +5,7 @@ from puls_sched.request_queue import RequestQueue
 
 
 def _make_req(req_id: int) -> Request:
-    return Request(id=req_id, prompt_tokens=[1, 2, 3], kv_length=10)
+    return Request(id=req_id, prompt_len=3, kv_length=10)
 
 
 def test_push_returns_true_when_capacity_available():

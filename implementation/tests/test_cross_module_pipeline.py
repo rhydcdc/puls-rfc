@@ -31,7 +31,7 @@ from puls_sched.window import InFlightWindow
 
 
 def _make_req(req_id: int, kv_length: int = 50) -> Request:
-    return Request(id=req_id, prompt_tokens=[1], kv_length=kv_length)
+    return Request(id=req_id, prompt_len=1, kv_length=kv_length)
 
 
 def _fresh_core(seed: int | None = None):

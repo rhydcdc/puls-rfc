@@ -105,7 +105,7 @@ def test_stress_kv_admit_release_100_roundtrip(completion, kv_accountant):
     """100 req 의 (admit → finalize) round-trip → remaining 정확 보존"""
     initial = kv_accountant.remaining
     for i in range(100):
-        req = Request(id=i, prompt_tokens=[0], kv_length=100, max_tokens=1)
+        req = Request(id=i, prompt_len=1, kv_length=100, max_tokens=1)
         req.transition_to(RequestState.PREFILL)
         req.transition_to(RequestState.DECODE)
         kv_accountant.admit(req)
@@ -118,7 +118,7 @@ def test_stress_kv_partial_release_state_consistency(completion, kv_accountant):
     initial = kv_accountant.remaining
     reqs = []
     for i in range(50):
-        req = Request(id=i, prompt_tokens=[0], kv_length=100, max_tokens=1)
+        req = Request(id=i, prompt_len=1, kv_length=100, max_tokens=1)
         req.transition_to(RequestState.PREFILL)
         req.transition_to(RequestState.DECODE)
         kv_accountant.admit(req)
@@ -133,7 +133,7 @@ def test_stress_kv_double_release_raises_among_50(completion, kv_accountant):
     """50 finalize 중 11 번째 동일 req 재 finalize → raise"""
     reqs = []
     for i in range(50):
-        req = Request(id=i, prompt_tokens=[0], kv_length=100, max_tokens=1)
+        req = Request(id=i, prompt_len=1, kv_length=100, max_tokens=1)
         req.transition_to(RequestState.PREFILL)
         req.transition_to(RequestState.DECODE)
         kv_accountant.admit(req)
@@ -153,7 +153,7 @@ def test_stress_request_state_monotonic_100_reqs():
     core = _make_core()
     reqs = []
     for i in range(100):
-        r = Request(id=i, prompt_tokens=[0], kv_length=50, max_tokens=1)
+        r = Request(id=i, prompt_len=1, kv_length=50, max_tokens=1)
         reqs.append(r)
         core.request_queue.push(r)
         core._handle(_adm_event())
@@ -172,7 +172,7 @@ def test_stress_decoded_count_signal_invariant_50_mbs():
     """50 mb 위 token decode signal 1회 = +1 정확"""
     core = _make_core()
     for i in range(50):
-        r = Request(id=i, prompt_tokens=[0], kv_length=50, max_tokens=3)
+        r = Request(id=i, prompt_len=1, kv_length=50, max_tokens=3)
         core.request_queue.push(r)
         core._handle(_adm_event())
         mb_id = core._next_mb_id - 1
@@ -193,7 +193,7 @@ def test_stress_completion_time_single_set():
     core = _make_core()
     reqs = []
     for i in range(50):
-        r = Request(id=i, prompt_tokens=[0], kv_length=50, max_tokens=1)
+        r = Request(id=i, prompt_len=1, kv_length=50, max_tokens=1)
         reqs.append(r)
         core.request_queue.push(r)
         core._handle(_adm_event())
@@ -212,7 +212,7 @@ def test_stress_in_flight_requests_dict_no_leak():
     """50 admit + 50 finalize → in_flight_requests == {}"""
     core = _make_core()
     for i in range(50):
-        r = Request(id=i, prompt_tokens=[0], kv_length=50, max_tokens=1)
+        r = Request(id=i, prompt_len=1, kv_length=50, max_tokens=1)
         core.request_queue.push(r)
         core._handle(_adm_event())
         mb_id = core._next_mb_id - 1
@@ -229,7 +229,7 @@ def test_stress_micro_batch_decode_tokens_unchanged_by_completion():
     """finalize 호출 전후 mb.decode_tokens dict 의 key set 동일"""
     core = _make_core()
     for i, mx in enumerate([1, 2, 3]):
-        r = Request(id=i, prompt_tokens=[0], kv_length=50, max_tokens=mx)
+        r = Request(id=i, prompt_len=1, kv_length=50, max_tokens=mx)
         core.request_queue.push(r)
     core._handle(_adm_event())
     mb_id = core._next_mb_id - 1
@@ -267,7 +267,7 @@ def test_stress_lifecycle_seed_42_bit_exact_reproducible():
         reqs = []
         for i in range(50):
             max_t = random.choice([1, 2])
-            r = Request(id=i, prompt_tokens=[0], kv_length=50, max_tokens=max_t)
+            r = Request(id=i, prompt_len=1, kv_length=50, max_tokens=max_t)
             reqs.append(r)
             core.request_queue.push(r)
             core._handle(_adm_event())
@@ -292,7 +292,7 @@ def test_stress_lifecycle_composite_invariant_violation_zero(seed):
     initial = core.kv_accountant.remaining
     for i in range(30):
         max_t = random.choice([1, 2, 3])
-        r = Request(id=i, prompt_tokens=[0], kv_length=50, max_tokens=max_t)
+        r = Request(id=i, prompt_len=1, kv_length=50, max_tokens=max_t)
         reqs.append(r)
         core.request_queue.push(r)
         core._handle(_adm_event())

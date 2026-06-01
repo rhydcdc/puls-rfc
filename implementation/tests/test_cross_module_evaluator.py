@@ -137,7 +137,7 @@ def test_chain_kv_no_leak_with_evaluator_attached():
     initial_remaining = core.kv_accountant.remaining
     # 10 req admit + immediate finalize
     for i in range(10):
-        req = Request(id=i, prompt_tokens=[0] * 100, kv_length=100, max_tokens=1)
+        req = Request(id=i, prompt_len=100, kv_length=100, max_tokens=1)
         core.request_queue.push(req)
     # Drive admission via direct push (synthetic)
     core.queue.push(Event(

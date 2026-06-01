@@ -23,7 +23,7 @@ from puls_sched.request import Request
 
 
 def _make_req(req_id: int, kv_length: int = 10, max_tokens: int = 0) -> Request:
-    return Request(id=req_id, prompt_tokens=[1], kv_length=kv_length, max_tokens=max_tokens)
+    return Request(id=req_id, prompt_len=1, kv_length=kv_length, max_tokens=max_tokens)
 
 
 # =========================================================================
