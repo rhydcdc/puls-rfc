@@ -81,10 +81,40 @@ op-time 산식·closed-form 에 이미 존재 → 잃는 것 없음. **S0 후 �
 - **저ctx(<7K)**: PIM < GPU-proj (decode-attn 싸서 PIM 유휴 *정상*, ARCH §6.6). 여기선
   PIM 균형 강제 말고 일반 batching (§아래 length-aware).
 
-**아직 확정 안 된 파라미터 (사용자 확인 대기):**
-- [ ] **KV 캐파**: 현재 4M → 올려야. HBM4 48GB/stack = **18M tokens**, 64GB = 24M.
-  (Instance A 64 stack, 가중치 137GB 제외 후 / 163,840 B per token.)
-- [ ] **타깃 ctx**: 삼중 균형 = ~100K. README "long-context agentic" 재프레이밍 기준.
+## 0.9 ★ 동작점(operating point) — KV 총량 기준 밸런스 (확정 2026-06-01)
+
+> **스케줄러의 진짜 레버 = "배치에 넣는 디코더들의 KV 길이 합" = PIM KV 총량.**
+> 개별 요청 ctx 는 트레이스가 줌(제어 불가). 스케줄러는 디코더를 *골라 담아* KV 합을
+> 목표 범위에 맞춘다. **디코드는 넣기는 자유, 쪼개 넣기는 불가** (요청 KV 통째) → 정확히
+> 한 점에 못 맞추므로 **오차 범위** 안에 들어오게 고른다 (사용자 핵심).
+
+**세 시간 = 무엇의 함수 (단위 통일: 전부 토큰):**
+- `t_PIM` = f(**KV 총량** = Σ 디코더 KV). 개별 ctx 분포 무관, *합만* 중요.
+- `t_GPU-A` = QKV·O proj(batch=N_dec+prefill) + PREFILL_ATTN(prefill × 그 요청 ctx).
+- `t_B(FFN)` = f(batch = N_dec + prefill).
+
+**확정 동작점 (prefill=512 고정, op-time 직접 산출, TP=8 반영):**
+
+| 파라미터 | 값 |
+|---|---|
+| **목표 KV 총량** | **25,000K** (= 25M 토큰) → PIM≈GPU-A≈B≈101µs, spread **0.6%** |
+| **허용 범위 (15% 오차)** | **21,500K ~ 29,000K** |
+| prefill (배치당) | **512 토큰** 고정 (2^9, vLLM `max_num_batched_tokens` 동급) |
+| 균형 시간 X | ~101 µs |
+| N_dec (디코더 수) | *부산물* — 평균 ctx 100K면 ~248개, 50K면 ~500개 |
+
+- **PIM 시간 표**(검증): KV 20M→81.7µs / 25M→102µs / 30M→122µs (개별 ctx 무관, 합만).
+- **15% = KV 총량 21.5M~29M** = (평균 ctx 100K 가정 시) 요청 길이 ~87K~117K 에 해당.
+- 그 밖: KV<21.5M → PIM 작아 GPU/B 그늘(놂). KV>29M → PIM bottleneck(A-bound). 둘 다
+  레버로 못 고침 — 풀에 그 KV 합을 만들 디코더가 없으면(짧은 요청만) 균형 불가 = 정상.
+
+**KV 캐파 = 30M 토큰 (확정, 넉넉).** 목표 25M + 상한 29M 을 담고 여유. 스택당 ~80GB 급
+HBM4 가정 (64 stack, 가중치 137GB 제외 후 / 163,840 B per token). former 가 21.5~29M
+범위로 admit 하므로 캐파 30M 은 hard ceiling (OOM 방지) + 여유.
+
+**타깃 워크로드 = long-context agentic, 요청 ctx ~87K~117K (중심 100K).** README
+"Target Workload" 이 범위로 재프레이밍. 그 밖 ctx 는 균형 덜 맞음 = PULS 적용 범위 밖
+(하드웨어 물리, ARCH §6.6 정합).
 
 ## 0.8 짧은 컨텍스트 손실 최소화 — length-aware 아이디어 (사용자 2026-06-01, 설계 중)
 
@@ -92,6 +122,8 @@ op-time 산식·closed-form 에 이미 존재 → 잃는 것 없음. **S0 후 �
 > 조절해 빨리 쳐냄. prefill 은 그 짧은 것들 손해 안 볼 만큼(GPU≈PIM)만. → 짧을 때도
 > TBT/TTFT 최적, 길 때도 유지. (vLLM/Sarathi 의 경험적 512 고정보다 SLO-aware.)
 > **TP 픽스로 임계가 7K 로 내려가 이 구간이 훨씬 넓어짐.** 상세 설계는 S2 former 에서.
+> §0.9 동작점은 *고ctx 풀*(KV 합 25M 가능) 기준. 짧은 요청만 있는 풀은 KV 합이 25M 에
+> 못 미쳐 PIM 이 놂 → 그땐 균형 강제 말고 작은 배치로 FFN 빨리 쳐냄(length-aware).
 
 ## 1. 코드 인벤토리 — 재사용(substrate) vs 교체(scheduling)
 
@@ -193,15 +225,13 @@ op-time 산식·closed-form 에 이미 존재 → 잃는 것 없음. **S0 후 �
 - [x] **disjoint 보장:** backfill 은 request_queue 에서 pop(= 한 번만 admit) → 슬롯 간 자동
   disjoint. 요청 동시 1슬롯 불변식 성립.
 
-- [ ] **멤버십 = 용량 (disjoint 분할).** 빈/완료된 μ-batch 슬롯을 재충전: 풀에서 *다른
-  in-flight 슬롯에 없는* decoder 를 cap(`max_batch_size`)까지 + KV 여유만큼 prefill admit.
-  활성 슬롯 목표 2(+window 3번째 전이 여유). 유휴율 게이트 없음 — "용량 있고 일감 있으면
-  넣음". 한 요청 동시 1슬롯 불변식 유지.
-- [ ] **밸런스 = 시간.** 이번 배치 decoder 들의 `t_pim = pim.op_time(Σkv)` 동안 GPU 슬랙
-  `max(0, t_pim·margin − t_gpu_base)` 에 prefill chunk 를 끼움. base floor 없음.
-  - 산식: `chunk_total = max(0, t_pim·margin − t_proj) / per_token` (현 `balance_pim_slack`
-    admission.py:64~96 재사용, base floor·intra_A·inter_AB 군더더기 제거).
-  - 분배: `_populate_mb_phases` 의 uniform chunk(TOTAL÷N_prefill) 유지 (ARCH §5.2).
+- [ ] **밸런스 = KV 총량 동작점 (§0.9 확정).** prefill 을 동적으로 키우는 게 아니라:
+  - **디코더를 풀에서 골라 담아 KV 합을 21.5M~29M(목표 25M) 범위에 넣음** = PIM 시간을
+    B 시간(~101µs)에 맞춤. 디코드는 쪼개기 불가 → 범위로 수렴(사용자).
+  - **prefill = 512 토큰 고정** (배치당, 2^9). 동적 chunk 사이징(`balance_pim_slack`)·
+    유휴율 게이트(`balance_intra_A`) 불필요 — 동작점이 곧 답.
+  - 슬롯당 KV 예산 = `_per_mb_kv_budget`(30M/2=15M)은 disjoint 2-슬롯 분할용으로 유지.
+  - `balance_inter_AB`(시간 기준)는 워크로드가 동작점 벗어날 때(A-bound 전이 등) 미세 조정용.
 - [ ] **prefill→decode 전이 시 풀 복귀** — 다음 iteration 부터 PIM decode 채움. 현
   `_maybe_advance_forward_pass` 의 전이 검출(345·353) 유지.
 - [ ] **iteration 단위 = 1 forward pass(L=80 layer → decoder 당 1 token).** mb 의 layer
@@ -387,8 +417,12 @@ op-time 산식·closed-form 에 이미 존재 → 잃는 것 없음. **S0 후 �
   S0 가 former 의 토대라 먼저. 다음: S0 착수.
 - 2026-06-01: **★ TP=8 분산 버그 발견·수정**(사용자 지적, commit 40e812a). GPU/FFN 이
   단일 GPU peak 으로만 나눠 8배 과대. PIM=GPU 임계 56K→7K, 삼중균형 280K→100K(§0.7).
-  모든 균형 결론의 토대 정정. 사전-깨짐 3개 식별(별도 정리). 다음: KV 캐파·타깃 ctx 확정 후
-  S2 former(length-aware 포함).
+  모든 균형 결론의 토대 정정. 사전-깨짐 3개 식별(별도 정리).
+- 2026-06-01: **★ 동작점 KV 총량 기준 확정(§0.9).** 스케줄러 레버 = 디코더 골라 KV 합
+  맞추기(쪼개기 불가 → 범위 수렴). 목표 KV 25M, 허용 21.5~29M(15% 오차), prefill 512 고정,
+  균형 ~101µs. **KV 캐파 = 30M 확정**(넉넉). 타깃 = 요청 ctx ~87K~117K long-context agentic.
+  vLLM 512 는 토큰(K 아님, web 확인) — 경험적 타협점 vs PULS 는 하드웨어 균형서 유도.
+  다음: S2 former(KV 총량 동작점 + length-aware).
 - 2026-06-01: 가속 커버리지 확인(§0.6) — 동역학 2(더블버퍼링·인스턴스A∥B), op-time 2
   (F1·F5), closed-form 2(Aux). F2→"더블 버퍼링" 용어 통일. **분할 작업: 1차 S0~S2,
   2차 S3~S5** (사용자). 옛 전체 회귀 안 돎(다 교체) — 변경별 타깃 테스트만. test_invariants.py
