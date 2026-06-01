@@ -112,13 +112,13 @@ def test_m6_f3_f5_result_frozen():
 def test_m7_compute_gpu_op_time_signature():
     sig = inspect.signature(compute_gpu_op_time_s)
     params = list(sig.parameters.keys())
-    assert params == ["node_type", "mb", "cal", "model", "time_cfg"]
+    assert params == ["node_type", "mb", "cal", "model", "time_cfg", "num_gpus"]  # TP=8(40e812a)
 
 
 def test_m7_compute_ffn_op_time_signature():
     sig = inspect.signature(compute_ffn_op_time_s)
     params = list(sig.parameters.keys())
-    assert params == ["mb", "cal", "model"]
+    assert params == ["mb", "cal", "model", "num_gpus"]  # TP=8(40e812a)
 
 
 # ============================================================================
@@ -181,11 +181,5 @@ def test_m11_d2_markdown_honest_disclosure():
 # ============================================================================
 
 
-def test_m12_admission_payload_no_stage1_lookup():
-    from puls_sched.main_loop import SchedulerCore
-    src = inspect.getsource(SchedulerCore._compose_admission_payload)
-    # Stage 1 dummy lookup 영역 폐기 — qkv / o_proj lookup 부재
-    assert 'gpu_op_time_us["qkv"]' not in src
-    assert 'gpu_op_time_us["o_proj"]' not in src
-    # Stage 2 — last mb 위 spec-derived 산출
-    assert "compute_gpu_op_time_s" in src
+# test_m12_admission_payload_no_stage1_lookup 삭제(S2) — SchedulerCore._compose_admission_payload
+# 자체가 S2 에서 제거됨(§2.5). 검증 대상 메서드 부재 → 테스트 폐기.

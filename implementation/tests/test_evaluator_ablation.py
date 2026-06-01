@@ -75,8 +75,8 @@ def test_ablation_f1_default_uses_real_pim(dummy_config):
     d.register(MicroBatch(id=0, kv_rows_total=32, kv_rows_lockstep=32))
     decode = dag.get_node(0, NodeType.DECODE_ATTN)
     op_time = d._op_time(decode)
-    # 정상 PIM path = pim_executor.op_time 산출값
-    expected = pim.op_time(kv_rows_total=32, kv_rows_lockstep=32)
+    # 정상 PIM path = pim_executor.op_time. dispatcher 는 ns→µs(×1e-3) 변환 반환(40e812a/ns 정정).
+    expected = pim.op_time(kv_rows_total=32, kv_rows_lockstep=32) * 1e-3
     assert op_time == expected
 
 

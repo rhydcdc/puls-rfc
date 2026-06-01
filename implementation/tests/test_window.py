@@ -35,7 +35,7 @@ def test_admit_syncs_dag():
     window = InFlightWindow(dag)
     window.admit(0)
     assert 0 in dag.nodes
-    assert len(dag.nodes[0]) == 4  # 4 NodeType
+    assert len(dag.nodes[0]) == 5  # 5 NodeType (S0: +FFN, inter-AB F3)
 
 
 def test_invariant_window_dag_consistency():

@@ -123,66 +123,9 @@ def test_b4_b_cycle_grows_after_layer_cycles(cfg, alpha_pipeline):
 
 
 # ============================================================================
-# B5 — balance_inter_AB 진정 활성 (asymmetric a > b 분기 fire 가능)
+# B5·B6 삭제(S2) — admission.balance_inter_AB 가 §2.5 동작점 확정으로 제거됨.
+# 검증 대상 메서드 부재 → 두 테스트 폐기.
 # ============================================================================
-
-
-def test_b5_balance_inter_ab_a_gt_b_branch_fires(cfg):
-    """Stage 1 위 b_cycle=0 → 영원 a<b 분기만 fire. Stage 2 위 a>b 도 fire 가능."""
-    from puls_sched.admission import Admission
-    from puls_sched.kv_accountant import KVAccountant
-    from puls_sched.request_queue import RequestQueue
-
-    admission = Admission(
-        admission_cfg=cfg.admission,
-        request_queue=RequestQueue(capacity=100),
-        kv_accountant=KVAccountant(capacity=cfg.admission.kv_capacity_aggregate),
-        idle_telemetry=IdleTelemetry(),
-    )
-    # Stage 2 — a > b 분기 산출 (out-of-band, a 큼)
-    chunk_a_gt_b = admission.balance_inter_AB(
-        prefill_chunk_tokens=512, a_cycle=100.0, b_cycle=10.0, ctx_tokens=32000,
-    )
-    # a > b → base 유지 (admission ↓ 정책)
-    assert chunk_a_gt_b == 512
-    # a < b 분기 — base + n_sat
-    chunk_a_lt_b = admission.balance_inter_AB(
-        prefill_chunk_tokens=512, a_cycle=10.0, b_cycle=100.0, ctx_tokens=32000,
-    )
-    assert chunk_a_lt_b > 512
-
-
-# ============================================================================
-# B6 — balance_inter_AB 4 분기 cover
-# ============================================================================
-
-
-def test_b6_balance_inter_ab_four_branches(cfg):
-    """in_band · a<b · a>b · a>>b extremum 4 영역 cover."""
-    from puls_sched.admission import Admission
-    from puls_sched.kv_accountant import KVAccountant
-    from puls_sched.request_queue import RequestQueue
-
-    admission = Admission(
-        admission_cfg=cfg.admission,
-        request_queue=RequestQueue(capacity=100),
-        kv_accountant=KVAccountant(capacity=cfg.admission.kv_capacity_aggregate),
-        idle_telemetry=IdleTelemetry(),
-    )
-    base = 512
-    # in_band (a ≈ b, diff < width=2.0 for mid ctx)
-    r1 = admission.balance_inter_AB(base, 50.0, 50.5, 32000)
-    # a < b
-    r2 = admission.balance_inter_AB(base, 10.0, 100.0, 32000)
-    # a > b
-    r3 = admission.balance_inter_AB(base, 100.0, 10.0, 32000)
-    # extremum a >> b
-    r4 = admission.balance_inter_AB(base, 10000.0, 10.0, 32000)
-    # 4 영역 모두 산출 정합 (값 영역 차이만 확인)
-    assert r1 == base       # in_band → base
-    assert r2 > base        # a<b → base + n_sat
-    assert r3 == base       # a>b → base (admission ↓ effect limited)
-    assert r4 == base       # a>>b → 동일 분기
 
 
 # ============================================================================

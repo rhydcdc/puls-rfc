@@ -103,7 +103,9 @@ def test_dispatcher_prefill_attn_scaled_with_mixed_mb(
     # FLOPs = 2 × chunk × hidden × (prefill_processed + chunk). prefill_processed=0 (default)
     # → FLOPs = 2 × 256 × 8192 × 256
     expected_flops = 2 * 256 * dummy_config.model.hidden * 256
-    peak = dummy_config.calibration.gpu_fp16_dense_peak_tflops * 1e12 * dummy_config.calibration.gpu_mfu_default
+    # TP=8 마이그레이션(40e812a) — peak ×num_gpus_instance_a.
+    peak = (dummy_config.calibration.gpu_fp16_dense_peak_tflops * 1e12
+            * dummy_config.calibration.gpu_mfu_default * dummy_config.hw.num_gpus_instance_a)
     expected_us = expected_flops / peak * 1e6
     assert d._op_time(node) == pytest.approx(expected_us)
 

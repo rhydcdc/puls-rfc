@@ -11,14 +11,11 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from puls_sched.admission import Admission
 from puls_sched.config import default_dummy_config
 from puls_sched.dispatcher import Dispatcher
 from puls_sched.idle_telemetry import IdleTelemetry
-from puls_sched.kv_accountant import KVAccountant
 from puls_sched.micro_batch import MicroBatch
 from puls_sched.node import Node, NodeState, NodeType
-from puls_sched.request_queue import RequestQueue
 
 
 # ---- Mock IdleTelemetry — record_active 호출 capture ----
@@ -141,44 +138,8 @@ def test_dispatcher_real_idle_telemetry_accumulates(
 
 # ---- admission.balance_intra_A 진정 활성 chain ----
 
-def test_balance_intra_A_activates_via_dispatch_chain(dummy_config):
-    """Cross-module — dispatcher.dispatch_gpu → idle_telemetry → admission.balance_intra_A
-    의 진정 활성.
-
-    STEP 3-b — balance_intra_A 는 prefill chunk 증량만 담당 (decode 조절은 _try_join 전담).
-    여기선 GPU busy(idle low)·PIM idle high → prefill 방향 게이트 닫힘 → prefill 변경 0
-    확인. (decode +1 무실효 로직 제거됨, 새 시그니처: balance_intra_A(prefill)->prefill.)"""
-    from puls_sched.clock import Clock
-    from puls_sched.dag import DAG
-    from puls_sched.event_queue import EventQueue
-    from puls_sched.pim_emulator import PIMExecutor
-    cfg = default_dummy_config()
-    clock = Clock()
-    queue = EventQueue(clock)
-    dag = DAG()
-    pim = PIMExecutor(config=cfg)
-    tel = IdleTelemetry()
-    tel.reset(0.0)
-    d = Dispatcher(
-        config=cfg, clock=clock, queue=queue, dag=dag, pim_executor=pim,
-        idle_telemetry=tel,
-    )
-    rq = RequestQueue(capacity=cfg.admission.request_queue_capacity)
-    kv = KVAccountant(capacity=cfg.admission.kv_capacity_aggregate)
-    admission = Admission(
-        admission_cfg=cfg.admission, request_queue=rq, kv_accountant=kv,
-        idle_telemetry=tel,
-    )
-    # 1 GPU dispatch → gpu_active=op_time=1us, window=[0,1], gpu_idle=0 (LOW)
-    # PIM 미 dispatch → pim_active=0, pim_idle=1.0 (HIGH)
-    dag.add_micro_batch(0)
-    node = dag.get_node(0, NodeType.QKV)
-    node.transition_to(NodeState.READY)
-    d.dispatch_gpu(node)
-    # GPU busy (idle low) → prefill 방향 게이트 닫힘 → prefill chunk 변경 0.
-    # (PIM idle 시 decode 조절은 _try_join 이 전담 — balance_intra_A 무관, test_prefill_join 참조)
-    new_chunk = admission.balance_intra_A(prefill_chunk_tokens=100)
-    assert new_chunk == 100         # prefill 변경 0 (GPU 가 busy 상태)
+# test_balance_intra_A_activates_via_dispatch_chain 삭제(S1) — admission.balance_intra_A
+# (유일 유휴율 레버)가 S1 에서 제거됨. 검증 대상 메서드 부재 → 테스트 폐기.
 
 
 # ---- Determinism ----

@@ -153,31 +153,9 @@ def test_dispatch_trace_t3_qkv_n_back_fill():
     assert gpu_new[0].micro_batch_id == 2  # N back-fill
 
 
-def test_dispatch_trace_t4_o_proj_m_and_pim_decode_n():
-    """T4: QKV(N) 완료 → O_PROJ(M) GPU + DECODE_ATTN(N) PIM."""
-    core, evaluator = _make_trace_fixture_with_evaluator()
-    for _ in range(4):  # T1, T2, T3, intermediate (PIM completion)
-        core.step()
-    n_after_intermediate = len(evaluator.dispatch_trace())
-    core.step()  # T4
-    new_events = evaluator.dispatch_trace()[n_after_intermediate:]
-    types_resources = {(e.node_type, e.resource, e.micro_batch_id) for e in new_events}
-    assert (NodeType.O_PROJ, "GPU", 1) in types_resources
-    assert (NodeType.DECODE_ATTN, "PIM", 2) in types_resources
-
-
-def test_dispatch_trace_t5_prefill_n():
-    """T5: O_PROJ(M) 완료 → PREFILL_ATTN(N) GPU dispatch."""
-    core, evaluator = _make_trace_fixture_with_evaluator()
-    for _ in range(5):  # T1, T2, T3, intermediate, T4
-        core.step()
-    n_after_t4 = len(evaluator.dispatch_trace())
-    core.step()  # T5
-    new_events = evaluator.dispatch_trace()[n_after_t4:]
-    gpu_new = [e for e in new_events if e.resource == "GPU"]
-    assert len(gpu_new) == 1
-    assert gpu_new[0].node_type is NodeType.PREFILL_ATTN
-    assert gpu_new[0].micro_batch_id == 2
+# test_dispatch_trace_t4/t5 삭제 — 옛 4노드 §6.5 시퀀스의 O_PROJ-이후 단계(O_PROJ 가 layer
+# advance). S0 가 O_PROJ→FFN 으로 advance 이동 + INSTANCE_B 추가 → t4 부터 divergence.
+# FFN/F3 dispatch 동역학은 test_phase2_ffn_stage 가 대체. (t1~t3 은 divergence 전이라 유효·유지.)
 
 
 def test_dispatch_trace_timestamps_monotonic():
@@ -221,14 +199,6 @@ def test_dispatch_trace_bit_exact_replay():
     assert ev1.dispatch_trace() == ev2.dispatch_trace()
 
 
-def test_dispatch_trace_full_sequence_length():
-    """Full §6.5 run 의 dispatch 총 횟수 — Init pre-state 외에 T1~T5 + 후속 모든 노드 완료."""
-    core, evaluator = _make_trace_fixture_with_evaluator()
-    core.run_until_empty()
-    events = evaluator.dispatch_trace()
-    # 3 mb × 4 node = 12. 단 pre-Init manual mutation (hook 미연결):
-    # P: QKV/PREFILL_ATTN/DECODE_ATTN 모두 pre-Init. O_PROJ 만 hook 영역.
-    # M: QKV pre-Init (back-fill DONE). PREFILL/DECODE/O_PROJ 가 hook 영역.
-    # N: 모두 hook 영역.
-    # 합: P 1 + M 3 + N 4 = 8 dispatch events.
-    assert len(events) == 8
+# test_dispatch_trace_full_sequence_length 삭제 — dispatch 총 횟수를 옛 4노드(3mb×4) 기준
+# 8 로 고정. S0 의 FFN 노드(5번째)로 횟수 변동 → obsolete. 종료/총노드 완료 검증은
+# test_dispatch_trace_terminates_with_all_done + test_phase2_ffn_stage 가 대체.

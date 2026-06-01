@@ -114,36 +114,9 @@ def test_dispatch_trace_init_state():
     assert core.dispatcher.pim_busy is True
 
 
-def test_dispatch_trace_t1_through_t5_sequence():
-    core = _make_trace_fixture()
-
-    # T1: PIM(P) completion -> O-proj(P) [GPU] + decode-attn(M) [PIM] dispatched
-    assert core.step() is True
-    assert _running(core) == {(0, NodeType.O_PROJ), (1, NodeType.DECODE_ATTN)}
-    assert core.dispatcher.gpu_busy is True
-    assert core.dispatcher.pim_busy is True
-
-    # T2: O-proj(P) completion -> prefill-attn(M) [GPU] dispatched; M decode still on PIM
-    assert core.step() is True
-    assert _running(core) == {(1, NodeType.PREFILL_ATTN), (1, NodeType.DECODE_ATTN)}
-
-    # T3: prefill-attn(M) completion -> QKV(N) [GPU back-fill]; M decode still on PIM
-    #   (O-proj(M) not ready because decode-attn(M) still RUNNING)
-    assert core.step() is True
-    assert _running(core) == {(2, NodeType.QKV), (1, NodeType.DECODE_ATTN)}
-
-    # Intermediate: decode-attn(M) completion (PIM) -> no new dispatch (GPU busy on N QKV)
-    assert core.step() is True
-    assert _running(core) == {(2, NodeType.QKV)}
-    assert core.dispatcher.pim_busy is False
-
-    # T4: QKV(N) completion -> O-proj(M) [GPU] + decode-attn(N) [PIM]
-    assert core.step() is True
-    assert _running(core) == {(1, NodeType.O_PROJ), (2, NodeType.DECODE_ATTN)}
-
-    # T5: O-proj(M) completion -> prefill-attn(N) [GPU]; N decode still on PIM
-    assert core.step() is True
-    assert _running(core) == {(2, NodeType.PREFILL_ATTN), (2, NodeType.DECODE_ATTN)}
+# test_dispatch_trace_t1_through_t5_sequence 삭제 — 옛 4노드 §6.5 시퀀스(O_PROJ 가 layer
+# advance 트리거) 검증. S0 가 FFN 노드 + INSTANCE_B 추가, advance 를 O_PROJ→FFN 으로 이동시켜
+# 시퀀스 obsolete. FFN/F3 dispatch 동역학은 test_phase2_ffn_stage(test_f3_overlap 등)가 대체.
 
 
 def test_dispatch_trace_terminates_with_all_done():
