@@ -84,7 +84,7 @@
 - **자체 스케줄러** — chunked-prefill + 혼합 배치 mixed batch primitive 와 호환 ([`ARCHITECTURE.md`](ARCHITECTURE.md) §6):
   - **Event-driven dispatch + dependency DAG** — invariant (data dependency + resource) 을 그래프로 코드화, ready-node 선택 문제로 환원
   - **2-μ-batch lookahead** — 다음 μ-batch 작업을 미리 시작 + idle 자원을 다른 μ-batch 의 작업으로 채움 (자연 산출)
-  - **Adaptive admission with hysteresis deadband** — GPU / PIM idle fraction 측정 기반 동적 admission, 배치 크기별 우위 안정화
+  - **풀 모델 구성 + 로컬 그리디 steering** — admission(풀 보충) ‖ decode-set steering ‖ prefill steering, 각각 고정 동작점 타깃을 독립 명중, 공정성을 위한 age-cap (전역 통계·idle-feedback 루프 없음)
 
 ## 접근 요약
 
@@ -192,7 +192,7 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (F5 포함)**.
 - **네 동작점 타깃 모두 명중** — steering 이 풀에서 decode-set(123 / 12.3M)과 prefill(256 / 25.6M)을 *독립적으로* 구성. 길이분산 무관(짧+긴 조합으로 명중).
 - **세 자원 idle 8\~13%, spread 4.7%** — 직렬이면 idle ~67%(t_A + t_B 합)인데 그 1/14 로 떨어짐. **F2(projection ‖ PIM double-buffering)·F3(inter-instance pipeline) 발현의 정량 증거.** ±10% 진단 밴드 안 = 균형.
 - **튜닝 없이 자연 발현** — 현실적 대량-풀 워크로드를 고정하니 idle≈0 이 *저절로* 나옴. 실서버 정상상태(기존 디코더 대량 상주 + 지속 prefill)가 정확히 이 조건.
-- **GPU-A 가 병목(idle 8%)** — 합성 prefill 분포가 sweet spot 보다 살짝 깊어 depth-work 27.1M(목표 25.6M 초과) → prefill-attn 이 약간 무거움. 밴드 내 미세 불균형(워크로드 깊이 의존, 알고리즘 아님).
+- **측정 idle 은 알고리즘 floor (증명됨).** 디스패치된 μ-batch 에 정확한 op-time 함수를 호출해 얻은 이론 perfect-overlap floor 의 **spread(4.65%)가 측정 spread(4.62%)와 일치**; 절대 idle 은 그 floor + *균일* 8% overlap gap(pipeline fill/drain + 2-active staggering)이라 **미설명 잔여손실 0**. GPU-A 가 병목인 건 prefill depth-work 오버슈트(27.1M vs 25.6M) 때문 — 그리고 그 오버슈트는 **age-cap 공정성 비용**: 순수 steering(age-cap 끔)이면 depth-work 가 타깃에 명중하고 spread 가 0.1% 로 붕괴(단 starvation 대가). 상세 도출 — [`ARCHITECTURE.md`](ARCHITECTURE.md) §6.8, 전체 기록 — [`implementation/debug_phase2/REPORT.md`](implementation/debug_phase2/REPORT.md).
 - **throughput 지속성은 별개 축** — decode 길이가 매우 길어(상주 풀 큼) 측정창 내 완료 0 → TTFT/TBT 는 본 측정서 미산출(별도). 본 검증 대상은 per-cycle 균형(idle). 드레인·완료·KV 누수 0 은 합성 acceptance(전부 완료·KV remaining=initial·정상 종료)로 별도 검증.
 
 ### Honest Disclosure

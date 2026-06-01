@@ -29,10 +29,11 @@
   - [6.1 μ-batch 구성](#61-μ-batch-구성)
   - [6.2 Invariants](#62-invariants)
   - [6.3 Dispatch Policy: Event-driven + Dependency DAG](#63-dispatch-policy-event-driven--dependency-dag)
-  - [6.4 Adaptive Admission](#64-adaptive-admission)
+  - [6.4 Admission: 동작점 (풀 모델)](#64-admission-동작점-풀-모델)
   - [6.5 Example Dispatch Trace](#65-example-dispatch-trace)
   - [6.6 Bound 분석](#66-bound-분석)
   - [6.7 구현 요건](#67-구현-요건)
+  - [6.8 Idle Floor: 이론 vs 측정](#68-idle-floor-이론-vs-측정)
 - [7. Orthogonality to Complementary Techniques](#7-orthogonality-to-complementary-techniques)
   - [7.1 Paged KV Memory Management](#71-paged-kv-memory-management)
   - [7.2 Speculative Attention](#72-speculative-attention)
@@ -249,9 +250,9 @@ Instance A 의 SP-PIM aggregate 채널 수는 k_total = 2048 으로 고정. PIM 
 PIM 이 attention 단계에서 KV 길이 의존성을 흡수하므로, Instance A → Instance B inter-instance 핸드오프 텐서 (§3.4) 가 항상 고정 형상이 된다.
 
 - Decode batch: B × hidden
-- Uniform-chunk prefill batch: (B · chunk) × hidden
+- Prefill batch: (prefill 총 토큰수) × hidden
 
-Instance B 의 GPU 는 ragged batching 처리 없이 균일한 FFN GEMM 만 수행하므로 배치 내 straggler bubble 이 제거된다. (Instance A 의 GPU 는 prefill chunk attention 의 길이 의존성을 여전히 다루므로 본 효과의 직접 수혜 영역 아님.)
+Instance B 의 FFN GEMM 은 배치의 *총 토큰수* 만 의존하지 요청별로 토큰을 어떻게 쪼갰는지는 보지 않는다 — 따라서 요청별 prefill chunk 는 ragged 여도 무방하다(풀 모델 prefill steering 이 256 토큰을 불균등 분배해 depth-합을 맞춤, §6.4). 고정-형상 이득의 본질은 *attention* 단계의 KV 길이 분산을 PIM 이 이미 흡수해 Instance B 가 받는 형상이 토큰수에만 의존한다는 것 — 요청별 KV 길이 분산에서 오는 straggler bubble 이 제거된다. (Instance A 의 GPU 는 prefill chunk attention 의 길이 의존성을 여전히 다루므로 본 효과의 직접 수혜 영역 아님.)
 
 ### 5.3 Compute-bound 구간 중 PIM 연산 Overlap
 
@@ -389,47 +390,54 @@ on event(kernel K of μ-batch X completes):
 
 **Look-ahead / back fill 의 자연 산출.** I2 가 "QKV 완료 후 *언제든*" 으로 느슨하므로, PIM 이 idle 인 시점에 *GPU 가 어떤 μ-batch 를 작업 중이든 무관하게* 다른 μ-batch 의 decode-attn 을 시작 가능. 별도 정책 명시 없이 dispatch greedy 의 자동 산출.
 
-### 6.4 Adaptive Admission
+### 6.4 Admission: 동작점 (풀 모델)
 
-Per-μ-batch 구성 결정을 *iteration 단위로* 스케줄러가 동적으로 조정. 이전 iteration 의 GPU/PIM idle fraction 을 측정해 다음 μ-batch admission 을 조절한다. Chunked prefill 정책 위에 chunk size · decode batch 동적 조정 형태로 hook (§5.5).
+스케줄러는 매 μ-batch 를 구성해 세 자원(PIM = decode-attn, GPU-A = projection + prefill-attn, FFN = Instance B)의 시간을 맞춰 inter-instance · intra-instance idle 을 최소화한다. 구성은 **세 관심사의 분리**이며, 각각 자기 in-flight 풀에서 독립적으로 steering 된다 — idle fraction feedback 으로 한 cohort 를 조절하는 게 *아니다.* (이전 초안은 측정 GPU/PIM idle fraction + hysteresis deadband 로 iteration 마다 admission 을 조정했으나 그 feedback 모델은 폐기 — 맺음말 참조. 이제 스케줄러는 측정 idle 에 반응하지 않고 *고정 타깃*에 steering 으로 명중한다.)
 
-**Decision Rule.** Admission control 의 본질적 frame:
+1. **Admission = 풀 보충만.** `request_queue → in-flight (PREFILL)`, aggregate KV budget(`can_admit`) 게이트만. decode/prefill 타깃은 보지 않는다. `prompt_len = 0`(decode-only)이거나 prefill 이 이미 끝난 요청은 즉시 DECODE 전이.
+2. **decode-set steering.** in-flight **DECODE 풀**에서 두 타깃을 동시 명중 — **개수 123 ∧ Σkv 12.3M** — 하도록 로컬 그리디 steering + age-cap 으로 선택. 순수 *선택*(KV admit · 큐 조작 없음; KV 는 풀 진입 시 예약). 미선택은 age(`wait++`), 선택은 리셋(`wait = 0`).
+3. **prefill steering.** in-flight **PREFILL 풀**에서 **256 토큰**(고정 FFN-batch knob, 아래 ①)을 멤버들에 분배해 PREFILL_ATTN depth-합이 **25.6M** 되게, 동일한 per-token 로컬 그리디 + age-cap. 0 토큰 받은 멤버는 *풀에 잔류*(빈 chunk 로 넣지 않음 — 넣으면 μ-batch 가 부풀어 decode 고갈) — decode 와 별개 축.
+4. **per-iteration 재구성.** 매 forward pass 후 μ-batch 를 풀에서 재선택(`_recompose_mb`), 다른 활성 μ-batch 와 disjoint. in-flight window 는 활성 μ-batch 2 개 유지(`_STAGGERING_TARGET_MB = 2`; capacity 3 = 2 active + 1 전이 여유), 이는 F2/F3 overlap 의 staggering 전제(§5.6, §6.5). sticky-cohort 모델이 지운 자유도를 복원 — 구성이 풀의 drain/refill 을 따라간다.
 
-- **Layer 1 — μ-batch 구성** (chunked-prefill + mixed batching primitive 위): prefill chunk vs decode 토큰 mix 및 N 결정. **TTFT / TBT SLO 의 결정 요인은 이 layer 에 응축**.
-- **Layer 2 — DAG dispatch** (§6.3): Layer 1 결과 위에서 ready-node 자동 선택. 순차 처리이므로 admission 변수에 cancel — adaptive 자유도는 Layer 1 에 집중.
+> **이것은 실 continuous-batching 패러다임 그 자체이지 그 근사가 아니다.** 실서버는 생애 단계가 섞인 상주 인구를 유지한다 — 디코딩 중(긴 생성 진행), prefill 중(새 프롬프트), prefill 막 끝나 decode 로 전이한 요청 — 그리고 매 iteration batch 를 재구성한다(vLLM / Sarathi-Serve iteration-level scheduling). 풀 모델이 *바로 그 구조*다: PREFILL/DECODE 상태의 in-flight 풀, 풀 상주 KV, PREFILL→DECODE 전이, admission 보충, mixed batching 하의 per-iteration 재구성. 고정 cohort 를 얼려 함께 완료시킨 이전 sticky-cohort 모델이야말로 *비정합* 이었다 — 실서버는 batch 를 얼리지 않는다. 따라서 스케줄링 *메커니즘*은 구조적으로 정합이며, 합성으로 남는 건 *워크로드 공급*(warm-start seed + 풍부-풀 가정, README 에 정직 disclosure)뿐 — 메커니즘이 아니다. 그래서 §6.8 에서 증명하는 idle floor 는 장난감이 아니라 *실 스케줄링 구조의 floor* 다.
 
-Adaptive admission 의 1차 objective = inter-instance pipeline cycle `max(A_cycle, B_cycle)` 의 두 instance 균형 (둘 다 fully utilized). 2차 objective = Instance A 내부 GPU·PIM double-buffering (§5.6) 의 균형. Hysteresis deadband 로 GPU jitter · workload variance oscillation 억제 (Deadband Policy 절 참조).
+**동작점 (인과사슬 ① → ⑤).** prefill 토큰 수가 FFN batch 를 고정하고, 그것이 decode 개수를, 그것이 균형 ctx 와 함께 decode-KV 합을 고정한다:
 
-| Layer | 측정 | 진단 | Admission 조정 |
+| 순서 | 고정값 | 값 (prefill 256) | 조건 자원 |
 |---|---|---|---|
-| Inter-AB (1차) | `A_cycle > B_cycle` (B idle) | A-bound (long-ctx) | admission ↓ 효과 제한적 (`A_cycle` 의 PIM attention 부분이 KV 길이 의존) — B idle 자연 수용 |
-| Inter-AB (1차) | `A_cycle < B_cycle` (A idle) | B-bound (short-ctx + low batch) | prefill chunk admit → `A_cycle` 증가, 균형 회복 |
-| Intra-A (2차) | GPU idle > `θ_high`, PIM busy | Instance A 내부 PIM 우세 | prefill chunk admit → GPU 윈도우 채움 (idle GPU 를 PREFILL_ATTN 으로 활용, PIM decode-attn 과 동시) |
-| Intra-A (2차) | PIM idle > `θ_high`, GPU busy | Instance A 내부 GPU 우세 | decode 추가 admit → PIM 윈도우 채움 (idle PIM 을 decode-attn 으로 활용, GPU projection 과 동시) |
-| — | 양 layer 모두 `θ_low` 이하 | balanced | 현재 admission 유지 |
-| — | 양 layer 모두 idle | underloaded | μ-batch 크기 확대 또는 wait 토큰 가속 |
+| ① | prefill 토큰/배치 | **256** (2의 거듭제곱·커널 친화) | GPU-A (PREFILL_ATTN = Σ chunk×depth) |
+| ② | 균형 시간 X | **~51 µs** (TBT ≈ X·L ≈ 4.1 ms) | — |
+| ③ | FFN batch | **379 토큰** | Instance B |
+| ④ | **decode 개수 N_dec (제어 타깃)** | **123** (= 379 − 256) | Instance B |
+| ⑤ | **decode-KV 합 (제어 타깃)** | **12.3M** | Instance A (PIM) |
+| + | prefill KV-work (제어 타깃) | **25.6M** (= 256 × depth) | GPU-A |
+| + | 균형 ctx | **~100K** (하드웨어 상수) | — |
 
-**Deadband Policy: Ctx-tiered Static Lookup.**
+*개수*(123)는 KV 길이와 무관(FFN 은 토큰 개수만), *KV 합*(12.3M)은 길이의 총합(PIM 은 합만). 둘 다 만족 ⟺ 평균 ctx ≈ 100K.
 
-- **Width 산식** — Deadband width = `2σ_total` (control theory 표준, hysteresis 안정 조건).
-- **`σ_total` 분해** — GPU jitter (L2 hit rate / warp scheduler / HBM controller queuing / kernel launch) 와 workload variance (KV 길이 분산 / arrival jitter) 의 RSS 합.
-- **Ctx-tiered 채택 근거** — Long-ctx 일수록 cycle 길어 `σ` 누적이 커지고 KV variance 영향이 압도적 → ctx 별 정적 lookup.
+**로컬 그리디 steering + age-cap (`former` 알고리즘).** 제어 타깃은 쌍 *(개수 123, Σkv 12.3M)* — 단일 평균이 아니다. 순수 FIFO 는 Σkv 만 잡고 off-average 풀에서 개수를 놓친다(측정 spread 22–30%). 그래서 매 step *다음에 필요한 길이* 를 계산해 가장 가까운 디코더를 admit(steering); `≥ AGE_CAP` 기다린 요청은 강제 포함(age-cap — 공정성 / FIFO 의도). 전역 통계 · 미래 예측 없이 순수 로컬:
 
-| ctx | σ_total 추정 (정성) | deadband width |
-|---|---|---|
-| Short-ctx (2k–8k) | 낮음 (GPU jitter 지배) | 좁음 |
-| Mid-ctx (~32k) | 중간 | 중간 |
-| Long-ctx (128k–1M) | 높음 (KV variance 지배) | 넓음 (clamp 0% 영역 진입) |
+```
+한 μ-batch (decode):                  # AGE_CAP = 2
+  n=0, S=0
+  while n < target_count(123) and S < target_kv(12.3M) and pool:
+    if wait ≥ AGE_CAP 인 요청 있음: 가장 오래된 것 admit              # 공정성(강제)
+    else: ideal=(target_kv−S)/(target_count−n) 에 가장 가까운 디코더 admit   # steering
+  나머지 대기: wait += 1
+  → (123, 12.3M) 수렴; n 단조 증가 → ≤123 step.
+prefill: 256 토큰을 depth-합 25.6M 되게 동일 steering + age-cap 분배.
+window = 3 (2 active F2/F3 overlap + 1 전이 여유).
+```
 
-`σ_total` 정량화 및 deadband sweep, online adaptive variant (per-iteration `σ` estimator 로 width 자동 갱신) 모두 본 연구 범위 밖 future work — self-authored scheduler framework 에 실 hardware jitter 모델 부재로 σ 측정 자체가 정의되지 않음. 본 평가는 GPU·PIM cycle 이 균형 영역 (balanced regime) 에서 dispatch policy 의 정성적 거동만 측정.
+- **★ 길이분산 무관 (핵심 성질).** 거대 변종 풀(실 트래픽)에서 짧은 거 + 긴 거를 *조합* 해 두 타깃 명중. 헤비 / 혼합 / bimodal — 어떤 분포든 동작, 평균을 안 보고 두 타깃만 맞추므로. age-cap 강제된 off-size 요청도 steering 이 보정(긴 거 강제 → `ideal`↓ → 다음에 짧은 거 다수)해 배치는 여전히 (123, 12.3M). 먼저 온 요청은 ≤ AGE_CAP+1 batch 안에 처리.
+- **운영 파라미터 = target_count + target_kv + AGE_CAP.** ±10% 밴드 [11.1M, 13.5M] 는 **제어값이 아니라** 진단용 idle-SLA 라벨(밴드 폭 ≈ 허용 최악 idle: ±10% → edge idle ~8.6–10.6%). steering 이 타깃 명중하므로 실현 idle ≈ 0; `former` 는 밴드로 멈추지 않는다.
+- **AGE_CAP 트레이드오프 (sweep).** cap↑ → steering 자유도↑ → spread↓, 단 대기(레이턴시)↑. cap↓ → FIFO化 → 공정 / 저지연이나 spread↑. `cap1: sp 3.1%` · `**cap2: sp 1.2%, 대기≤3**` · `cap5: sp 0.7%, 대기5` · `cap∞: sp 0.8% but starvation(대기37)`. → **AGE_CAP = 2 채택**(spread / 공정 / 지연 sweet spot). 이 선택의 공정성 비용은 §6.8 에서 정량화.
 
-**Admission Lower Bound: MFU Floor.** `N ≥ N_sat` (FFN GEMM saturating knee) — 이 이하론 GEMM MFU sub-saturating, kernel launch overhead 지배. Upper bound 는 TPOT SLO model 영역 (future work). Ctx 별 binding:
+**ctx 100K = 하드웨어 상수, 경험적 추측 아님.** 삼중 균형을 풀면 op-time 계수 비로 `ctx_balance = (K2+1)/K1`(PIM tile rate ÷ FFN flops/tok ÷ prefill-attn flops/tok·depth ÷ proj flops/tok); *prefill 이 약분돼 사라짐* → 균형 ctx 가 **모든** prefill 에서 100K(§5 스윕 B 실증). 역할은 타깃 *도출*(Σkv 12.3M = 123 × 100K)이지 워크로드에 평균을 *강제* 하는 게 아니다. 이것이 길이분산 무관성의 근거 — 개별 요청 길이가 어떻게 분산되든 도출된 두 타깃만 맞춘다.
 
-| ctx 영역 | Binding |
-|---|---|
-| 2k–256k | B-bound (FFN GEMM saturating knee) |
-| 256k–512k | Transition |
-| ≥ 512k | A-bound (A_cycle 안에 B latency hidden) |
+**prefill 256 vs 512.** prefill 은 균형 ctx 가 아니라 *스케일 knob* X. 256 은 TBT(51 vs 101 µs)와 HBM(~30M → 5 TB vs 60M → 10 TB)을 반으로 줄이며 TTFT / throughput 손해 0(X 가 prefill 에 선형이라 청크 2× · cycle ½ 상쇄). 유일 risk = FFN GEMM MFU 포화 — batch 379 가 텐서코어를 채우나; wave-quant 추정상 batch ~128 포화(379 충분), 단 모델은 MFU = 0.6 고정이라 knee 미관측(silicon 부재). **512 는 FFN 포화 불가 판명 시 대안**(batch 759, vLLM 수렴).
+
+> **맺음말 (superseded).** 이전 초안의 idle-fraction-feedback + hysteresis-deadband admission 은 이 풀 모델로 대체됐다. deadband width 는 `2σ_total` 이었으나 σ 는 hardware jitter 모델 없는 self-authored framework 에서 측정 불가(§8 / OI4)라 feedback variant 는 애초에 작동 메커니즘이 아니었다. 풀 모델은 steering 으로 고정 타깃에 직접 명중; ±10% 밴드는 제어 입력이 아니라 진단용 idle-SLA 라벨로만 남는다.
 
 ### 6.5 Example Dispatch Trace
 
@@ -458,7 +466,7 @@ PULS 스케줄러의 balanced steady state 에서 3 μ-batch in-flight window �
 
 ### 6.6 Bound 분석
 
-정성적 추정. 스케줄러는 §6.4 idle fraction 으로 bound 를 runtime 인식하므로 본 표는 control input 이 아니다. Sim 측정 후 component 시간 · transition ctx 만 갱신.
+*물리적* bound 의 정성적 추정 — 주어진 ctx 에서 어느 자원이 cycle 을 제한하는가. 본 표는 서술적이지 control input 이 아니다: §6.4 풀 모델은 측정 bound 에 반응하지 않고 고정 타깃에 steering 한다. Sim 측정 후 component 시간 · transition ctx 만 갱신.
 
 **Intra-A bound** — Instance A 내부 GPU stage (projection + AR) vs PIM stage (decode attention), double-buffering (§5.6) 관점.
 
@@ -476,8 +484,75 @@ PULS 스케줄러의 balanced steady state 에서 3 μ-batch in-flight window �
 
 - Self-authored event-driven framework: event queue 1 개, dependency DAG 1 개, in-flight window 3 μ-batch 상태. Production scheduler step 과 동일 호출 주기.
 - PIM 종료 시각 predictor (FSM cycle-accurate).
-- Idle fraction telemetry (GPU·PIM 별, iteration 단위 누적).
-- Admission controller (chunk size · decode batch 동적 조정).
+- Idle fraction telemetry (GPU-A · PIM · FFN 별, measurement window 단위 누적).
+- 풀 모델 composer (decode-set steering ‖ prefill steering ‖ admission 보충, §6.4).
+
+### 6.8 Idle Floor: 이론 vs 측정
+
+풀 모델은 풍부한 long-decode 풀에서 세 자원 idle 이 GPU-A **8.0%** / PIM **12.6%** / FFN **12.6%** (spread **4.6%**)로 수렴한다. 본 절은 이 idle 이 *이 워크로드 + 이 알고리즘* 의 **floor** 임을 증명하고, 모든 구성요소를 분해해 미설명 잔여손실을 0 으로 만든다. ([`implementation/analysis/floor_proof.py`](implementation/analysis/floor_proof.py) 가 재현 — 시뮬레이터가 디스패치한 live μ-batch 에 *정확히 같은* dispatcher op-time 함수를 호출, 합성 재구성 없음.)
+
+**single-server 모델.** 각 자원은 단일 서버(dispatcher `gpu_busy` · `pim_busy` · `instance_b_busy` — 불변식 I4/I5/I6, 동시 1 op). steady state 에서 처리율은 가장 바쁜 서버의 per-μ-batch work 가 율속. μ-batch 당, layer 당:
+
+```
+t_gpuA = QKV + PREFILL_ATTN + O_PROJ          (gpu_instance_a, 직렬)
+t_pim  = DECODE_ATTN(Σkv)                       (pim_instance_a)
+t_ffn  = FFN(batch)                             (gpu_instance_b)
+완벽 overlap (F2 double-buffer · F3 pipeline) →
+  cycle        = max(t_gpuA, t_pim, t_ffn)      (병목 서버가 율속)
+  floor idle_r = 1 − t_r / cycle
+```
+
+**측정 batch 의 op-time (TP=8, µs):**
+
+```
+t_gpuA = QKV 6.01 + PREFILL_ATTN 42.08 + O_PROJ 4.80 = 52.89   ← 병목
+t_pim  = DECODE_ATTN(Σkv 12.33M)                       = 50.43
+t_ffn  = FFN(batch 378)                               = 50.45
+cycle  = 52.89 µs
+```
+
+| 자원 | 이론 floor | 측정 idle | overlap gap |
+|---|---|---|---|
+| GPU-A (QKV + PREFILL_ATTN + O_PROJ) | **0.00%** | 8.01% | 8.01% |
+| PIM (DECODE_ATTN) | 4.65% | 12.64% | 7.99% |
+| FFN (Instance B) | 4.61% | 12.61% | 7.99% |
+| **spread** | **4.65%** | 4.62% | — |
+
+**핵심 일치 두 가지.**
+
+1. **이론 floor spread 4.65% ≈ 측정 spread 4.62%.** 측정 spread 는 알고리즘 여유가 아니라 이 batch 의 본질적 3자원 불균형(t_gpuA 52.9 vs t_pim/t_ffn 50.4). 알고리즘은 floor 에 도달.
+2. **overlap gap 이 세 자원에 균일한 8.0%.** 병목(GPU-A)은 이론 floor 0 이므로 측정 8% 가 곧 overlap gap = pipeline fill/drain + 2-active staggering 전이 여유. 균일하므로 spread 를 안 키운다.
+
+즉 **측정 idle = 이론 floor + 균일 overlap gap(8%)** 으로 완전 분해. greedy dispatch 가 floor 에 도달.
+
+**floor spread 를 정하는 것 — prefill depth-work 오버슈트.** PREFILL_ATTN 이 t_gpuA 의 80%, 그리고 PREFILL_ATTN ∝ depth-work. GPU-A 가 병목인 이유는 측정 depth-work(27.1M)가 타깃 25.6M 을 +5.8% 초과해서다. counterfactual: 정확히 25.6M 이면 t_gpuA → 50.56 ≈ t_pim ≈ t_ffn, floor spread 가 4.65% → **0.26%** 로 붕괴.
+
+**오버슈트는 age-cap 공정성 비용 — 풀 고갈 아님.** prefill 토큰은 256 고정(2의 거듭제곱·커널 친화, FFN-batch knob); depth-work 만 가변. `--age-cap` ablation 이 두 가설을 가른다:
+
+| age_cap | depth-work | 이론 floor spread | 측정 spread | 비고 |
+|---|---|---|---|---|
+| **2** (기본, 공정성 ON) | 27.10M (+5.8%) | 4.65% | 4.62% | 대기 ≤ age_cap+1, starvation 0 |
+| **∞** (순수 steering) | 25.73M (+0.5%) | 0.40% | **0.11%** | 가장 깊은 요청 starvation(대기 37) |
+
+공정성을 끄면(`age_cap = ∞`) 순수 steering 이 depth-work 25.73M(타깃 명중)에 맞춘다. **얕은 재료는 풀에 있었다**(진단: 이상 깊이 100K 보다 얕은 후보 ~1.3, 풀 최소깊이 57K). `age_cap = 2` 의 오버슈트는 오래 기다린 *깊은* prefill 요청을 강제 포함한 결과 — 토큰 개수가 256 으로 잠겨 있어 그 깊은 토큰이 steering 의 얕은 선택을 밀어내 depth-합을 올린다.
+
+```
+age_cap=2 → 깊은 long-wait prefill 강제(개수 256 고정) → depth-work +5.8%
+          → PREFILL_ATTN ↑ (t_gpuA 의 80%) → GPU-A 병목 → floor spread 4.65%
+age_cap=∞ → 강제 없음 → steering 25.73M 명중 → spread 0.11%  (단 starvation)
+```
+
+**결론 — floor 도달, 완전 분해.**
+
+```
+측정 spread 4.62% = 이론 floor spread 4.65%
+                  = 공정성 비용 (age_cap=2 prefill 오버슈트)        ~4.4%
+                  + 워크로드 본질 불균형 (age_cap=∞ 잔여)             0.26%
+측정 idle (절대)  = 이론 floor + 균일 overlap gap 8.0% (fill/drain · staggering)
+미설명 잔여손실    = 0
+```
+
+측정 idle 은 이 워크로드의 알고리즘 floor 이며, floor 자체는 (공정성 비용 + overlap gap)으로 분해된다. 더 낮은 idle 은 *오직* 공정성을 포기(`age_cap ↑`)하고 starvation 을 받아들일 때만 도달 가능 — 즉 "더 낮출 수 없음"은 "더 낮추려면 공정성 보장을 포기해야 함"을 뜻한다. 전체 기록: [`implementation/debug_phase2/REPORT.md`](implementation/debug_phase2/REPORT.md).
 
 ## 7. Orthogonality to Complementary Techniques
 
