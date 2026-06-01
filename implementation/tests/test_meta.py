@@ -61,15 +61,11 @@ _EXPECTED_ADMISSION_FIELDS = {
     "ctx_tier_short_max",
     "ctx_tier_mid_max",
     "deadband_width",
-    "idle_theta_low",
-    "idle_theta_high",
     "request_queue_capacity",
     # Impl-9 — ADMISSION_TICK self-rescheduling cadence (Q1)
     "tick_interval_us",
     # Impl-10-pre-2 (O9.1) — Hybrid Chunk Size Policy base
     "prefill_chunk_default",
-    # Impl-10-pre-2 (B option) — PIM-GPU TSV BW contention margin (ARCH §3.5.3)
-    "pim_slack_safety_margin",
     # Phase-2 §0.8 — 동작점 decode KV 합 목표 (steering 타깃 2)
     "kv_operating_target_tokens",
     # Phase-2 former-v2 (OPERATING_POINT §3) — steering 타깃 1(decode 개수) + prefill
@@ -271,13 +267,6 @@ def test_meta_request_has_prefill_processed_field():
     fields = Request.__dataclass_fields__
     assert "prefill_processed" in fields
     assert fields["prefill_processed"].type is int
-
-
-def test_meta_time_config_has_gpu_op_time_per_token_us():
-    """Impl-10-pre-2 (O9.1) — TimeConfig.gpu_op_time_per_token_us 신설 + float."""
-    fields = TimeConfig.__dataclass_fields__
-    assert "gpu_op_time_per_token_us" in fields
-    assert fields["gpu_op_time_per_token_us"].type is float
 
 
 def test_meta_trace_entry_fields():

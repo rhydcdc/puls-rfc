@@ -45,9 +45,6 @@ class TimeConfig:
     gpu_op_time_us: Mapping[str, float] = field(default_factory=lambda: {
         "decode_attn_fallback": 4.0,    # F1 ablation reference (Impl-11)
     })
-    # 폐기 — admission `gpu_op_time_per_token_us` 영역 = last mb 위 PREFILL_ATTN spec-derived
-    # 위 산출 (compute_gpu_op_time_s / chunk_total). config placeholder 폐기, main_loop 위 산출.
-    gpu_op_time_per_token_us: float = 0.0        # deprecated — main_loop 위 spec-derived 산출
 
 
 @dataclass(frozen=True)
@@ -63,12 +60,9 @@ class AdmissionConfig:
     ctx_tier_short_max: int
     ctx_tier_mid_max: int
     deadband_width: Mapping[str, float]
-    idle_theta_low: float
-    idle_theta_high: float
     request_queue_capacity: int
     tick_interval_us: float = 10.0
     prefill_chunk_default: int = 256
-    pim_slack_safety_margin: float = 0.9
     # Phase-2 former-v2 (OPERATING_POINT §1·§3, prefill 256 기본) — 동작점은 *두 타깃*으로
     # 정의되고 former 가 steering 으로 둘에 동시 수렴한다(개수+KV-work 동시 명중, 쪼개기 불가).
     #   decode: 개수 123 (decode_count_target) AND Σkv 12.3M (kv_operating_target_tokens)
@@ -322,8 +316,6 @@ def default_dummy_config() -> Config:
             ctx_tier_short_max=8_000,
             ctx_tier_mid_max=32_000,
             deadband_width={"short": 1.0, "mid": 2.0, "long": 3.0},
-            idle_theta_low=0.05,           # Phase-1 STEP 5 — 합류 게이트 hysteresis 하한 rail
-            idle_theta_high=0.3,
             request_queue_capacity=1024,
         ),
         ablation=AblationConfig(),

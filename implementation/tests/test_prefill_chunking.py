@@ -44,7 +44,7 @@ def test_request_prefill_processed_advances_monotonic():
 def test_dispatcher_prefill_attn_chunk_scaled(
     dummy_config, clock, event_queue, dag, pim_executor,
 ):
-    """PREFILL_ATTN op_time = chunk_tokens × gpu_op_time_per_token_us (Impl-10-pre-2 (O9.1))."""
+    """PREFILL_ATTN op_time = spec-derived FlashAttention flops / peak (compute_gpu_op_time_s)."""
     from puls_sched.dispatcher import Dispatcher
     from puls_sched.node import NodeType, NodeState
     d = Dispatcher(
