@@ -7,23 +7,26 @@
 
 ---
 
-## 1. 측정 동작점 (sweep_D_longdec — 대량-상주 decode 풀)
+## 1. 측정 동작점 — 두 비편향 스냅샷 (spread 는 prefill 풀 풍부도에 좌우)
 
-`measure_steady.py --trace data/sweep_D_longdec.csv --seed-pool 2000` (수렴 정지):
+`floor_proof.py --trace data/sweep_D_longdec.csv --seed-pool 2000 [--seed S]` (수렴 정지). 같은
+워크로드의 두 warm-start 스냅샷 — decode 축(Σkv 12.3M)은 둘 다 명중, **spread 차이는 prefill 풀
+풍부도**:
 
-| 항목 | 측정 | 타깃 (OPERATING_POINT §1) |
-|---|---|---|
-| decode 개수 | 122 | 123 |
-| Σ decode KV | 12.33M | 12.3M |
-| prefill 토큰 | 256 | 256 |
-| prefill depth-work | 27.10M | 25.6M |
-| idle GPU-A | **8.01%** | — |
-| idle PIM | 12.64% | — |
-| idle FFN | 12.61% | — |
-| **spread** (max−min) | **4.62%** | ~0 (명중 시) |
+| 항목 | (A) 두 풀 풍부 (seed 2024) | (B) prefill 얇음 (기본 seed 42) | 타깃 |
+|---|---|---|---|
+| decode 개수 | 119 | 122 | 123 |
+| Σ decode KV | 12.32M | 12.33M | 12.3M |
+| prefill 토큰 | 256 | 256 | 256 |
+| prefill depth-work | **25.60M (정확)** | 27.10M (+5.8%) | 25.6M |
+| prefill 풀 크기 | 5.0 | 3.3 | — |
+| idle GPU-A / PIM / FFN | 10.5 / 10.9 / 11.2% | 8.0 / 12.6 / 12.6% | — |
+| **spread** (max−min) | **0.74%** | 4.62% | ~0 (명중 시) |
 
-직렬 실행(overlap 없음) 시 자원 idle ~67% 대비 1/14 — F2(double-buffering)·F3(inter-instance
-pipeline) 발현. 배치 구성은 타깃 4개에 명중(decode 개수·Σkv·prefill 토큰; depth-work 만 +5.8%).
+직렬 실행(overlap 없음) 시 자원 idle ~67% 대비 1/14~1/90 — F2(double-buffering)·F3(inter-instance
+pipeline) 발현. **(A) 가 깨끗한 동작점**: prefill 풀이 풍부해 네 타깃 정확 명중 → spread 0.74%.
+**(B)** 는 prefill 풀이 얇아(KV 예산을 상주 decode 가 점유) depth 오버슈트 → spread 4.6%(§4 age-cap).
+아래 §2–5 의 상세 floor 분해는 **(B)** 를 worked example 로 전개(오버슈트가 크게 보여 분석에 유리).
 
 ## 2. 이론 floor 산출 — 측정 batch 에 op-time 함수 직접 호출
 
@@ -105,6 +108,13 @@ idle trade-off, OPERATING_POINT §3 sweep). 끄면 idle 0.11% 까지 내려가�
 ⇒ **이 워크로드에서 측정 idle 은 알고리즘 floor 이며, floor 자체는 (공정성 비용 + overlap gap)
 으로 완전 분해**된다. 알고리즘이 더 짜낼 수 있는 여지는 공정성을 포기(age_cap↑)할 때만 존재 —
 즉 "더 낮출 수 없음"이 아니라 "더 낮추려면 starvation 을 받아들여야 함".
+
+> **case (A) 두 풀 풍부(§1)** 에선 prefill 풀이 충분해 age_cap=2 에서도 depth 25.6M 정확 명중 →
+> spread **0.74%**(공정성 비용도 거의 0). 즉 §3–4 의 4.6% 공정성 비용은 *prefill 풀 얇음이
+> 게이트*하는 값이고, 풀이 풍부하면 사라진다. 두 측정의 robustness 종합 = ARCH §6.8.
+>
+> **PIM 숨음(시간 + 대역폭)** 은 ARCH §6.8(t_pim≤t_gpuA) + §5.3(대역폭 4 근거: 헤드룸·in-place·
+> 내부 1.35×·채널 동시성, TSV-saturation 폐쇄는 silicon-deferred) 참조.
 
 ---
 
