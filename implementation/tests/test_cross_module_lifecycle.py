@@ -187,6 +187,7 @@ def test_50_req_lifecycle_deterministic_seed():
     assert a == b
 
 
+@pytest.mark.skip(reason="real-trace cold-start sim 미사용 — sweep_* + warm-start 로 대체(STEP8)")
 def test_real_longbench_3_40_first_100_req_lifecycle():
     """실 trace first 100 req 위 admission → dispatch → completion → KV release (kv_capacity 충분)"""
     core = _make_scheduler_core(kv_capacity=100_000_000)  # 100M slot
@@ -303,6 +304,7 @@ def test_real_trace_admission_capacity_bumped_admits():
     assert core.kv_accountant.remaining < 10_000_000
 
 
+@pytest.mark.skip(reason="real-trace cold-start sim 미사용 — sweep_* + warm-start 로 대체(STEP8)")
 def test_real_trace_capacity_bumped_500_req_no_leak():
     """R3 — capacity bumped 위 실 trace 100 req 의 full lifecycle → no leak (500 은 무거움 → 100)"""
     core = _make_scheduler_core(kv_capacity=100_000_000)

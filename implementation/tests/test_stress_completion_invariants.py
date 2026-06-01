@@ -244,6 +244,7 @@ def test_stress_micro_batch_decode_tokens_unchanged_by_completion():
 # Real-trace stress (R3 보강)
 # ============================================================================
 
+@pytest.mark.skip(reason="real-trace cold-start sim 미사용 — sweep_* + warm-start 로 대체(STEP8)")
 def test_stress_full_pipeline_real_trace_first_500_reqs():
     """실 trace first 100 req 위 admission → dispatch → completion → release (500 은 무거움 → 100)"""
     core = _make_core(kv_capacity=100_000_000)

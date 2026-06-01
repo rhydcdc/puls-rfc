@@ -31,6 +31,10 @@ def _make_truncated_trace(tmp_path, n: int, decode_override: int = 1) -> str:
     return str(out)
 
 
+# 실 트레이스 cold-start 시뮬레이션은 더 이상 검증 vehicle 이 아님 — prefill 47K~2.5M 콜드스타트가
+# 수억 step → 비현실적. 검증은 생성 풀 트레이스(data/sweep_*) + warm-start seed 로 대체(STEP8,
+# README Runtime Validation). replay path(TraceReplayer) 자체는 유효(sweep 트레이스도 동일 파서).
+@pytest.mark.skip(reason="real-trace cold-start sim 미사용 — sweep_* + warm-start 로 대체(STEP8)")
 class TestE2eRealTrace:
     def test_real_trace_first_30_lifecycle(self, tmp_path):
         """30 reqs (prefill max 2.5M) 모두 lifecycle 완주.
