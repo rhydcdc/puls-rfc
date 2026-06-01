@@ -92,6 +92,7 @@ def test_meta_node_types_complete():
         NodeType.PREFILL_ATTN,
         NodeType.DECODE_ATTN,
         NodeType.O_PROJ,
+        NodeType.FFN,            # Phase-2 S0 — inter-AB(F3) Instance B FFN 스케줄 노드
     }
 
 
@@ -105,7 +106,7 @@ def test_meta_request_states_complete():
 
 
 def test_meta_dag_precedence_matches_plan():
-    """PLAN.md §6.3 의 I1·I2·I3 표와 정확 일치 (literal 비교)."""
+    """PLAN.md §6.3 의 I1·I2·I3 + Phase-2 S0 O_PROJ→FFN(inter-AB) edge 정확 일치."""
     dag = DAG()
     dag.add_micro_batch(0)
     assert dag.precedence[0] == {
@@ -113,6 +114,7 @@ def test_meta_dag_precedence_matches_plan():
         NodeType.PREFILL_ATTN: {NodeType.QKV},                              # I1
         NodeType.DECODE_ATTN: {NodeType.QKV},                               # I2
         NodeType.O_PROJ: {NodeType.PREFILL_ATTN, NodeType.DECODE_ATTN},     # I3
+        NodeType.FFN: {NodeType.O_PROJ},                                    # Phase-2 S0 — inter-AB (F3)
     }
 
 

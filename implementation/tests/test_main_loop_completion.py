@@ -12,12 +12,11 @@ from puls_sched.request import Request, RequestState
 
 
 def _admission_event():
-    """ADMISSION_TICK event with non-trivial t_proj/t_pim_fn (admission 정합)"""
+    """ADMISSION_TICK event — Phase-2 S2(§2.5): 동작점 고정으로 payload trivial(빈 dict)."""
     return Event(
         timestamp=0.0,
         type=EventType.ADMISSION_TICK,
-        payload={"t_proj": 1.0, "t_pim_fn": lambda n: 0.5,
-                 "a_cycle": 1.0, "b_cycle": 1.0, "ctx_tokens": 1000},
+        payload={},
     )
 
 
@@ -47,19 +46,23 @@ def _setup_mb_with_decode_reqs(scheduler_core, n_reqs: int = 1, max_tokens: int 
 
 
 # ============================================================================
-# Q5 — O_PROJ branching
+# Q5 — FFN branching (Phase-2 S0: layer advance 트리거 O_PROJ→FFN, inter-AB)
 # ============================================================================
 
-def test_o_proj_completion_triggers_layer_advance(scheduler_core):
+def test_ffn_completion_triggers_layer_advance(scheduler_core):
     mb_id = _setup_mb_with_decode_reqs(scheduler_core, n_reqs=1, max_tokens=100)
     mb = scheduler_core.dispatcher.micro_batches[mb_id]
     before = mb.current_layer_index
-    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.O_PROJ))
+    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.FFN))
     assert mb.current_layer_index == before + 1
 
 
-@pytest.mark.parametrize("ntype", [NodeType.QKV, NodeType.PREFILL_ATTN, NodeType.DECODE_ATTN])
-def test_non_o_proj_completion_no_layer_advance(scheduler_core, ntype):
+# 트리거 = FFN 하나뿐 → O_PROJ 포함 그 외 노드는 advance 없음 (S0 이후).
+@pytest.mark.parametrize(
+    "ntype",
+    [NodeType.QKV, NodeType.PREFILL_ATTN, NodeType.DECODE_ATTN, NodeType.O_PROJ],
+)
+def test_non_ffn_completion_no_layer_advance(scheduler_core, ntype):
     mb_id = _setup_mb_with_decode_reqs(scheduler_core, n_reqs=1, max_tokens=100)
     mb = scheduler_core.dispatcher.micro_batches[mb_id]
     before = mb.current_layer_index
@@ -70,7 +73,7 @@ def test_non_o_proj_completion_no_layer_advance(scheduler_core, ntype):
 def test_layer_advance_below_l_no_completion_check(scheduler_core, dummy_config):
     mb_id = _setup_mb_with_decode_reqs(scheduler_core, n_reqs=1, max_tokens=100)
     # advance once — current_layer_index = 1, num_layers = 80 → below L
-    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.O_PROJ))
+    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.FFN))
     req = next(iter(scheduler_core.in_flight_requests.values()))
     # decoded_count 증가 안 함 (token decode signal 미발사)
     assert req.decoded_count == 0
@@ -81,7 +84,7 @@ def test_layer_advance_at_l_triggers_completion_check(scheduler_core, dummy_conf
     mb = scheduler_core.dispatcher.micro_batches[mb_id]
     # advance L-1 times manually then trigger signal
     mb.current_layer_index = dummy_config.model.num_layers - 1
-    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.O_PROJ))
+    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.FFN))
     req = next(iter(scheduler_core.in_flight_requests.values()))
     assert req.decoded_count == 1
 
@@ -90,7 +93,7 @@ def test_token_decode_signal_increments_decoded_count(scheduler_core, dummy_conf
     mb_id = _setup_mb_with_decode_reqs(scheduler_core, n_reqs=3, max_tokens=100)
     mb = scheduler_core.dispatcher.micro_batches[mb_id]
     mb.current_layer_index = dummy_config.model.num_layers - 1
-    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.O_PROJ))
+    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.FFN))
     # 3 req 모두 +1
     for req in scheduler_core.in_flight_requests.values():
         assert req.decoded_count == 1
@@ -100,7 +103,7 @@ def test_token_decode_signal_finalizes_completed_req(scheduler_core, dummy_confi
     mb_id = _setup_mb_with_decode_reqs(scheduler_core, n_reqs=1, max_tokens=1)
     mb = scheduler_core.dispatcher.micro_batches[mb_id]
     mb.current_layer_index = dummy_config.model.num_layers - 1
-    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.O_PROJ))
+    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.FFN))
     # max_tokens=1 → 1 step 후 finalize
     assert len(scheduler_core.in_flight_requests) == 0
 
@@ -112,7 +115,7 @@ def test_token_decode_signal_kv_released_on_completion(scheduler_core, dummy_con
     assert kv_accountant.remaining == initial - 100
     mb = scheduler_core.dispatcher.micro_batches[mb_id]
     mb.current_layer_index = dummy_config.model.num_layers - 1
-    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.O_PROJ))
+    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.FFN))
     # finalize → KV release
     assert kv_accountant.remaining == initial
 
@@ -121,7 +124,7 @@ def test_token_decode_signal_does_not_finalize_alive_req(scheduler_core, dummy_c
     mb_id = _setup_mb_with_decode_reqs(scheduler_core, n_reqs=1, max_tokens=100)
     mb = scheduler_core.dispatcher.micro_batches[mb_id]
     mb.current_layer_index = dummy_config.model.num_layers - 1
-    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.O_PROJ))
+    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.FFN))
     req = next(iter(scheduler_core.in_flight_requests.values()))
     assert req.state == RequestState.DECODE
     assert req.completion_time is None
@@ -132,7 +135,7 @@ def test_layer_index_reset_after_token_signal(scheduler_core, dummy_config):
     mb_id = _setup_mb_with_decode_reqs(scheduler_core, n_reqs=1, max_tokens=100)
     mb = scheduler_core.dispatcher.micro_batches[mb_id]
     mb.current_layer_index = dummy_config.model.num_layers - 1
-    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.O_PROJ))
+    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.FFN))
     assert mb.current_layer_index == 0
 
 
@@ -146,7 +149,7 @@ def test_multiple_decode_reqs_independent_finalize(scheduler_core, dummy_config)
     mb_id = scheduler_core._next_mb_id - 1
     mb = scheduler_core.dispatcher.micro_batches[mb_id]
     mb.current_layer_index = dummy_config.model.num_layers - 1
-    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.O_PROJ))
+    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.FFN))
     # max=1 req (id=0) → finalize, 나머지 2 alive
     assert 0 not in scheduler_core.in_flight_requests
     assert 1 in scheduler_core.in_flight_requests
@@ -156,7 +159,7 @@ def test_multiple_decode_reqs_independent_finalize(scheduler_core, dummy_config)
 def test_unregistered_mb_no_crash_defensive(scheduler_core):
     """defensive — unknown mb_id → early return"""
     scheduler_core._maybe_advance_forward_pass(
-        _kernel_completion_event(mb_id=9999, node_type=NodeType.O_PROJ)
+        _kernel_completion_event(mb_id=9999, node_type=NodeType.FFN)
     )
     # no crash
 
@@ -167,7 +170,7 @@ def test_in_flight_requests_owner_pattern(scheduler_core, dummy_config):
     assert len(scheduler_core.in_flight_requests) == 1
     mb = scheduler_core.dispatcher.micro_batches[mb_id]
     mb.current_layer_index = dummy_config.model.num_layers - 1
-    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.O_PROJ))
+    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.FFN))
     assert len(scheduler_core.in_flight_requests) == 0
 
 
@@ -179,7 +182,7 @@ def test_dispatcher_unregister_called_on_completion(scheduler_core, dummy_config
     mb_id = _setup_mb_with_decode_reqs(scheduler_core, n_reqs=1, max_tokens=1)
     mb = scheduler_core.dispatcher.micro_batches[mb_id]
     mb.current_layer_index = dummy_config.model.num_layers - 1
-    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.O_PROJ))
+    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.FFN))
     # Impl-9 — mb 의 모든 req finalize → window evict + dispatcher unregister + DAG remove
     assert mb_id not in scheduler_core.dispatcher.micro_batches
     assert mb_id not in scheduler_core.window.current_ids()
@@ -196,7 +199,7 @@ def test_main_loop_eos_seen_external_signal_triggers_finalize(scheduler_core, du
     mb = scheduler_core.dispatcher.micro_batches[mb_id]
     mb.current_layer_index = dummy_config.model.num_layers - 1
     scheduler_core._maybe_advance_forward_pass(
-        _kernel_completion_event(mb_id, NodeType.O_PROJ),
+        _kernel_completion_event(mb_id, NodeType.FFN),
         eos_seen=True,
     )
     # max_tokens=100 이나 EOS path 로 finalize
@@ -210,7 +213,7 @@ def test_main_loop_eos_path_kv_release(scheduler_core, dummy_config, kv_accounta
     mb = scheduler_core.dispatcher.micro_batches[mb_id]
     mb.current_layer_index = dummy_config.model.num_layers - 1
     scheduler_core._maybe_advance_forward_pass(
-        _kernel_completion_event(mb_id, NodeType.O_PROJ),
+        _kernel_completion_event(mb_id, NodeType.FFN),
         eos_seen=True,
     )
     assert kv_accountant.remaining == initial
@@ -230,7 +233,7 @@ def test_full_decode_sequence_to_max_tokens(scheduler_core, dummy_config, max_to
     for step in range(max_tokens):
         # L-1 회 normal advance + 마지막 1 회는 O_PROJ trigger
         mb.current_layer_index = L - 1
-        scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.O_PROJ))
+        scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.FFN))
         if step < max_tokens - 1:
             # alive — decoded_count 증가, mb.current_layer_index reset to 0
             req = scheduler_core.in_flight_requests[0]
@@ -254,7 +257,7 @@ def test_full_decode_sequence_kv_release_only_at_max(scheduler_core, dummy_confi
 
     for step in range(max_tokens):
         mb.current_layer_index = L - 1
-        scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.O_PROJ))
+        scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.FFN))
         if step < max_tokens - 1:
             # KV 잔존
             assert kv_accountant.remaining == initial - 100

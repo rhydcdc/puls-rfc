@@ -2,7 +2,8 @@ from puls_sched.dag import DAG
 from puls_sched.node import NodeState, NodeType
 
 
-def test_add_micro_batch_creates_4_nodes():
+def test_add_micro_batch_creates_5_nodes():
+    # Phase-2 S0 — μ-batch 당 5 노드 (QKV·PREFILL_ATTN·DECODE_ATTN·O_PROJ·FFN[inter-AB])
     dag = DAG()
     dag.add_micro_batch(0)
     assert set(dag.nodes[0].keys()) == set(NodeType)
@@ -19,6 +20,7 @@ def test_precedence_edges_match_i1_i2_i3():
         NodeType.PREFILL_ATTN: {NodeType.QKV},
         NodeType.DECODE_ATTN: {NodeType.QKV},
         NodeType.O_PROJ: {NodeType.PREFILL_ATTN, NodeType.DECODE_ATTN},
+        NodeType.FFN: {NodeType.O_PROJ},                 # Phase-2 S0 — inter-AB (F3)
     }
 
 

@@ -164,32 +164,7 @@ def test_scheduler_core_without_instance_pipeline_still_works(tmp_path):
 
 
 # ---- ARCH §3.4 cycle count semantic 정합 ----
-
-def test_instance_pipeline_dispatch_invoked_per_layer(tmp_path):
-    """ARCH §3.4 *forward pass = L × cycle* literal — 매 O_PROJ 완료 시 1회 호출.
-
-    Mock 위 dispatch 호출 횟수 = 처리된 layer 수 (forward pass 총 layer 수).
-    """
-    from unittest.mock import MagicMock
-    run = Run.init(
-        config_module="puls_sched.config:default_dummy_config",
-        trace_path_or_synthetic="synthetic:3",   # 작은 trace
-        output_dir=tmp_path,
-        seed=42,
-    )
-    # InstancePipeline.dispatch 를 wrap — 호출 횟수 count
-    original_dispatch = run.scheduler.instance_pipeline.dispatch
-    call_count = [0]
-    def wrapped(mb):
-        call_count[0] += 1
-        return original_dispatch(mb)
-    run.scheduler.instance_pipeline.dispatch = wrapped
-    run.loop()
-    # 호출 횟수 > 0 (production 위 진정 호출) + layer 수에 비례
-    # synthetic:3 위 보수적 lower bound — 적어도 L=num_layers 1 회 이상 호출
-    assert call_count[0] > 0
-    # 다중 layer cycle 위 — num_layers 의 배수 영역 (3 req × L 가량)
-    # 정확 수치 lock-in 회피 (admission 의 chunk 결정 위 가변) — 단지 *non-trivial*
-    assert call_count[0] >= run.config.model.num_layers, (
-        f"dispatch call count {call_count[0]} < num_layers {run.config.model.num_layers}"
-    )
+# Phase-2 S0/S3 — test_instance_pipeline_dispatch_invoked_per_layer 폐기.
+# layer advance 가 O_PROJ→FFN 노드로 이동하며 `instance_pipeline.dispatch` 가 hot path 에서
+# 제거됨(호출 0, 의도된 결과). inter-AB(F3) per-layer cycle 은 이제 FFN 노드(INSTANCE_B 자원)
+# + gpu_instance_b activity 로 검증 — test_run_loop_activates_gpu_instance_b_signal 가 대체.

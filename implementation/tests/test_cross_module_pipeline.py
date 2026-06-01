@@ -83,7 +83,8 @@ def test_admission_to_dispatch_pim_op_time_chain(scheduler_core):
     scheduler_core.dispatcher.refresh_ready()
     decode = scheduler_core.dag.get_node(0, NodeType.DECODE_ATTN)
     op_time = scheduler_core.dispatcher._op_time(decode)
-    expected = scheduler_core.dispatcher.pim_executor.op_time(kv_rows_total=expected_kv)
+    # PIM op_time() 반환 = ns, dispatcher._op_time = µs (×1e-3 변환, 단위 규약). 기대값도 µs.
+    expected = scheduler_core.dispatcher.pim_executor.op_time(kv_rows_total=expected_kv) * 1e-3
     assert op_time == expected
 
 
@@ -101,7 +102,8 @@ def test_multiple_micro_batches_independent_signal_flow(dispatcher):
                 qkv.transition_to(s)
         dispatcher.refresh_ready()
         decode = dispatcher.dag.get_node(i, NodeType.DECODE_ATTN)
-        expected = dispatcher.pim_executor.op_time(kv_rows_total=rows)
+        # PIM op_time()=ns → dispatcher._op_time=µs (×1e-3). 기대값도 µs 로 변환.
+        expected = dispatcher.pim_executor.op_time(kv_rows_total=rows) * 1e-3
         assert dispatcher._op_time(decode) == expected
 
 

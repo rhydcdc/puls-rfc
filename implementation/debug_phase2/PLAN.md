@@ -388,9 +388,19 @@ disjoint·영구 상주(§3.3) → 총 상주 KV = **2 × 30M = 60M aggregate**.
   - 테스트: test_admission 재작성(21 green) + balance/payload/backfill 테스트 4파일 폐기 +
     test_admission_tick·test_meta 갱신(직접 영향 29+13 green). **사전-깨짐(S0 O_PROJ→FFN
     트리거) 34건은 HEAD 에서도 red(stash baseline 확인) → S3 일괄 갱신.**
-- [ ] **S3. window/F2 정합** → former 가 활성 슬롯 2개를 유지해 F2/F3 발현. capacity=3 유지.
-  disjoint 분할 추적(요청→슬롯 매핑). + §2.7 미정리(opt instance_pipeline.dispatch 잔여 ·
-  4노드 가정 옛 테스트) + 사전-깨짐 3개(0.x §) 정리.
+- [~] **S3. 사전-깨짐 테스트 마이그레이션 + run.py 회귀 수정** — 대부분 완료.
+  - **★ run.py 회귀 수정**: S2 가 `_compose_admission_payload` 삭제했으나 [run.py:164] 가 호출 →
+    `Run.init` 깨짐(Run 기반 테스트 전부 fail). payload={} 로 수정. (S2 때 src 호출처 grep 누락 — 교훈.)
+  - O_PROJ→FFN 트리거 마이그레이션: test_main_loop_completion(25 green, 의미 테스트 2개 FFN 기준
+    재작성), test_cross_module_lifecycle(`_decode_one_token` FFN; 16/17 green).
+  - 4노드→5노드: test_meta(node_types·dag_precedence +FFN), test_dag(precedence +FFN, 4→5 rename).
+  - ns/µs: test_cross_module_pipeline(_op_time µs 기대값 ×1e-3).
+  - telemetry: test_instance_pipeline_dispatch_invoked_per_layer 폐기(dispatch hot path 제거됨).
+  - acceptance c1·c2·c4·c5·f4(25) + inter_ab(7) green. **잔여: 실트레이스(longbench/e2e) OOM** —
+    run.py eager-preload 이 `prompt_tokens=[0]*num_prefill` 로 ~1M-ctx 통째 materialize(스케줄러는
+    len 만 씀). harness 낭비 → **S4 에서 Request 를 prompt_len 으로 경량화** 필요.
+  - window/F2 명시 2슬롯 유지: 코드 추가 보류 — event-driven admission 의 emergent staggering 을
+    S4 측정으로 먼저 확인(idle≈이론), 미발현 시 그때 보강(§7 추측 금지).
 - [ ] **S4. 측정 substrate** → `Request.first_token_time` 추가, 완료 요청 sink(evaluator
   또는 scheduler 에 `completed_requests` list), L 도달 첫 decode 시 first_token_time 기록.
 - [ ] **S5. 데드코드 정리** → S2 가 만든 orphan(import·필드·micro_batch.prefill_chunk_budget
@@ -538,3 +548,11 @@ disjoint·영구 상주(§3.3) → 총 상주 KV = **2 × 30M = 60M aggregate**.
   맞춰져 "균형 맞추려 더 합류" 이유 소멸. former 단일 진입. (3) **mfu_floor/MicroBatchSpec.n
   제거**(사문/중복). (4) per-mb 예산은 비바인딩 선언으로 보존(각주). 디코드→QKV/O-proj 기여가
   balance 산식에 포함됨도 확인. 사전-깨짐 34건(S0 O_PROJ→FFN 트리거)은 baseline red → S3.
+- 2026-06-01: **S3 테스트 마이그레이션 + run.py 회귀 수정.** ★ S2 가 `_compose_admission_payload`
+  삭제 시 [run.py:164] 호출처를 놓쳐 `Run.init` 깨짐 → payload={} 로 수정(Run 기반 전부 복구).
+  O_PROJ→FFN 트리거 마이그레이션(완료/lifecycle/dag/meta), ns/µs 기대값, dispatch_invoked 폐기.
+  검증: acceptance c1·c2·c3·c4·c5·f4 + e2e + inter_ab = **39 pass**(+retired 1), lifecycle 16/17,
+  main_loop_completion 25, meta 53, admission 21 — 전부 green. **유일 잔여 red = test_real_longbench
+  (실 1M-ctx 트레이스 eager-preload 의 `[0]*num_prefill` materialize → OOM, harness 낭비). 스케줄러
+  는 len 만 쓰므로 S4 에서 Request prompt_len 경량화로 해소.** F2/F3 명시 2슬롯은 S4 측정 후 판단.
+  - **교훈(자기리뷰 보강): 심볼 삭제 시 tests 뿐 아니라 src 호출처도 grep** (run.py 누락 재발 방지).

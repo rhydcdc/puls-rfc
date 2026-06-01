@@ -156,12 +156,12 @@ class Run:
                 payload={"request": req},
             ))
 
-        # Q1 first ADMISSION_TICK priming. Impl-10-pre-1 (B)~(B''') — composer 사용
-        # (init 시점 in_flight empty + idle_telemetry 0 → 자연 trivial payload, 단 t_pim_fn 은 진정 closure).
+        # Q1 first ADMISSION_TICK priming. Phase-2 S2(§2.5) — 동작점 고정으로 payload
+        # trivial(빈 dict). former 는 KV 합·prefill 512 만 봄 (cycle 측정 payload 삭제).
         queue.push(Event(
             timestamp=0.0,
             type=EventType.ADMISSION_TICK,
-            payload=scheduler._compose_admission_payload(),
+            payload={},
         ))
 
         out = Path(output_dir)

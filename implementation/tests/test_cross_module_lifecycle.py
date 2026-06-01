@@ -72,10 +72,10 @@ def _kc_event(mb_id, ntype, resource="GPU"):
 
 
 def _decode_one_token(core, mb_id):
-    """L-1 step skip → trigger O_PROJ event (token decode signal)"""
+    """L-1 step skip → trigger FFN event (token decode signal; S0 layer advance 트리거 O_PROJ→FFN)"""
     mb = core.dispatcher.micro_batches[mb_id]
     mb.current_layer_index = core.config.model.num_layers - 1
-    core._maybe_advance_forward_pass(_kc_event(mb_id, NodeType.O_PROJ))
+    core._maybe_advance_forward_pass(_kc_event(mb_id, NodeType.FFN))
 
 
 def _drive_until_done(core, mb_id):
