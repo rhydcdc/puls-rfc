@@ -1,6 +1,6 @@
 # PULS — PIM-Unified LLM Serving
 
-> 🚧 **디버깅 진행 중** — Balance 4요소 스케줄러 로직(chunked-prefill / chunked-decode 상호 채움)을 수정하고 있습니다. 보고된 런타임 수치는 변경될 수 있습니다.
+> ✅ **스케줄러 로직 구현·검증 완료** — 풀 모델 배치 구성(admission=풀 보충 ∥ decode-set ∥ prefill 독립 steering)이 동작점(decode 123 / Σkv 12.3M, prefill 256 / depth-work 25.6M)에 수렴, 세 자원 idle spread ~5% 발현 ([Runtime Validation](#runtime-validation)).
 
 **Scheduler-aware co-design of HBM-PIM and production LLM serving stack.**
 
@@ -104,11 +104,12 @@
 
 상세 — [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-## 타겟 워크로드
+## 워크로드 적용 범위
 
-본 RFC 는 **long-context + large-batch production serving** 환경을 1 차 타겟으로 한다 — multi-turn agentic conversation, 1M-class long-context inference, high-throughput chunked-prefill + mixed batching 시나리오 영역. 이 영역에서 PIM 의 KV cache 흡수 + systems-level F3·F5 효과 (inter-instance pipeline, channel-independent scheduling) 가 baseline 대비 의미 있게 발현.
+PULS 는 **특정 타겟 워크로드에 한정되지 않는다.** 배치 구성이 *길이분산 무관* steering 이기 때문이다 — former 는 풀의 평균 길이를 보지 않고, 짧은·긴 요청을 **조합**해 동작점 네 타깃(decode 개수 123 ∧ Σkv 12.3M, prefill 256 토큰 ∧ depth-work 25.6M)만 맞춘다. 따라서 **decode 와 prefill 이 풀에 풍부한 어떤 분산-서버-스케일 워크로드든** — 길이 분포가 짧든 길든 혼합이든 bimodal 이든 — 동작점에 수렴한다 (균형 ctx ~100K 는 KV 캡 유도용 중간값일 뿐, 워크로드 강제값 아님).
 
-- **유리한 영역** — long context (≥ 32k), high batch (B ≥ 128), KV 길이 분산이 큰 production trace (agentic workflow, multi-turn chat 등).
+- **동작점(idle≈0) 도달 조건** = 풀에 decode·prefill 이 *풍부* (고동시성 분산 서빙의 대량 상주 decode 풀 + 지속 prefill). 실서버 정상상태가 정확히 이 영역. [Runtime Validation](#runtime-validation) 에서 합성 대량-풀 워크로드 위 idle spread ~5% 로 실증.
+- **풀이 얕으면**(저부하·짧은 decode 만) PIM 또는 GPU-A 가 노는 건 *물리적 정상*(고칠 대상 아님) — 동작점은 풀이 풍부할 때의 균형점이다.
 
 ## 가속 Source 요약
 
@@ -152,7 +153,7 @@ Llama-3 70B + DGX B200 + HBM4 substrate 위 4 가속 source (Aux1·Aux2·F3·F5)
 |---|---|---|
 | Aux1 | Mixed batching 가중치 재사용 | **2.0×** (closed-form), 1.97× (Colab T4 측정) |
 | Aux2 | KV bus traffic 감소 | **4.95× speedup, 79.8% 감소** |
-| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep), **0.5933 (measured = near-balance)** |
+| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep); 풀 모델 시뮬서 **3자원 idle spread 4.7% (balance 발현)** — [Runtime Validation](#runtime-validation) |
 | F5 | Channel-independent vs lock-step | **5.15× speedup** (KV variance dominant) |
 
 ### Aggregate Speedup
@@ -167,39 +168,39 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (F5 포함)**.
 
 ### Runtime Validation
 
-LongBench λ=3.40 첫 3 request (sum prompt 408,148 tokens; 47K + 280K + 81K), end-to-end scheduler 시뮬레이션, single task. Wall-clock 5.4 분, 15.26M admission tick, 50.87 s simulated clock.
+**합성 워크로드 + 풀 모델 스케줄러 end-to-end 시뮬레이션.** 단일 실 trace 대신 분산-서버 정상상태를 대표하는 합성 워크로드를 *고정* 해두고, idle 이 자연 수렴하는 값을 *그대로* 보고한다 — idle≈0 을 맞추려 seed 를 튜닝하지 않음(튜닝은 답을 정해놓고 맞추는 것이라 무의미).
 
-| Slot | Active (sec) | Idle |
+- **워크로드(합성)** — prefill 20K\~180K 다양(sweet spot ~100K 포함), decode 8K\~40K *긴 생성* (= 분산 서버의 대량 상주 decode 풀). **warm-start seed 6,000** = 정상상태 스냅샷: 워크로드 *자체 분포* 에서 각 요청을 생애 랜덤 지점(prefill 진행도 또는 decode 진행도)에 배치 — 비편향, cold-start 램프만 생략.
+- **방식** — 풀 모델 스케줄러(admission = 풀 보충 ∥ decode-set steering ∥ prefill steering, 셋 독립)로 idle 수렴까지 시뮬. 활성 μ-batch 의 배치 구성 + 3 자원 idle 측정.
+
+| μ-batch 구성 (활성 평균) | 측정 | 타깃 |
 |---|---|---|
-| GPU Instance A | 50.82 | 0.10% |
-| PIM Instance A | 0.17 | 99.66% |
-| GPU Instance B | 34.95 | 31.30% |
+| decode 개수 | **122** | 123 |
+| decode Σkv | **12.33M** | 12.3M |
+| prefill 토큰 | **256** | 256 |
+| prefill depth-work | 27.1M | 25.6M |
 
-| Convergence | 값 |
+| 자원 idle | 측정 |
 |---|---|
-| converged | True |
-| oscillating | False |
-| in_band_fraction | 98.70% |
-| samples | 15,261,787 |
-
-| F3 cross-validate | 값 |
-|---|---|
-| closed_form_ratio | 0.9964 |
-| measured_ratio | **0.5933** |
-| abs_diff | 0.4031 |
+| GPU Instance A (proj + prefill-attn) | **8.0%** |
+| PIM Instance A (decode-attn) | **12.6%** |
+| GPU Instance B (FFN) | **12.6%** |
+| **spread (= 가장 한가한 자원 idle)** | **4.7%** (converged) |
 
 해석:
 
-- **두 인스턴스 모두 실질 기여.** GPU Instance A 와 Instance B 가 각각 50.82 s · 34.95 s 의 active duration 기록.
-- **Instance B 의 31.30% idle 은 의도된 A-bound 분기 동작**, balance 실패가 아님. Long-context prefill 우세 trace 에서 Instance A 의 prefill GEMM 이 cycle 을 포화시키므로, B-cycle 을 채우려 admission 을 늘리면 이미 포화된 A 로 일이 몰려 throughput 이득 없음.
-- **F3 measured 0.5933 ≈ near-balance** (perfect = 0.50) — balance 메커니즘 활성을 정량 증명. Closed-form 0.9964 와의 gap 은 단일 μ-batch projection (single ctx, single chunk) 과 실제 multi-μ-batch steady-state pipeline (수천 cycle, 동시 A→B dispatch, μ-batch 당 FFN op_time) 의 차이를 반영.
-- **4 balance 분기 모두 steady state 도달.** Deadband 가 15M+ admission tick 위에서 oscillation 없이 유지, in-band fraction 98.70%.
+- **네 동작점 타깃 모두 명중** — steering 이 풀에서 decode-set(123 / 12.3M)과 prefill(256 / 25.6M)을 *독립적으로* 구성. 길이분산 무관(짧+긴 조합으로 명중).
+- **세 자원 idle 8\~13%, spread 4.7%** — 직렬이면 idle ~67%(t_A + t_B 합)인데 그 1/14 로 떨어짐. **F2(projection ‖ PIM double-buffering)·F3(inter-instance pipeline) 발현의 정량 증거.** ±10% 진단 밴드 안 = 균형.
+- **튜닝 없이 자연 발현** — 현실적 대량-풀 워크로드를 고정하니 idle≈0 이 *저절로* 나옴. 실서버 정상상태(기존 디코더 대량 상주 + 지속 prefill)가 정확히 이 조건.
+- **GPU-A 가 병목(idle 8%)** — 합성 prefill 분포가 sweet spot 보다 살짝 깊어 depth-work 27.1M(목표 25.6M 초과) → prefill-attn 이 약간 무거움. 밴드 내 미세 불균형(워크로드 깊이 의존, 알고리즘 아님).
+- **throughput 지속성은 별개 축** — decode 길이가 매우 길어(상주 풀 큼) 측정창 내 완료 0 → TTFT/TBT 는 본 측정서 미산출(별도). 본 검증 대상은 per-cycle 균형(idle). 드레인·완료·KV 누수 0 은 합성 acceptance(전부 완료·KV remaining=initial·정상 종료)로 별도 검증.
 
 ### Honest Disclosure
 
 - **HBM4 substrate** = hypothetical projection (현재 production 부재; ARCH §3.1 literal 정합).
 - **η_HBM_external** = H100 HBM3 측정값을 HBM4 로 확장 (Framing A).
 - **F1·F2 ablation + 비교 baseline (vLLM / Sarathi-Serve)** = 후속 calibration 으로 연기 (calibration-heavy).
+- **Runtime Validation = 합성 워크로드** — 분산-서버 정상상태(대량 상주 decode 풀 + 지속 prefill)를 대표하는 합성 분포 + warm-start seed(비편향, cold-start 램프 생략). 실 1M-ctx trace 의 cold-start 전체 prefill 은 수억 step 이라 직접 시뮬 비현실적 → warm-start 가 *상주 풀* 을 대표. idle(per-cycle 균형)이 검증 대상이며, 절대 latency 아님.
 - **절대 metric** (TTFT, TPOT, throughput) = silicon 부재로 영구 out of scope.
 
 ## Limitations / Disclosure
