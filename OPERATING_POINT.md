@@ -40,6 +40,12 @@ projection+prefill-attn / FFN=인스턴스 B)의 시간을 맞춰 인스턴스 �
 
 세 시간이 ≈51µs 로 모이면 overlap(F2·F3) 시 idle ≈ 0. 허용 ±10% → 가장 한가한 자원 idle ≤ ~10%.
 
+> **PIM 숨음 (floor 검증).** 동작점에서 **t_pim ≤ t_gpuA**(측정 50.43 ≤ 52.89µs) — PIM
+> decode-attn 이 GPU-A 윈도우에 *완전히 숨고 여유 4.6%*. PREFILL_ATTN 이 t_gpuA 의 80% 라
+> GPU-A 가 병목이고 PIM·FFN 이 그 뒤에 가려진다. 한때 둔 `pim_slack_safety_margin`(decode 가
+> prefill compute-bound 에 못 숨을까 봐 둔 10% 헤지)은 **불필요로 판명** — 어떤 산식에도 미사용
+> 이었고(타깃은 op-time 균형서 직접 도출), floor 가 숨음을 확정. 기준치 재계산 불요. 상세 ARCH §6.8.
+
 ## 3. former 알고리즘 — 로컬 그리디 steering + age-cap
 
 **제어 타깃 = (count = 123, Σkv = 12.3M) 둘.** (avg 100K 는 이 둘의 비 = 12.3M/123 으로,
@@ -71,8 +77,12 @@ window=3 순차 (2 active F2/F3 overlap + 1 전이 여유).
 - **검증**:
   - [proto_steering.py](implementation/debug_phase2/proto_steering.py): 정규·heavy-tail·short-heavy·bimodal 전부 **N123
     Σ12.3M spread ~1%** (FIFO 는 off-avg 22~30% 실패). 원소 = 짧+중+긴 혼합(예 47+47+29).
-  - [proto_steering_fair.py](implementation/debug_phase2/proto_steering_fair.py): 스트리밍서 **서빙 분포 = arrival 분포**
-    (starvation 0, 모든 클래스 drain) + 매 배치 균형(spread 1.3%) + 대기 ≤3 batch.
+  - [proto_steering_fair.py](implementation/debug_phase2/proto_steering_fair.py): 스트리밍서 **starvation 0**
+    — age-cap 이 모든 길이 클래스를 ≤AGE_CAP+1 batch 안에 drain → *도착한 집합 = 서빙된 집합*
+    (보존). ⚠ 이건 age-cap 의 **공정성 *결과*** 이지 분포를 *타깃* 하는 게 아니다 — 배치 구성은
+    여전히 avg/분포 안 보고 두 타깃만 맞춘다(길이분산 무관). steering 단독은 ideal-크기만
+    cherry-pick 해 off-size 를 starve 시키므로, age-cap 이 그걸 보정해 누락 0 을 보장.
+    + 매 배치 균형(spread 1.3%) + 대기 ≤3 batch.
 - **AGE_CAP 트레이드오프 (sweep)**: cap↑ → steering 자유도↑ → spread↓, 단 대기(레이턴시)↑.
   cap↓ → FIFO化 → 공정/저지연이나 spread↑.  | cap1: sp3.1% | **cap2: sp1.2%, 대기≤3** |
   cap5: sp0.7%,대기5 | cap∞: sp0.8% but **starvation(대기37)** |. → **AGE_CAP=2 채택**
@@ -139,18 +149,19 @@ calibration; 10% 는 그 placeholder. (15%/20% 도 동작 가능 — calibration
 | 2048 | 100K | 406 | 991 | 99.1M | 204.8M | 0.39 |
 
 → 균형 ctx 가 prefill 무관 100K 고정(=하드웨어 상수). prefill 은 X·배치규모만 스케일.
-(REPORT 의 "512만 균형, 1024+ 실패"는 decode-KV 를 25M 에 고정한 채 prefill 만 올린 측정
-오류 — 각 prefill 자기 균형점에선 spread<1%. REPORT 정정 대상.)
+(옛 REPORT 의 "512만 균형, 1024+ 실패"는 decode-KV 를 25M 에 고정한 채 prefill 만 올린 측정
+오류 — 각 prefill 자기 균형점에선 spread<1%. **REPORT 정정 완료** `d1e48a3` 부록 A.)
 
 ## 6. 엣지 / 구현 상태
 
 - **짧은-평균(균일-편향) 풀**(비현실적 스트레스 케이스, 무한 변종 트래픽에선 미발생): 맞는
   길이 요청이 없어 steering 도 타깃 미달 → PIM idle = B-bound, 물리적 정상(ARCH §6.6). 고칠 대상 아님.
-- **현 `admission.layer1`(S2)**: 종료 = `Σkv ≥ 목표` 하나뿐(개수 통제 없음). **former-v2 에서
-  steering + age-cap(2) 으로 재작성** — 매 step `ideal=(target_kv−S)/(target_count−n)` 가장 가까운
-  디코더 선택(단 wait≥AGE_CAP 은 강제) → (개수 123, Σkv 12.3M) 동시 수렴 + starvation 0. 풀
-  길이-인덱싱(버킷) + wait 추적. prefill 도 depth-합 steering+age-cap. config: target_count·
-  target_kv·prefill·age_cap. (= S2 가 지운 max_batch_size 를 "FFN 개수 타깃 123"으로 의미 정정 복원.)
+- **admission 구현 = former-v2 풀 모델 (완료 `54ee4d6`).** 옛 S2 `layer1`(종료 = `Σkv ≥ 목표`
+  하나뿐, 개수 통제 없음)을 steering + age-cap(2) 으로 **재작성 완료** — 매 step
+  `ideal=(target_kv−S)/(target_count−n)` 가장 가까운 디코더 선택(단 wait≥AGE_CAP 은 강제) →
+  (개수 123, Σkv 12.3M) 동시 수렴 + starvation 0. prefill 도 depth-합 steering+age-cap. config:
+  target_count·target_kv·prefill·age_cap. (= S2 가 지운 max_batch_size 를 "FFN 개수 타깃 123"으로
+  의미 정정 복원.) idle floor 검증은 ARCH §6.8 / [REPORT](implementation/debug_phase2/REPORT.md).
 - prefill 최적값(256 vs 512)은 FFN MFU knee 에 의존 → deferred calibration. 알고리즘은
   prefill 값에 비의존(family 매핑됨, 메커니즘은 어떤 prefill 이든 성립).
 
