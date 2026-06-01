@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Callable, Optional, TYPE_CHECKING
 
-from puls_sched.admission import Admission, MicroBatchSpec
+from puls_sched.admission import Admission
 from puls_sched.clock import Clock
 from puls_sched.completion import Completion
 from puls_sched.config import Config
@@ -73,17 +73,16 @@ class SchedulerCore:
         """
         self._admission_tick_callbacks.append(callback)
 
-    def _fire_admission_tick(self, spec: "MicroBatchSpec | None") -> None:
-        """등록된 callback 들에게 admission tick snapshot 통지 (Impl-8 D1 hook fire).
+    def _fire_admission_tick(self) -> None:
+        """등록된 callback 들에게 admission tick snapshot 통지 (Impl-8 D1 hook fire, 진단용).
 
-        Phase-2 S2 (§2.5) — 동작점 고정으로 cycle 측정 기계장치 삭제. a_cycle/b_cycle 는
-        admission 경로에서 산출하지 않음(=0) — idle_telemetry 기반 사후 진단은 evaluator 가
-        담당(밸런스 입력에서 분리). snapshot 은 진단용으로만 보존. n = admit 된 디코더 수.
-        Spec=None (admission 실패 path) 도 snapshot 누적.
+        Phase-2 풀 모델 — 동작점 고정으로 cycle 측정 삭제(a/b_cycle=0). n = 현재 활성 μ-batch
+        들의 decode 토큰 총수(진단). idle 사후 진단은 evaluator 가 idle_telemetry 로 담당.
         """
         if not self._admission_tick_callbacks:
             return
         from puls_sched.evaluator import AdmissionSnapshot
+        n_decode = sum(len(mb.decode_tokens) for mb in self.dispatcher.micro_batches.values())
         snapshot = AdmissionSnapshot(
             timestamp=self.clock.now,
             gpu_idle_fraction=self.admission.idle_telemetry.gpu_idle_fraction(),
@@ -91,8 +90,8 @@ class SchedulerCore:
             a_cycle=0.0,
             b_cycle=0.0,
             ctx_tokens=0,
-            spec_admitted=(spec is not None),
-            n=len(spec.decode_requests) if spec else 0,
+            spec_admitted=(n_decode > 0 or len(self.window.current_ids()) > 0),
+            n=n_decode,
         )
         for cb in self._admission_tick_callbacks:
             cb(snapshot)
@@ -138,44 +137,14 @@ class SchedulerCore:
                 if self.enable_admission_tick_rescheduling:
                     self._schedule_admission_tick()
             case EventType.ADMISSION_TICK:
-                # Phase-2 S2 (§2.5) — 동작점 고정으로 payload trivial. cycle 측정 인자 없음.
-                # Impl-9 — Window full 시 admission 대기 (ARCH §6.7 '3-μ-batch in-flight window' 의미).
-                # Auto-evict (window.admit overflow) 는 *defensive* 영역으로 격하.
-                if len(self.window.current_ids()) >= self.window.capacity:
-                    self._fire_admission_tick(None)
-                    # STEP 2.5 — window full 이면 다음 완료(evict) 시 admission 재기동.
-                    # 고정 타이머 self-push 폐기 (헛도는 tick 차단).
-                    return
-                spec = self._invoke_admission()
-                self._fire_admission_tick(spec)
-                if spec is not None:
-                    mb_id = self._next_mb_id
-                    self._next_mb_id += 1
-                    # Impl-10-pre-2 (O9.1 + O9.2) — Mixed batch composition.
-                    # Lifecycle owner registration first (Q10), then mb populate.
-                    for req in spec.decode_requests:
-                        if req.state == RequestState.PENDING:
-                            req.transition_to(RequestState.PREFILL)
-                        self.in_flight_requests[req.id] = req
-                    # former-v2 — spec.prefill_chunk_tokens = TOTAL budget(256). prefill
-                    # steering 으로 멤버들에 분배(depth-합 25.6M 목표, _populate_mb_phases).
-                    prefill_chunk, decode_tokens, prefill_processed = self._populate_mb_phases(
-                        spec.decode_requests, spec.prefill_chunk_tokens,
-                    )
-                    mb = MicroBatch(
-                        id=mb_id,
-                        kv_rows_total=spec.kv_rows_total,
-                        kv_rows_lockstep=spec.kv_rows_lockstep,   # Impl-8 — F5 ablation 위 signal flow
-                        prefill_chunk=prefill_chunk,                  # Impl-10-pre-2 (O9.1)
-                        decode_tokens=decode_tokens,
-                        prefill_chunk_budget=spec.prefill_chunk_tokens,   # Impl-10-pre-2 B — adaptive budget 보존
-                        prefill_processed=prefill_processed,          # Impl-10 main — PREFILL_ATTN causal ctx 산출
-                    )
-                    self.dispatcher.register(mb)
-                    self.window.admit(mb_id)
-                    self.dispatcher.tick()
-                # STEP 2.5 — 고정 타이머 self-push 폐기. 다음 admission 은 완료
-                # (KERNEL_COMPLETION) 또는 신규 도착(REQUEST_ARRIVAL) 시 재기동.
+                # Phase-2 풀 모델 (OPERATING_POINT §3) — 세 관심사 분리:
+                #  (1) admission = 풀 보충: request_queue → in_flight(PREFILL), KV 게이트만.
+                #  (2)+(3) μ-batch 구성: decode-set(123/12.3M) ∥ prefill(256/25.6M) 을 풀에서
+                #      *독립적으로* steering+age-cap 으로 구성 → window 를 활성 목표(2)까지 채움.
+                self._refill_pool()
+                self._fill_window()
+                self._fire_admission_tick()
+                # 고정 타이머 self-push 폐기. 다음 admission 은 완료/신규도착 시 재기동.
 
     def _schedule_admission_tick(self) -> None:
         """완료(KERNEL_COMPLETION) / 신규 도착(REQUEST_ARRIVAL) 시 admission 재기동.
@@ -254,36 +223,117 @@ class SchedulerCore:
                 self.completion.finalize(req)
                 self.in_flight_requests.pop(req_id, None)
                 self.completed_requests.append(req)   # S4(b) — sink (버리지 않고 보존)
-        # 다음 token 의 forward pass 위 reset (multi-token decode 정합)
+        # 다음 forward pass 위 reset (multi-token decode 정합)
         mb.current_layer_index = 0
-        # Phase-2 S2 — 슬롯 재구성 = 잔존 멤버 phase 전진만(backfill 없음, §2.5). evict 판정 =
-        # 재구성 후 prefill_chunk·decode_tokens 모두 빔(멤버 전원 완료). 배치_생애 §종료.
+        # Phase-2 풀 모델 — forward pass 끝 → 이 μ-batch 를 *풀에서 재구성*(decode-set·prefill
+        # 재선택). 직전 멤버는 풀로 반환(in_flight 잔류·미assign)되어 재선택 대상. 재구성 결과
+        # 비면(풀에 줄 게 없음) evict. 그 뒤 window 를 활성 목표까지 다시 채움(해제된 멤버 흡수).
         self._recompose_mb(mb)
         if mb.prefill_chunk or mb.decode_tokens:
             self.dag.reset_micro_batch(mb.id)
         else:
             self.window.evict(mb.id)
             self.dispatcher.unregister(mb.id)
+        self._fill_window()
+
+    def _refill_pool(self) -> None:
+        """Admission (풀 모델, OPERATING_POINT §3) — request_queue → in_flight(PREFILL), KV 게이트만.
+
+        구성 로직 아님: 디코드/prefill 타깃과 *무관* 하게 풀을 보충만 한다. KV 여유(can_admit)
+        까지 새 요청을 들이고 PENDING→PREFILL 전이. KV admit 1회(완료 시 release).
+        """
+        while True:
+            req = self.request_queue.peek_oldest()
+            if req is None or not self.kv_accountant.can_admit(req):
+                break
+            self.request_queue.pop_oldest()
+            self.kv_accountant.admit(req)
+            if req.state == RequestState.PENDING:
+                req.transition_to(RequestState.PREFILL)
+            # 프롬프트 잔여 0(decode-only, 또는 이미 prefill 끝남) → 즉시 DECODE 풀로.
+            if req.prefill_processed >= req.prompt_len and req.state == RequestState.PREFILL:
+                req.transition_to(RequestState.DECODE)
+            self.in_flight_requests[req.id] = req
+
+    def _assigned_ids(self, exclude_mb_id: int | None = None) -> set[int]:
+        """현재 활성 μ-batch 들이 점유(assign)한 요청 id 합 (disjoint 보장).
+
+        exclude_mb_id 의 멤버는 제외 — 그 μ-batch 재구성 시 자기 직전 멤버는 풀로 반환돼
+        재선택 대상이므로(다른 μ-batch 의 멤버만 제외).
+        """
+        assigned: set[int] = set()
+        for active in self.dispatcher.micro_batches.values():
+            if active.id == exclude_mb_id:
+                continue
+            assigned |= set(active.decode_tokens) | set(active.prefill_chunk)
+        return assigned
+
+    def _select_decoders(self, exclude: set[int]) -> list[Request]:
+        """decode-set 구성 (§3) — in_flight DECODE 풀(exclude 제외)서 steering+age-cap 으로
+        123/12.3M 선택. prefill 과 *완전 별개* 축."""
+        pool = [r for r in self.in_flight_requests.values()
+                if r.state == RequestState.DECODE and r.id not in exclude]
+        return self.admission.steer_decode_set(pool)
+
+    def _prefill_pool(self, exclude: set[int]) -> list[Request]:
+        """prefill 풀 — in_flight PREFILL 이며 프롬프트 잔여 있는 요청(exclude 제외)."""
+        return [r for r in self.in_flight_requests.values()
+                if r.state == RequestState.PREFILL
+                and r.prefill_processed < r.prompt_len and r.id not in exclude]
+
+    def _build_mb_fields(self, decoders, prefill_chunk, prefill_processed) -> dict:
+        return dict(
+            kv_rows_total=sum(d.kv_length for d in decoders),
+            kv_rows_lockstep=max((d.kv_length for d in decoders), default=0) * len(decoders),
+            prefill_chunk=prefill_chunk,
+            decode_tokens={d.id: 0 for d in decoders},
+            prefill_chunk_budget=self.config.admission.prefill_chunk_default,
+            prefill_processed=prefill_processed,
+        )
+
+    def _compose_microbatch(self) -> "MicroBatch | None":
+        """풀에서 새 μ-batch 1개 구성 — decode-set(§3) ∥ prefill(256) *독립* 구성, disjoint.
+        둘 다 비면 None (풀에 줄 게 없음)."""
+        exclude = self._assigned_ids()
+        decoders = self._select_decoders(exclude)
+        prefill_chunk, _dec, prefill_processed = self._populate_mb_phases(
+            self._prefill_pool(exclude), self.config.admission.prefill_chunk_default,
+        )
+        if not decoders and not prefill_chunk:
+            return None
+        mb_id = self._next_mb_id
+        self._next_mb_id += 1
+        mb = MicroBatch(id=mb_id, **self._build_mb_fields(decoders, prefill_chunk, prefill_processed))
+        self.dispatcher.register(mb)
+        self.window.admit(mb_id)
+        self.dispatcher.tick()
+        return mb
+
+    def _fill_window(self) -> None:
+        """활성 μ-batch 수를 staggering 목표(2, window.capacity clamp)까지 풀에서 구성·채움
+        (F3/더블버퍼링 위 동시 2 μ-batch — ARCH §5.6/§5.7, OPERATING_POINT §3 window=3)."""
+        target = min(_STAGGERING_TARGET_MB, self.window.capacity)
+        while len(self.window.current_ids()) < target:
+            if self._compose_microbatch() is None:
+                break
 
     def _recompose_mb(self, mb: MicroBatch) -> None:
-        """Phase-2 S2 — 슬롯의 다음 L-cycle 위 prefill_chunk + decode_tokens 갱신.
+        """forward pass 후 이 μ-batch 를 *풀에서 재구성* (decode-set·prefill 재선택, §3).
 
-        잔존 멤버(완료 안 된 req)만 sticky 유지 + phase 전진(다음 토큰용). **풀에서 당겨오지
-        않음 — backfill 삭제(§2.5, 사용자 확정).** 밸런스가 정적 동작점으로 형성 시점에 이미
-        세 시간이 맞춰져, "균형 맞추려 이미 형성된 배치에 더 합류"시킬 이유가 사라짐. 완료된
-        멤버는 빠지고(슬롯 자연 축소), 새 부하는 새 μ-batch(ADMISSION_TICK former)로만 진입
-        → 풀→배치 진입 경로가 former 하나로 단일화.
+        직전 멤버는 풀로 반환(in_flight 잔류, 이 mb 제외 시 미assign)되어 재선택 대상. 다른
+        활성 μ-batch 멤버는 제외(disjoint). 풀에 줄 게 없으면 빈 mb (caller 가 evict).
         """
-        budget = mb.prefill_chunk_budget if mb.prefill_chunk_budget > 0 else self.config.admission.prefill_chunk_default
-        active_req_ids = set(mb.prefill_chunk.keys()) | set(mb.decode_tokens.keys())
-        active_req_ids = {rid for rid in active_req_ids if rid in self.in_flight_requests}
-        active_reqs = [self.in_flight_requests[rid] for rid in active_req_ids]
-        new_prefill_chunk, new_decode_tokens, new_prefill_processed = self._populate_mb_phases(
-            active_reqs, budget,
+        exclude = self._assigned_ids(exclude_mb_id=mb.id)
+        decoders = self._select_decoders(exclude)
+        prefill_chunk, _dec, prefill_processed = self._populate_mb_phases(
+            self._prefill_pool(exclude), self.config.admission.prefill_chunk_default,
         )
-        mb.prefill_chunk = new_prefill_chunk
-        mb.decode_tokens = new_decode_tokens
-        mb.prefill_processed = new_prefill_processed   # Impl-10 main — re-composition causal ctx refresh
+        fields = self._build_mb_fields(decoders, prefill_chunk, prefill_processed)
+        mb.decode_tokens = fields["decode_tokens"]
+        mb.prefill_chunk = fields["prefill_chunk"]
+        mb.prefill_processed = fields["prefill_processed"]
+        mb.kv_rows_total = fields["kv_rows_total"]
+        mb.kv_rows_lockstep = fields["kv_rows_lockstep"]
 
     def _populate_mb_phases(
         self, reqs, chunk_budget_total: int,
@@ -343,41 +393,21 @@ class SchedulerCore:
                 W += by_id[pick].prefill_processed + alloc[pick]
                 alloc[pick] += 1
                 t += 1
+            # 풀 모델: 토큰 받은(c>0) 요청만 prefill_chunk(=이 μ-batch 에 assign). 0토큰 요청은
+            # *풀에 잔류*(이 μ-batch 에 안 넣음) → 다음 구성서 재선택, prefill_wait++ 로 age-cap.
+            # (sticky 모델의 빈-chunk 멤버십 유지는 풀 모델선 mb 를 미진행 요청으로 부풀려 prefill
+            #  256 을 과분산 → prefill 정체·decode 고갈. 그래서 제거.)
             for req, _ in prefill_reqs:
                 c = alloc[req.id]
-                # ★ 0토큰이어도 빈 chunk 로 *멤버십 유지* — _recompose_mb 가 슬롯 멤버를
-                # prefill_chunk∪decode_tokens 키로 도출하므로, 키가 빠지면 그 요청이 슬롯에서
-                # 누락돼 in_flight 고아가 됨(prefill_wait 누적 불가 → age-cap 무효). 빈 chunk 는
-                # op_time 0 이라 무해(test_dispatcher_prefill_attn_empty_chunk_fallback).
-                prefill_chunk[req.id] = list(range(
-                    req.prefill_processed, req.prefill_processed + c,
-                ))
-                prefill_processed[req.id] = req.prefill_processed
                 if c > 0:
-                    req.prefill_wait = 0          # 진행함 → 대기 리셋
+                    prefill_chunk[req.id] = list(range(
+                        req.prefill_processed, req.prefill_processed + c,
+                    ))
+                    prefill_processed[req.id] = req.prefill_processed
+                    req.prefill_wait = 0
                 else:
-                    req.prefill_wait += 1         # 토큰 0개 → 다음 사이클 age-cap 강제 후보
+                    req.prefill_wait += 1
         return prefill_chunk, decode_tokens, prefill_processed
-
-    def _per_mb_kv_budget(self) -> int:
-        """Phase-2 — per-slot KV 예산 = 전역 KV(60M) / 활성 슬롯 목표(2) = 30M. 2-슬롯 disjoint
-        분할(§0.8 A안)의 *선언적* 한계.
-
-        ★ 실제 admission 엔 비바인딩(§0.8/§2.5 사용자 확정): layer1 은 동작점 목표 Σkv=25M 에서
-        먼저 멈추므로 이 30M 천장은 production 에서 절대 안 걸린다. 즉 "disjoint 2-슬롯 = 60M/2"
-        개념을 *선언*으로 남겨둘 뿐, admission 로직을 실제로 제한하지 않는다(동작점이 답).
-        분모 = `_STAGGERING_TARGET_MB`(=2), window.capacity 보다 크지 않게 clamp.
-        """
-        divisor = min(_STAGGERING_TARGET_MB, self.window.capacity)
-        if divisor <= 0:
-            return self.kv_accountant.capacity
-        return self.kv_accountant.capacity // divisor
-
-    def _invoke_admission(self) -> MicroBatchSpec | None:
-        # Phase-2 S2 — 동작점 former (§2.5). cycle 측정·payload 인자 전부 제거 — layer1 은
-        # 디코더를 Σkv 동작점(25M)까지 admit + prefill 512 고정. max_mb_kv_tokens 는 비바인딩
-        # 선언(per-mb 30M, 목표 25M 이 먼저 멈춤 — _per_mb_kv_budget 각주).
-        return self.admission.layer1(max_mb_kv_tokens=self._per_mb_kv_budget())
 
     def run_until_empty(self) -> int:
         n = 0

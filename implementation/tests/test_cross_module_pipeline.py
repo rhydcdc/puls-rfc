@@ -65,9 +65,10 @@ def _fresh_core(seed: int | None = None):
 # =========================================================================
 
 def test_admission_to_dispatch_pim_op_time_chain(scheduler_core):
-    """O4.1 해소 — admission spec → MicroBatch → dispatcher.tick 의 진정한 chain."""
-    scheduler_core.request_queue.push(_make_req(0, kv_length=200))
-    scheduler_core.request_queue.push(_make_req(1, kv_length=300))
+    """O4.1 — admission(풀 보충) → decode-set 구성 → MicroBatch → dispatcher 의 chain.
+    풀 모델: decode KV 검증은 디코더(prompt_len=0)로 (새 PREFILL 요청은 decode_tokens 에 안 듦)."""
+    scheduler_core.request_queue.push(Request(id=0, prompt_len=0, kv_length=200))
+    scheduler_core.request_queue.push(Request(id=1, prompt_len=0, kv_length=300))
     scheduler_core._handle(Event(timestamp=0.0, type=EventType.ADMISSION_TICK, payload={}))
     mb = scheduler_core.dispatcher.micro_batches[0]
     expected_kv = 200 + 300

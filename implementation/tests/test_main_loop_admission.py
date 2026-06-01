@@ -9,6 +9,12 @@ def _make_req(req_id: int, kv_length: int = 10) -> Request:
     return Request(id=req_id, prompt_len=1, kv_length=kv_length)
 
 
+def _make_dec(req_id: int, kv_length: int = 10) -> Request:
+    """prompt_len=0 → admission(풀 보충) 후 즉시 DECODE 풀 (디코더). decode-set 구성 대상.
+    풀 모델: 새 요청은 PREFILL 부터라 decode_tokens 에 안 들어감 → decode KV 검증은 디코더로."""
+    return Request(id=req_id, prompt_len=0, kv_length=kv_length)
+
+
 def test_request_arrival_pushes_to_queue(scheduler_core):
     scheduler_core.queue.push(Event(
         timestamp=0.0, type=EventType.REQUEST_ARRIVAL,
@@ -52,17 +58,13 @@ def test_admission_tick_admits_and_dispatches(scheduler_core):
 
 
 def test_admission_tick_assigns_monotonic_mb_id(scheduler_core):
-    """3 회 _handle(ADMISSION_TICK) 직접 호출 → mb_id 0,1,2 단조 증가.
-    Queue ordering (KERNEL_COMPLETION 와 ADMISSION_TICK race) 회피 위해
-    white-box _handle 직접 호출."""
-    for i in range(3):
-        scheduler_core.request_queue.push(_make_req(i))
-        scheduler_core._handle(Event(
-            timestamp=float(i), type=EventType.ADMISSION_TICK, payload={},
-        ))
-        scheduler_core.dispatcher.gpu_busy = False
-        scheduler_core.dispatcher.pim_busy = False
-    assert scheduler_core._next_mb_id == 3
+    """풀 모델 — 한 ADMISSION_TICK 이 window 를 활성 목표(2)까지 채움(디코더 풍부 시).
+    mb_id 단조 증가(0,1)."""
+    for i in range(4):
+        scheduler_core.request_queue.push(_make_dec(i, kv_length=7_000_000))   # 2개서 12.3M 초과
+    scheduler_core._handle(Event(timestamp=0.0, type=EventType.ADMISSION_TICK, payload={}))
+    assert sorted(scheduler_core.dispatcher.micro_batches.keys()) == [0, 1]     # 2 active(목표)
+    assert scheduler_core._next_mb_id == 2
 
 
 def test_admission_tick_payload_dummy_values_safe(scheduler_core):
@@ -99,24 +101,16 @@ def test_admission_tick_then_completion_natural_progression(scheduler_core):
     assert scheduler_core.dispatcher.pim_busy is False
 
 
-def test_window_full_admission_deferred(scheduler_core):
-    """Impl-9 — window full 위 admission pre-check (auto-evict path 비활성).
+def test_window_fills_to_active_target_not_capacity(scheduler_core):
+    """풀 모델 — _fill_window 는 활성 목표(2 = _STAGGERING_TARGET_MB)까지만 채움(capacity 3
+    의 '2 active + 1 전이 여유', OPERATING_POINT §3). 디코더 풍부해도 window ≤ 2.
 
-    *기존 'window_eviction_during_admission_dag_consistency' 의 Impl-9 ARCH-compliant 갱신.*
-    Auto-evict (capacity overflow) 은 *defensive* 영역. Pre-check 으로 4번째 admission 은
-    window full 검출 시 spec=None (deferred) → window 는 first 3 (0, 1, 2) 유지.
+    *기존 test_window_full_admission_deferred(capacity-3 deferral)의 풀 모델 갱신.*
     """
-    for i in range(4):
-        scheduler_core.request_queue.push(_make_req(i))
-        scheduler_core._handle(Event(
-            timestamp=float(i), type=EventType.ADMISSION_TICK, payload={},
-        ))
-        scheduler_core.dispatcher.gpu_busy = False
-        scheduler_core.dispatcher.pim_busy = False
-    # Pre-check 으로 4번째 admission deferred — window 는 first 3 mbs 보유
-    assert scheduler_core.window.current_ids() == (0, 1, 2)
-    # 4번째 req (id=3) 는 admission deferred — request_queue 잔존
-    assert len(scheduler_core.request_queue) == 1
+    for i in range(6):
+        scheduler_core.request_queue.push(_make_dec(i, kv_length=5_000_000))   # 풍부
+    scheduler_core._handle(Event(timestamp=0.0, type=EventType.ADMISSION_TICK, payload={}))
+    assert len(scheduler_core.window.current_ids()) == 2     # 목표 2 (< capacity 3)
 
 
 def test_request_arrival_payload_missing_request_key_raises(scheduler_core):
@@ -141,9 +135,10 @@ def test_admission_tick_converts_spec_to_micro_batch(scheduler_core):
 
 
 def test_admission_tick_micro_batch_carries_kv_rows_total(scheduler_core):
-    """등록된 mb.kv_rows_total == Σ kv_length over admitted reqs."""
-    scheduler_core.request_queue.push(_make_req(0, kv_length=100))
-    scheduler_core.request_queue.push(_make_req(1, kv_length=250))
+    """등록된 mb.kv_rows_total == Σ kv_length over decode-set (디코더). 풀 모델: decode KV 는
+    디코더(prompt_len=0)서 나옴 — 새 PREFILL 요청은 decode_tokens 에 안 들어감."""
+    scheduler_core.request_queue.push(_make_dec(0, kv_length=100))
+    scheduler_core.request_queue.push(_make_dec(1, kv_length=250))
     scheduler_core._handle(Event(timestamp=0.0, type=EventType.ADMISSION_TICK, payload={}))
     mb = scheduler_core.dispatcher.micro_batches[0]
     assert mb.kv_rows_total == 100 + 250
@@ -155,15 +150,13 @@ def test_admission_tick_no_spec_no_register(scheduler_core):
     assert len(scheduler_core.dispatcher.micro_batches) == 0
 
 
-def test_admission_tick_multiple_ticks_unique_mb_ids(scheduler_core):
-    """다회 ADMISSION_TICK → mb_id 0, 1, 2 단조."""
-    for i in range(3):
-        scheduler_core.request_queue.push(_make_req(i, kv_length=10))
-        scheduler_core._handle(Event(timestamp=float(i), type=EventType.ADMISSION_TICK, payload={}))
-        scheduler_core.dispatcher.gpu_busy = False
-        scheduler_core.dispatcher.pim_busy = False
+def test_admission_tick_unique_mb_ids(scheduler_core):
+    """풀 모델 — 구성된 μ-batch 들의 id 가 고유·단조(0,1). window 활성 목표 2."""
+    for i in range(4):
+        scheduler_core.request_queue.push(_make_dec(i, kv_length=7_000_000))
+    scheduler_core._handle(Event(timestamp=0.0, type=EventType.ADMISSION_TICK, payload={}))
     registered_ids = sorted(scheduler_core.dispatcher.micro_batches.keys())
-    assert registered_ids == [0, 1, 2]
+    assert registered_ids == [0, 1]
 
 
 def test_admission_tick_register_before_window_admit(scheduler_core):

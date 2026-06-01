@@ -34,27 +34,9 @@ def test_request_prefill_processed_advances_monotonic():
     assert req.prefill_processed == req.prompt_len
 
 
-# ---- Admission.layer1 — Hybrid base = prefill_chunk_default ----
-
-def test_admission_layer1_uses_prefill_chunk_default_as_base(dummy_config):
-    """Impl-10-pre-2 — Hybrid policy 의 base = prefill_chunk_default (Sarathi/vLLM 영역 정합)."""
-    cfg = dummy_config
-    rq = RequestQueue(capacity=cfg.admission.request_queue_capacity)
-    kv = KVAccountant(capacity=cfg.admission.kv_capacity_aggregate)
-    tel = IdleTelemetry()
-    tel.reset(0.0)
-    adm = Admission(
-        admission_cfg=cfg.admission, request_queue=rq, kv_accountant=kv,
-        idle_telemetry=tel,
-    )
-    req = Request(id=0, prompt_len=100, kv_length=100, max_tokens=5)
-    rq.push(req)
-    # S2 마이그레이션 — 옛 balance 인자(t_proj·a_cycle·ctx_tokens) 삭제(§2.5). former-v2 는
-    # prefill = prefill_chunk_default 고정(동적 chunk 사이징 없음).
-    spec = adm.layer1()
-    assert spec is not None
-    # Base = prefill_chunk_default (256), 동적 조정 없음
-    assert spec.prefill_chunk_tokens == cfg.admission.prefill_chunk_default
+# test_admission_layer1_uses_prefill_chunk_default_as_base 삭제 — layer1(admission cohort)
+# 폐기(풀 모델). prefill 예산 = config.prefill_chunk_default 는 main_loop 구성서 _populate
+# 호출 시 전달(test_prefill_steering_* 가 분배 검증). admission 분리는 acceptance/lifecycle 커버.
 
 
 # ---- Dispatcher — PREFILL_ATTN chunk-scaled op_time ----
@@ -273,11 +255,12 @@ def test_prefill_steering_age_cap_forces_starved(scheduler_core):
     assert len(prefill_chunk[1]) >= 1            # 강제 배정
 
 
-def test_prefill_steering_zero_token_req_keeps_membership(scheduler_core):
-    """★ steering 이 0토큰 준 요청도 prefill_chunk 에 빈 list 로 남음 — _recompose_mb 가 슬롯
-    멤버를 prefill_chunk 키로 도출하므로 키가 빠지면 in_flight 고아 → 영원히 안 끝남(회귀 가드)."""
+def test_prefill_steering_zero_token_req_stays_in_pool(scheduler_core):
+    """풀 모델 — steering 이 0토큰 준 요청은 prefill_chunk 에 *안 들어감*(이 μ-batch 미assign,
+    풀 잔류 → 다음 구성 재선택) + prefill_wait++(age-cap). (sticky 모델의 빈-chunk 멤버십 유지를
+    풀 모델선 제거 — mb 를 미진행 요청으로 부풀려 prefill 256 과분산·decode 고갈 회귀 방지.)"""
     near = _prefill_req(0, 100_000)
     deep = _prefill_req(1, 2_000_000)            # 너무 깊어 steering 0토큰
     prefill_chunk, _, _ = scheduler_core._populate_mb_phases([near, deep], 256)
-    assert 1 in prefill_chunk and prefill_chunk[1] == []    # 멤버십 유지(빈 chunk)
-    assert deep.prefill_wait == 1                            # 0토큰 → 대기 누적
+    assert 1 not in prefill_chunk                # 0토큰 → mb 에 안 넣음(풀 잔류)
+    assert deep.prefill_wait == 1                # 0토큰 → 대기 누적(age-cap)
