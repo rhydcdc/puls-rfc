@@ -49,12 +49,11 @@ def test_admission_layer1_uses_prefill_chunk_default_as_base(dummy_config):
     )
     req = Request(id=0, prompt_tokens=[0] * 100, kv_length=100, max_tokens=5)
     rq.push(req)
-    spec = adm.layer1(
-        t_proj=1e9, t_pim_fn=lambda n: 0.0,
-        a_cycle=10.0, b_cycle=10.0, ctx_tokens=100,    # balanced → no adjustment
-    )
+    # S2 마이그레이션 — 옛 balance 인자(t_proj·a_cycle·ctx_tokens) 삭제(§2.5). former-v2 는
+    # prefill = prefill_chunk_default 고정(동적 chunk 사이징 없음).
+    spec = adm.layer1()
     assert spec is not None
-    # Base = prefill_chunk_default (512), balance 위 변경 0 (in-band)
+    # Base = prefill_chunk_default (256), 동적 조정 없음
     assert spec.prefill_chunk_tokens == cfg.admission.prefill_chunk_default
 
 
@@ -81,7 +80,9 @@ def test_dispatcher_prefill_attn_chunk_scaled(
     # Stage 2 — FlashAttention causal: 2 × 512 × hidden × (prefill_processed + 512)
     # prefill_processed default = 0 → ctx = 512
     expected_flops = 2 * 512 * dummy_config.model.hidden * 512
-    peak = dummy_config.calibration.gpu_fp16_dense_peak_tflops * 1e12 * dummy_config.calibration.gpu_mfu_default
+    # TP=8 마이그레이션(40e812a) — GEMM 이 num_gpus_instance_a 장에 분산 (peak ×8).
+    peak = (dummy_config.calibration.gpu_fp16_dense_peak_tflops * 1e12
+            * dummy_config.calibration.gpu_mfu_default * dummy_config.hw.num_gpus_instance_a)
     expected_us = expected_flops / peak * 1e6
     assert d._op_time(node) == pytest.approx(expected_us)
 
@@ -151,7 +152,9 @@ def test_dispatcher_prefill_attn_multi_req_chunk_sum(
     # Stage 2 — multi-req per-req sum: 2 × Σ(chunk × ctx_so_far)
     # 2 reqs × chunk=256, prefill_processed=0 → 각 req FLOPs = 2 × 256 × hidden × 256
     expected_flops = 2 * (2 * 256 * dummy_config.model.hidden * 256)
-    peak = dummy_config.calibration.gpu_fp16_dense_peak_tflops * 1e12 * dummy_config.calibration.gpu_mfu_default
+    # TP=8 마이그레이션(40e812a) — peak ×num_gpus_instance_a.
+    peak = (dummy_config.calibration.gpu_fp16_dense_peak_tflops * 1e12
+            * dummy_config.calibration.gpu_mfu_default * dummy_config.hw.num_gpus_instance_a)
     expected_us = expected_flops / peak * 1e6
     assert d._op_time(node) == pytest.approx(expected_us)
 
@@ -195,3 +198,67 @@ def test_prefill_chunk_op_time_deterministic(
     node = dag.get_node(0, NodeType.PREFILL_ATTN)
     results = [d._op_time(node) for _ in range(1000)]
     assert len(set(results)) == 1
+
+
+# =========================================================================
+# former-v2 prefill steering — _populate_mb_phases (OPERATING_POINT §3)
+# =========================================================================
+#
+# prefill 토큰 256 고정, 분배로 depth-합(Σ chunk×depth)을 25.6M 에 맞춤. ideal=
+# (target−W)/(budget−t) 깊이 최근접 멤버에 토큰 배정. ragged chunk 허용(B 는 batch
+# 총 토큰수만 봄). _populate_mb_phases 는 self.config 만 쓰므로 scheduler_core fixture 로 직접.
+
+
+def _prefill_req(req_id: int, depth: int, headroom: int = 300) -> Request:
+    """depth(prefill_processed) 까지 처리됐고 headroom 만큼 프롬프트 남은 prefill 요청."""
+    r = Request(id=req_id, prompt_tokens=[0] * (depth + headroom))
+    r.prefill_processed = depth
+    return r
+
+
+def _depth_work(prefill_chunk: dict[int, list[int]]) -> int:
+    """Σ over reqs Σ(배정 토큰의 causal 깊이) — chunk = range(pp, pp+c) 라 위치합 = depth-work."""
+    return sum(sum(positions) for positions in prefill_chunk.values())
+
+
+def test_prefill_steering_total_tokens_fixed(scheduler_core):
+    """분배 후 총 prefill 토큰 = budget(256) (남은 프롬프트 충분할 때)."""
+    reqs = [_prefill_req(0, 80_000), _prefill_req(1, 120_000)]
+    prefill_chunk, _, _ = scheduler_core._populate_mb_phases(reqs, 256)
+    assert sum(len(c) for c in prefill_chunk.values()) == 256
+
+
+def test_prefill_steering_avoids_overshoot_on_deep(scheduler_core):
+    """ideal(100K) 근접 멤버가 토큰 독식, 과도하게 깊은 멤버는 ~0 → depth-합이 균등분배보다
+    25.6M 에 가깝다(깊은 멤버에 토큰 주면 오버슈트)."""
+    near, deep = _prefill_req(0, 100_000), _prefill_req(1, 300_000)
+    prefill_chunk, _, _ = scheduler_core._populate_mb_phases([near, deep], 256)
+    assert len(prefill_chunk.get(0, [])) > len(prefill_chunk.get(1, []))
+    target = scheduler_core.config.admission.prefill_kv_work_target_tokens
+    w_steered = _depth_work(prefill_chunk)
+    w_uniform = 128 * 100_000 + 128 * 300_000   # 균등분배(128 each) 근사
+    assert abs(w_steered - target) < abs(w_uniform - target)
+
+
+def test_prefill_steering_prefers_closer_to_ideal_depth(scheduler_core):
+    """둘 다 얕아도(ideal 100K 미만) 더 깊은(=ideal 근접) 멤버가 더 받음."""
+    shallow, mid = _prefill_req(0, 50_000), _prefill_req(1, 90_000)
+    prefill_chunk, _, _ = scheduler_core._populate_mb_phases([shallow, mid], 256)
+    assert len(prefill_chunk.get(1, [])) > len(prefill_chunk.get(0, []))
+
+
+def test_prefill_single_req_gets_budget(scheduler_core):
+    """prefill 멤버 1개면 budget 전량 + chunk = range(depth, depth+256) (causal 연속)."""
+    prefill_chunk, _, processed = scheduler_core._populate_mb_phases(
+        [_prefill_req(0, 100_000)], 256)
+    assert prefill_chunk[0] == list(range(100_000, 100_256))
+    assert processed[0] == 100_000
+
+
+def test_prefill_decode_only_no_chunk(scheduler_core):
+    """프롬프트 소진(prefill_processed ≥ len) 요청은 decode_tokens 로, prefill_chunk 제외."""
+    done = Request(id=0, prompt_tokens=[0] * 100)
+    done.prefill_processed = 100
+    prefill_chunk, decode_tokens, _ = scheduler_core._populate_mb_phases([done], 256)
+    assert 0 not in prefill_chunk
+    assert decode_tokens == {0: 0}

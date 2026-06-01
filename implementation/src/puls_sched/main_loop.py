@@ -154,8 +154,8 @@ class SchedulerCore:
                         if req.state == RequestState.PENDING:
                             req.transition_to(RequestState.PREFILL)
                         self.in_flight_requests[req.id] = req
-                    # ARCH §5.2 uniform-chunk + B option (PIM-slack) —
-                    # spec.prefill_chunk_tokens = TOTAL budget. Distribute uniformly across prefill reqs.
+                    # former-v2 — spec.prefill_chunk_tokens = TOTAL budget(256). prefill
+                    # steering 으로 멤버들에 분배(depth-합 25.6M 목표, _populate_mb_phases).
                     prefill_chunk, decode_tokens, prefill_processed = self._populate_mb_phases(
                         spec.decode_requests, spec.prefill_chunk_tokens,
                     )
@@ -282,15 +282,21 @@ class SchedulerCore:
     def _populate_mb_phases(
         self, reqs, chunk_budget_total: int,
     ) -> tuple[dict[int, list[int]], dict[int, int], dict[int, int]]:
-        """Impl-10-pre-2 (O9.1 + O9.2 + B, S1 fix) — mb phase 분리 + Option A 분배.
+        """Phase-2 former-v2 — mb phase 분리 + prefill steering (OPERATING_POINT §3).
 
-        ARCH §5.2 uniform-chunk + 사용자 의도 정합. Impl-10 main — *prefill_processed dict*
-        동시 산출 (PREFILL_ATTN causal ctx 산출 입력, ARCH §3.5.2 정합).
+        prefill 토큰 *총수* 는 256 고정(= FFN batch 기여분, decode 와 함께 batch 형성)이되,
+        그 256 을 prefill 멤버들에 *어떻게 나누는가* 로 GPU-A PREFILL_ATTN 의 **depth-합**
+        (Σ chunk×depth)을 동작점 25.6M(`prefill_kv_work_target_tokens`)에 맞춘다. decode
+        steering 과 동형의 로컬 그리디: 매 토큰마다 `ideal=(target−W)/(budget−t)` 깊이에
+        가장 가까운 멤버에 1 토큰 배정 → depth-합이 목표에 자기보정 수렴.
 
-        Total GPU PREFILL_ATTN work = N × chunk_uniform × per_token ≈ t_pim × margin − t_proj
-        → t_qkv + t_prefill_attn + t_oproj ≈ t_pim × margin → 양쪽 idle 최소.
+        깊은(off-ideal) 멤버는 적게, 얕은 멤버는 많이 받는다(causal: j-번째 토큰 깊이 =
+        prefill_processed + j). 멤버별 chunk 가 달라도(ragged) FFN(B)은 batch *총 토큰수* 만
+        보므로 fixed-shape 핸드오프와 무관(OPERATING_POINT §3, 사용자 확인 2026-06-02) —
+        straggler 제거는 PIM 의 attention 길이변동 흡수에서 오지 prefill chunk 균등이 아님.
 
-        Edge case: N > budget → chunk_per_req=0 → prefill_chunk 비어 있음 (decode-only cycle).
+        Impl-10 main — *prefill_processed dict* 동시 산출(PREFILL_ATTN causal ctx 입력).
+        Edge: 남은 프롬프트 토큰 < budget → 가능한 만큼만(decode-only cycle 이면 prefill 빔).
         Returns (prefill_chunk, decode_tokens, prefill_processed).
         """
         prefill_chunk: dict[int, list[int]] = {}
@@ -304,17 +310,32 @@ class SchedulerCore:
             else:
                 decode_tokens[req.id] = 0
         if prefill_reqs and chunk_budget_total > 0:
-            n_prefill = len(prefill_reqs)
-            chunk_per_req = chunk_budget_total // n_prefill
-            min_remaining = min(r[1] for r in prefill_reqs)
-            chunk_uniform = min(chunk_per_req, min_remaining)
-            if chunk_uniform > 0:
-                for req, _ in prefill_reqs:
-                    prefill_chunk[req.id] = list(range(
-                        req.prefill_processed, req.prefill_processed + chunk_uniform,
+            target_work = self.config.admission.prefill_kv_work_target_tokens
+            by_id = {req.id: req for req, _ in prefill_reqs}
+            remaining = {req.id: rem for req, rem in prefill_reqs}
+            alloc = {req.id: 0 for req, _ in prefill_reqs}
+            budget = min(chunk_budget_total, sum(remaining.values()))
+            W = 0      # 누적 depth-work = Σ(배정 토큰의 causal 깊이)
+            t = 0      # 누적 배정 토큰
+            while t < budget:
+                ideal = (target_work - W) / (budget - t)   # 다음 토큰이 있어야 할 깊이
+                cand = [rid for rid in alloc if alloc[rid] < remaining[rid]]
+                if not cand:
+                    break
+                # 다음 토큰의 깊이 = prefill_processed + 이미 배정한 수 (causal)
+                pick = min(cand, key=lambda rid: abs(
+                    (by_id[rid].prefill_processed + alloc[rid]) - ideal))
+                W += by_id[pick].prefill_processed + alloc[pick]
+                alloc[pick] += 1
+                t += 1
+            for rid, c in alloc.items():
+                if c > 0:
+                    req = by_id[rid]
+                    prefill_chunk[rid] = list(range(
+                        req.prefill_processed, req.prefill_processed + c,
                     ))
                     # Impl-10 main — req.prefill_processed 시점 snapshot (causal ctx 산출 입력)
-                    prefill_processed[req.id] = req.prefill_processed
+                    prefill_processed[rid] = req.prefill_processed
         return prefill_chunk, decode_tokens, prefill_processed
 
     def _per_mb_kv_budget(self) -> int:
