@@ -61,11 +61,6 @@ class SchedulerCore:
     # *forward pass = L × cycle* literal 의 production hot path 영역 wiring.
     # gpu_instance_b activity recording + fixed-shape handoff defensive validation.
     instance_pipeline: Optional[InstancePipeline] = None
-    # ---- Impl-10-pre-1 (B) — per-iteration cycle measurement snapshot. ----
-    # 이전 ADMISSION_TICK 시점의 IdleTelemetry active_duration 누적값. _measure_cycles 가
-    # 현 누적값과 delta 산출 → a_cycle / b_cycle (ARCH §6.4 'previous iteration measurement').
-    _prev_a_active_snapshot: float = 0.0
-    _prev_b_active_snapshot: float = 0.0
 
     def on_admission_tick(self, callback: AdmissionTickCallback) -> None:
         """Admission tick snapshot capture 위 callback 등록 (Impl-8 D1 hook).
@@ -75,17 +70,13 @@ class SchedulerCore:
         """
         self._admission_tick_callbacks.append(callback)
 
-    def _fire_admission_tick(
-        self,
-        spec: "MicroBatchSpec | None",
-        a_cycle: float,
-        b_cycle: float,
-        ctx_tokens: int,
-    ) -> None:
+    def _fire_admission_tick(self, spec: "MicroBatchSpec | None") -> None:
         """등록된 callback 들에게 admission tick snapshot 통지 (Impl-8 D1 hook fire).
 
-        Spec=None (admission 실패 path) 도 snapshot 누적 — empty admission tick 도
-        convergence trace 의 의미 있는 entry (admission cadence 자연 series).
+        Phase-2 S2 (§2.5) — 동작점 고정으로 cycle 측정 기계장치 삭제. a_cycle/b_cycle 는
+        admission 경로에서 산출하지 않음(=0) — idle_telemetry 기반 사후 진단은 evaluator 가
+        담당(밸런스 입력에서 분리). snapshot 은 진단용으로만 보존. n = admit 된 디코더 수.
+        Spec=None (admission 실패 path) 도 snapshot 누적.
         """
         if not self._admission_tick_callbacks:
             return
@@ -94,11 +85,11 @@ class SchedulerCore:
             timestamp=self.clock.now,
             gpu_idle_fraction=self.admission.idle_telemetry.gpu_idle_fraction(),
             pim_idle_fraction=self.admission.idle_telemetry.pim_idle_fraction(),
-            a_cycle=a_cycle,
-            b_cycle=b_cycle,
-            ctx_tokens=ctx_tokens,
+            a_cycle=0.0,
+            b_cycle=0.0,
+            ctx_tokens=0,
             spec_admitted=(spec is not None),
-            n=spec.n if spec else 0,
+            n=len(spec.decode_requests) if spec else 0,
         )
         for cb in self._admission_tick_callbacks:
             cb(snapshot)
@@ -127,7 +118,7 @@ class SchedulerCore:
                     self.dispatcher.tick()
                     # STEP 2.5 — 완료 = iteration 경계 = admit 기회 (event-driven admission).
                     if self.enable_admission_tick_rescheduling:
-                        self._schedule_admission_tick_with_default_payload()
+                        self._schedule_admission_tick()
                     return
                 self.dispatcher.on_completion(event)
                 # Impl-6 (Q5) — O_PROJ done 분기 → LayerState.advance → L 도달 시 token decode signal
@@ -135,28 +126,25 @@ class SchedulerCore:
                 self.dispatcher.tick()
                 # STEP 2.5 — 완료 시 admission (자원이 비는 유일 시점). 고정 타이머 self-push 폐기.
                 if self.enable_admission_tick_rescheduling:
-                    self._schedule_admission_tick_with_default_payload()
+                    self._schedule_admission_tick()
             case EventType.REQUEST_ARRIVAL:
                 req = event.payload["request"]
                 self.request_queue.push(req)
                 # Impl-9 Q1 — Arrival re-wakes admission chain (idle guard 의 dual entry).
                 # ARCH §6.4 'per-iteration admission' 의 arrival-driven 재기동 의미 정합.
                 if self.enable_admission_tick_rescheduling:
-                    self._schedule_admission_tick_with_default_payload()
+                    self._schedule_admission_tick()
             case EventType.ADMISSION_TICK:
-                # Impl-8 — admission tick hook 위 spec + cycle 값 산출 (snapshot fire 영역)
-                a_cycle = event.payload.get("a_cycle", 0.0)
-                b_cycle = event.payload.get("b_cycle", 0.0)
-                ctx_tokens = event.payload.get("ctx_tokens", 0)
+                # Phase-2 S2 (§2.5) — 동작점 고정으로 payload trivial. cycle 측정 인자 없음.
                 # Impl-9 — Window full 시 admission 대기 (ARCH §6.7 '3-μ-batch in-flight window' 의미).
                 # Auto-evict (window.admit overflow) 는 *defensive* 영역으로 격하.
                 if len(self.window.current_ids()) >= self.window.capacity:
-                    self._fire_admission_tick(None, a_cycle, b_cycle, ctx_tokens)
+                    self._fire_admission_tick(None)
                     # STEP 2.5 — window full 이면 다음 완료(evict) 시 admission 재기동.
                     # 고정 타이머 self-push 폐기 (헛도는 tick 차단).
                     return
-                spec = self._invoke_admission(event)
-                self._fire_admission_tick(spec, a_cycle, b_cycle, ctx_tokens)
+                spec = self._invoke_admission()
+                self._fire_admission_tick(spec)
                 if spec is not None:
                     mb_id = self._next_mb_id
                     self._next_mb_id += 1
@@ -186,14 +174,14 @@ class SchedulerCore:
                 # STEP 2.5 — 고정 타이머 self-push 폐기. 다음 admission 은 완료
                 # (KERNEL_COMPLETION) 또는 신규 도착(REQUEST_ARRIVAL) 시 재기동.
 
-    def _schedule_admission_tick_with_default_payload(self) -> None:
+    def _schedule_admission_tick(self) -> None:
         """완료(KERNEL_COMPLETION) / 신규 도착(REQUEST_ARRIVAL) 시 admission 재기동.
 
-        STEP 2.5 — 고정 타이머 self-push (`_schedule_next_admission_tick`) 폐기 후
-        admission 의 유일한 재기동 경로. 이벤트 기반: 자원이 비는 시점(완료)과 새 일감
-        도착 시점에만 admission tick push → 헛도는 tick 제거 (REPORT §10).
+        STEP 2.5 — 고정 타이머 self-push 폐기 후 admission 의 유일한 재기동 경로. 이벤트
+        기반: 자원이 비는 시점(완료)과 새 일감 도착 시점에만 admission tick push.
 
-        Impl-10-pre-1 (B)~(B''') — 'default' = scheduler 자기 상태 위 *진정 측정 payload*.
+        Phase-2 S2 (§2.5) — 동작점 고정으로 payload trivial(빈 dict). former 는 KV 합·prefill
+        512 만 보므로 cycle 측정 payload 산출(`_compose_admission_payload`) 삭제.
         """
         if len(self.request_queue) == 0 and len(self.in_flight_requests) == 0:
             return
@@ -201,113 +189,8 @@ class SchedulerCore:
         self.queue.push(Event(
             timestamp=next_t,
             type=EventType.ADMISSION_TICK,
-            payload=self._compose_admission_payload(),
+            payload={},
         ))
-
-    def _compose_admission_payload(self) -> dict:
-        """ADMISSION_TICK 의 5 개 payload 입력 산출 (Impl-10-pre-1 (B)~(B''')).
-
-        Impl-10 main (Stage 2) — *Stage 1 dummy lookup 영역 폐기*. 사용자 의도 정합 위
-        모든 timing 영역 spec-derived per-mb 산출 (ARCH §3.5.2 Computed Wait literal).
-
-        - (B) a_cycle / b_cycle — IdleTelemetry active_duration delta (이전 ADMISSION_TICK 대비)
-        - (B') t_proj — last dispatched mb 위 spec-derived (QKV + O_PROJ, compute_gpu_op_time_s)
-        - (B'') t_pim_fn — PIMExecutor.op_time 의 closure (avg kv_length 위 동적)
-        - (B''') ctx_tokens — in_flight_requests 의 max kv_length (deadband ctx-tier 입력)
-        - gpu_op_time_per_token_us — last mb 위 spec-derived per-token (PREFILL_ATTN / chunk)
-        """
-        from puls_sched.config import compute_gpu_op_time_s
-
-        a_cycle, b_cycle = self._measure_cycles()
-        ctx_tokens = max(
-            (r.kv_length for r in self.in_flight_requests.values()), default=0,
-        )
-
-        # Stage 2 — Path C: last dispatched mb 위 spec-derived 산출 (정확, 평균/dummy 0).
-        # Cold start (no mb yet) 위 fallback = 0.0 (admission balance 위 cold start anchor).
-        last_mb = self._last_dispatched_mb()
-        # Phase-2 — Instance A TP=num_gpus_instance_a 분산 (dispatcher·PIM 단위 통일).
-        n_gpu_a = self.config.hw.num_gpus_instance_a
-        if last_mb is not None:
-            t_qkv_s = compute_gpu_op_time_s(
-                NodeType.QKV, last_mb, self.config.calibration, self.config.model,
-                num_gpus=n_gpu_a,
-            )
-            t_oproj_s = compute_gpu_op_time_s(
-                NodeType.O_PROJ, last_mb, self.config.calibration, self.config.model,
-                num_gpus=n_gpu_a,
-            )
-            t_proj_us = (t_qkv_s + t_oproj_s) * 1e6
-            # per-token = PREFILL_ATTN total / chunk total (last mb 위 per-token 영역)
-            chunk_total = sum(len(v) for v in last_mb.prefill_chunk.values())
-            if chunk_total > 0:
-                t_pattn_s = compute_gpu_op_time_s(
-                    NodeType.PREFILL_ATTN, last_mb, self.config.calibration, self.config.model,
-                    num_gpus=n_gpu_a,
-                )
-                per_token_us = (t_pattn_s * 1e6) / chunk_total
-            else:
-                # Decode-only last mb — per-token spec-derived 위 평균 ctx 산출
-                avg_ctx = ctx_tokens if ctx_tokens > 0 else 1
-                peak_FLOPS = (
-                    self.config.calibration.gpu_fp16_dense_peak_tflops * 1e12
-                    * self.config.calibration.gpu_mfu_default * n_gpu_a
-                )
-                per_token_us = (2 * self.config.model.hidden * avg_ctx / peak_FLOPS) * 1e6
-        else:
-            t_proj_us = 0.0
-            per_token_us = 0.0
-
-        return {
-            "t_proj": t_proj_us,
-            "t_pim_fn": self._make_t_pim_fn(),
-            "a_cycle": a_cycle,
-            "b_cycle": b_cycle,
-            "ctx_tokens": ctx_tokens,
-            "gpu_op_time_per_token_us": per_token_us,
-        }
-
-    def _last_dispatched_mb(self):
-        """Last dispatched mb (가장 최근 register 된 mb) 위 spec-derived 산출 입력."""
-        if not self.dispatcher.micro_batches:
-            return None
-        last_id = max(self.dispatcher.micro_batches.keys())
-        return self.dispatcher.micro_batches[last_id]
-
-    def _measure_cycles(self) -> tuple[float, float]:
-        """Impl-10-pre-1 (B) — 이전 ADMISSION_TICK 대비 a_cycle / b_cycle delta 산출.
-
-        a_cycle = Instance A 의 (gpu_instance_a + pim_instance_a) active 증가분
-        b_cycle = Instance B 의 (gpu_instance_b) active 증가분
-        """
-        tel = self.admission.idle_telemetry
-        cur_a = tel.active_duration("gpu_instance_a") + tel.active_duration("pim_instance_a")
-        cur_b = tel.active_duration("gpu_instance_b")
-        delta_a = max(0.0, cur_a - self._prev_a_active_snapshot)
-        delta_b = max(0.0, cur_b - self._prev_b_active_snapshot)
-        self._prev_a_active_snapshot = cur_a
-        self._prev_b_active_snapshot = cur_b
-        return delta_a, delta_b
-
-    def _make_t_pim_fn(self):
-        """Impl-10-pre-1 (B'') — PIMExecutor.op_time closure (in_flight_requests 의 avg kv 위 동적).
-
-        Impl-10-pre-2 — k_channels 매개변수 폐기 (sequence-parallel PIM 위 무의미).
-        Signature: fn(n_decode) → float (단위 = µs).
-
-        STEP 5 단위 버그 수정 — PIMExecutor.op_time() 은 ns 반환. balance_pim_slack 은 이를
-        t_proj(µs)와 빼므로 **µs 로 변환(× 1e-3)해야 함** (dispatcher._op_time 의 PIM ×1e-3
-        convention 과 동일). 미변환 시 t_pim 이 1000× 부풀어 prefill chunk 예산 과대 →
-        GPU 과포화·PIM 유휴. dispatcher 는 Stage 2 에 정정됐으나 이 admission 경로는 누락됐었음.
-        """
-        in_flight = self.in_flight_requests
-        pim_executor = self.dispatcher.pim_executor
-        def fn(n_decode: int) -> float:
-            if not in_flight or n_decode <= 0:
-                return 0.0
-            avg_kv = max(1, sum(r.kv_length for r in in_flight.values()) // len(in_flight))
-            return pim_executor.op_time(kv_rows_total=n_decode * avg_kv) * 1e-3  # ns → µs
-        return fn
 
     def _maybe_advance_forward_pass(self, event: Event, eos_seen: bool = False) -> None:
         """KERNEL_COMPLETION (FFN done) → LayerState.advance → L 도달 시 token decode signal.
@@ -367,9 +250,8 @@ class SchedulerCore:
                 self.in_flight_requests.pop(req_id, None)
         # 다음 token 의 forward pass 위 reset (multi-token decode 정합)
         mb.current_layer_index = 0
-        # Phase-2 S2 — 슬롯 재구성 (1) 잔여 req 재배치 + (2) 풀(queue)에서 연속 backfill.
-        # evict 판정 = 재구성 후에도 prefill_chunk·decode_tokens 모두 빔 (완료 + 풀 빔).
-        # 배치_생애 §종료 — 요청 단위 종료, 슬롯은 자연히 비면 evict.
+        # Phase-2 S2 — 슬롯 재구성 = 잔존 멤버 phase 전진만(backfill 없음, §2.5). evict 판정 =
+        # 재구성 후 prefill_chunk·decode_tokens 모두 빔(멤버 전원 완료). 배치_생애 §종료.
         self._recompose_mb(mb)
         if mb.prefill_chunk or mb.decode_tokens:
             self.dag.reset_micro_batch(mb.id)
@@ -380,16 +262,15 @@ class SchedulerCore:
     def _recompose_mb(self, mb: MicroBatch) -> None:
         """Phase-2 S2 — 슬롯의 다음 L-cycle 위 prefill_chunk + decode_tokens 갱신.
 
-        잔여 req(완료 안 된 것) sticky 유지 + 풀(queue)에서 빈 자리 연속 backfill.
-        Adaptive budget 보존 — mb.prefill_chunk_budget (admission 위 산출). Fallback = default.
+        잔존 멤버(완료 안 된 req)만 sticky 유지 + phase 전진(다음 토큰용). **풀에서 당겨오지
+        않음 — backfill 삭제(§2.5, 사용자 확정).** 밸런스가 정적 동작점으로 형성 시점에 이미
+        세 시간이 맞춰져, "균형 맞추려 이미 형성된 배치에 더 합류"시킬 이유가 사라짐. 완료된
+        멤버는 빠지고(슬롯 자연 축소), 새 부하는 새 μ-batch(ADMISSION_TICK former)로만 진입
+        → 풀→배치 진입 경로가 former 하나로 단일화.
         """
         budget = mb.prefill_chunk_budget if mb.prefill_chunk_budget > 0 else self.config.admission.prefill_chunk_default
         active_req_ids = set(mb.prefill_chunk.keys()) | set(mb.decode_tokens.keys())
         active_req_ids = {rid for rid in active_req_ids if rid in self.in_flight_requests}
-        # Phase-2 S2 — 풀(queue) 신규 요청을 이 슬롯의 빈 자리에 backfill (배치_생애 §4).
-        # prefill/decode 구분은 _populate_mb_phases 가 prompt 유무로 자동 분류. 유휴 게이트 없음.
-        joined_ids = self._backfill_slot(active_req_ids)
-        active_req_ids |= joined_ids
         active_reqs = [self.in_flight_requests[rid] for rid in active_req_ids]
         new_prefill_chunk, new_decode_tokens, new_prefill_processed = self._populate_mb_phases(
             active_reqs, budget,
@@ -397,46 +278,6 @@ class SchedulerCore:
         mb.prefill_chunk = new_prefill_chunk
         mb.decode_tokens = new_decode_tokens
         mb.prefill_processed = new_prefill_processed   # Impl-10 main — re-composition causal ctx refresh
-
-    def _backfill_slot(self, active_req_ids: set[int]) -> set[int]:
-        """Phase-2 S2 — 슬롯의 빈 자리에 풀(queue) 신규 요청을 연속 backfill (유휴 게이트 없음).
-
-        풀 모델 멤버십 = 용량: 자리(batch·KV) 있고 일감 있으면 무조건 들임 (배치_생애 §밸런스
-        "놀까봐 가져온다가 아니라 용량 있고 일감 있으니 넣는다"). prefill/decode 구분은
-        `_populate_mb_phases` 가 prompt 유무로 자동 분류.
-
-        가능량 = min(seq 여유, 전역 KV 여유, per-slot KV 예산). FIFO. KV 안 맞는 head 만나면
-        중단(head-of-line — 다음 완료 경계에서 캐파 회수 후 재시도). per-slot KV 예산은
-        2-슬롯 disjoint 분할의 원리적 한계 (한 슬롯이 KV 독점해 다른 슬롯 굶기는 것 방지).
-
-        Returns: backfill 된 신규 요청 id 집합 (kv_accountant.admit + in_flight 등록 완료).
-        """
-        seq_room = self.config.admission.max_batch_size - len(active_req_ids)
-        if seq_room <= 0:
-            return set()
-        # per-slot KV 예산 = 전역 KV / 활성 슬롯 목표(2). 한 슬롯의 KV 독점 방지 (disjoint 분할).
-        per_slot_kv = self._per_mb_kv_budget()
-        slot_kv = sum(
-            self.in_flight_requests[rid].kv_length
-            for rid in active_req_ids if rid in self.in_flight_requests
-        )
-        joined: set[int] = set()
-        while len(joined) < seq_room:
-            req = self.request_queue.peek_oldest()
-            if req is None:
-                break
-            if not self.kv_accountant.can_admit(req):
-                break  # 전역 KV 부족 → backfill 중단
-            if slot_kv + req.kv_length > per_slot_kv:
-                break  # per-slot KV 예산 초과 → 다른 슬롯 몫 보존
-            self.request_queue.pop_oldest()
-            self.kv_accountant.admit(req)
-            slot_kv += req.kv_length
-            if req.state == RequestState.PENDING:
-                req.transition_to(RequestState.PREFILL)
-            self.in_flight_requests[req.id] = req
-            joined.add(req.id)
-        return joined
 
     def _populate_mb_phases(
         self, reqs, chunk_budget_total: int,
@@ -477,31 +318,24 @@ class SchedulerCore:
         return prefill_chunk, decode_tokens, prefill_processed
 
     def _per_mb_kv_budget(self) -> int:
-        """Phase-2 — per-slot KV 예산 = 전역 KV / 활성 슬롯 목표(2). 2-슬롯 disjoint 분할의
-        *원리적* 한계 (Phase-1 의 "땜질" 아님).
+        """Phase-2 — per-slot KV 예산 = 전역 KV(60M) / 활성 슬롯 목표(2) = 30M. 2-슬롯 disjoint
+        분할(§0.8 A안)의 *선언적* 한계.
 
-        풀 모델 (나) 결정: 디코더를 2 active μ-batch 슬롯으로 disjoint 분할 → 더블 버퍼링
-        (A 내부 proj∥attn) + 인스턴스 A∥B(F3) overlap. 한 슬롯이 KV 독점하면 둘째 슬롯이
-        못 생겨 overlap 불가 → 슬롯당 KV 절반. 분모 = `_STAGGERING_TARGET_MB`(=2, 활성 슬롯
-        목표), window.capacity 보다 크지 않게 clamp (F2 ablation cap=1 → 분모 1 → 단일 슬롯).
+        ★ 실제 admission 엔 비바인딩(§0.8/§2.5 사용자 확정): layer1 은 동작점 목표 Σkv=25M 에서
+        먼저 멈추므로 이 30M 천장은 production 에서 절대 안 걸린다. 즉 "disjoint 2-슬롯 = 60M/2"
+        개념을 *선언*으로 남겨둘 뿐, admission 로직을 실제로 제한하지 않는다(동작점이 답).
+        분모 = `_STAGGERING_TARGET_MB`(=2), window.capacity 보다 크지 않게 clamp.
         """
         divisor = min(_STAGGERING_TARGET_MB, self.window.capacity)
         if divisor <= 0:
             return self.kv_accountant.capacity
         return self.kv_accountant.capacity // divisor
 
-    def _invoke_admission(self, event: Event) -> MicroBatchSpec | None:
-        t_proj = event.payload.get("t_proj", 0.0)
-        t_pim_fn = event.payload.get("t_pim_fn", lambda n: 0.0)
-        a_cycle = event.payload.get("a_cycle", 0.0)
-        b_cycle = event.payload.get("b_cycle", 0.0)
-        ctx_tokens = event.payload.get("ctx_tokens", 0)
-        gpu_op_time_per_token_us = event.payload.get("gpu_op_time_per_token_us", 0.0)
-        return self.admission.layer1(
-            t_proj, t_pim_fn, a_cycle, b_cycle, ctx_tokens,
-            gpu_op_time_per_token_us=gpu_op_time_per_token_us,
-            max_mb_kv_tokens=self._per_mb_kv_budget(),
-        )
+    def _invoke_admission(self) -> MicroBatchSpec | None:
+        # Phase-2 S2 — 동작점 former (§2.5). cycle 측정·payload 인자 전부 제거 — layer1 은
+        # 디코더를 Σkv 동작점(25M)까지 admit + prefill 512 고정. max_mb_kv_tokens 는 비바인딩
+        # 선언(per-mb 30M, 목표 25M 이 먼저 멈춤 — _per_mb_kv_budget 각주).
+        return self.admission.layer1(max_mb_kv_tokens=self._per_mb_kv_budget())
 
     def run_until_empty(self) -> int:
         n = 0

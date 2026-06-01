@@ -1,8 +1,6 @@
 from dataclasses import dataclass
-from typing import Callable
 
 from puls_sched.config import AdmissionConfig
-from puls_sched.deadband import in_band, lookup_width
 from puls_sched.idle_telemetry import IdleTelemetry
 from puls_sched.kv_accountant import KVAccountant
 from puls_sched.request import Request
@@ -13,7 +11,6 @@ from puls_sched.request_queue import RequestQueue
 class MicroBatchSpec:
     prefill_chunk_tokens: int
     decode_requests: tuple[Request, ...]
-    n: int
     kv_rows_total: int                                   # Impl-5 — Σ kv_length over decode_requests (signal flow to dispatcher, F5 활성화 path)
     kv_rows_lockstep: int                                # Impl-8 — max(kv_length) × num_decode_reqs (F5 ablation 위 lock-step penalty 산식)
 
@@ -25,101 +22,60 @@ class Admission:
     kv_accountant: KVAccountant
     idle_telemetry: IdleTelemetry
 
-    def mfu_floor(self, n: int) -> int:
-        return max(n, self.admission_cfg.n_sat)
+    def layer1(self, max_mb_kv_tokens: int | None = None) -> MicroBatchSpec | None:
+        """Phase-2 S2 동작점 former — 디코더를 KV 합 동작점(§0.8)까지 admit + prefill 512 고정.
 
-    def balance_inter_AB(
-        self,
-        prefill_chunk_tokens: int,
-        a_cycle: float,
-        b_cycle: float,
-        ctx_tokens: int,
-    ) -> int:
-        width = lookup_width(self.admission_cfg, ctx_tokens)
-        diff = a_cycle - b_cycle
-        if in_band(diff, width):
-            return prefill_chunk_tokens
-        if diff < 0:
-            return prefill_chunk_tokens + self.admission_cfg.n_sat
-        return prefill_chunk_tokens
+        밸런스가 정적 동작점(KV 합 25M + prefill 512)으로 확정되어(§0.8) **매 tick 동적
+        측정·계산이 통째로 moot**(§2.5): t_proj·t_pim_fn·a_cycle·b_cycle·balance_* 인자/호출
+        전부 제거. former 는 "디코더를 골라 담아 Σkv 를 동작점에 맞춤" 한 가지만 한다.
 
-    def balance_pim_slack(
-        self,
-        prefill_chunk_tokens: int,
-        t_pim_fn: Callable[[int], float],
-        n_decode: int,
-        gpu_op_time_per_token_us: float,
-        t_gpu_base: float,
-    ) -> int:
-        """Impl-10-pre-2 (B option) — PIM-time-driven adaptive *total* chunk budget.
+        종료 조건 (요청 *개수* 캡 없음 — §0.8 사용자 확정):
+        - (i) Σkv ≥ `kv_operating_target_tokens` (동작점 25M, §0.8). 디코드는 쪼개 넣을 수
+          없어(요청 KV 통째) 마지막 디코더가 목표를 살짝 넘겨 허용 밴드 [21.5M,29M] 안에 안착.
+        - (ii) 전역 KV 부족(`can_admit`) — 총 60M aggregate 천장.
+        - (iii) per-mb KV 예산 `max_mb_kv_tokens` (= 60M/2 = 30M, 2-슬롯 disjoint 분할, §0.8 A안).
 
-        ARCH §3.5.2 *Computed Wait* + §6.3 *PIM completion time computed at dispatch* + §6.1
-        *attention split (PREFILL_ATTN ‖ DECODE_ATTN concurrent)* + §3.5.3 *PIM-GPU TSV
-        bandwidth contention margin* + §5.2 *uniform-chunk* literal 정합.
+        **N_dec(디코더 수)은 레버가 아니라 부산물.** 동작점은 (decode KV 25M, prefill 512)
+        둘로 정의되고, t_B=FFN(N_dec+512)·t_GPU-A 의 projection 도 그 둘에서 자연 결정됨
+        (N_dec = 25M ÷ ctx). 타깃 ctx ~100K → N_dec≈250 → 셋 다 ~101µs. seq 개수 캡은 KV 목표가
+        먼저 멈춰 안 걸리는 중복 레버라 제거 — 채울 디코더를 인위로 거부하지 않는다.
 
-        사용자 의도 — *GPU 전체 cycle (QKV + PREFILL_ATTN + O_PROJ) ≈ t_pim × margin*:
-        sequence-parallel PIM 위 임의 시점 한 mb 가 모든 채널 점유 (k 영원 k_max), 그래서
-        balance 는 GPU 쪽 prefill chunk 조절 위 cycle 맞춤.
-
-            chunk_total = max(0, t_pim × margin − t_gpu_base) / per_token
-
-        Distribution 은 main_loop._populate_mb_phases 가 Option A (TOTAL ÷ N prefill reqs) 로 처리
-        (ARCH §5.2 uniform-chunk).
-
-        Edge case: t_pim × margin ≤ t_gpu_base → chunk_optimal = 0 → base (prefill_chunk_default) 보존.
-        이는 projection 만으로 이미 PIM 보다 GPU 가 길어 PIM idle 이 구조적 영역.
+        풀이 동작점을 못 채우면(짧은 요청만, 저volume) 작은 배치로 자연 수용 — PIM 유휴는
+        고칠 대상이 아니라 물리적 정상(§0.9). prefill = `prefill_chunk_default`(512) 고정:
+        REPORT prefill sweep 에서 1024+ 는 PREFILL_ATTN=O(prefill×ctx) 폭주로 균형 불가, 512 만 삼중 균형.
         """
-        if n_decode <= 0 or gpu_op_time_per_token_us <= 0:
-            return prefill_chunk_tokens
-        t_pim_predicted = t_pim_fn(n_decode)
-        margin = self.admission_cfg.pim_slack_safety_margin
-        gpu_slack_us = max(0.0, t_pim_predicted * margin - t_gpu_base)
-        chunk_optimal_total = int(gpu_slack_us / gpu_op_time_per_token_us)
-        return max(prefill_chunk_tokens, chunk_optimal_total)
-
-    def layer1(
-        self,
-        t_proj: float,
-        t_pim_fn: Callable[[int], float],
-        a_cycle: float,
-        b_cycle: float,
-        ctx_tokens: int,
-        gpu_op_time_per_token_us: float = 0.0,
-        max_mb_kv_tokens: int | None = None,
-    ) -> MicroBatchSpec | None:
-        decode_reqs: list[Request] = []
         # Impl-9 — Head-of-line skip (production scheduler 정합, vLLM/Sarathi 영역).
         # FIFO break 대신 queue 전체 walk + fit 가능한 것만 admit. 큰 req 는 *상대 순서 유지*
-        # 위 re-push → 다음 tick 위 capacity 회수 후 재시도. ARCH §3.3 'permanently resident' +
-        # §6.4 admission policy 의 *implementation choice* 영역.
+        # 위 re-push → 다음 tick 위 capacity 회수 후 재시도.
         candidates: list[Request] = []
         while True:
             req = self.request_queue.pop_oldest()
             if req is None:
                 break
             candidates.append(req)
-        # Phase-1 fix — 실제 배치 크기 = min(seq 상한, KV 캐파 허용분).
-        # seq 상한 도달 시 KV 여유와 무관하게 나머지는 다음 tick 으로 defer →
-        # 한 mb 독점 방지, 동시 다중 mb 형성 (REPORT_baseline §7b).
-        max_batch = self.admission_cfg.max_batch_size
-        # STEP 5.5 — per-mb KV 예산 (= KV캐파 / window 상한, main_loop 위 산출). 한 mb 가
-        # KV캐파 전체를 독점해 동시 다중 mb(F2 staggering) 가 불가하던 것을 해소. 빈 mb 는
-        # 첫 req 무조건 허용(단일 거대요청 starvation 방지) 후 예산 적용. None = cap 없음(단위 test).
+
+        target = self.admission_cfg.kv_operating_target_tokens
+        decode_reqs: list[Request] = []
         mb_kv = 0
+        reached_target = False
         for req in candidates:
+            # per-mb 예산: 빈 mb 는 첫 req 무조건 허용(단일 거대요청 starvation 방지) 후 예산 적용.
             fits_mb_kv = (
                 max_mb_kv_tokens is None
                 or not decode_reqs
                 or mb_kv + req.kv_length <= max_mb_kv_tokens
             )
-            if (len(decode_reqs) < max_batch and self.kv_accountant.can_admit(req)
-                    and fits_mb_kv):
+            if (not reached_target
+                    and self.kv_accountant.can_admit(req) and fits_mb_kv):
                 self.kv_accountant.admit(req)
                 decode_reqs.append(req)
                 mb_kv += req.kv_length
+                if mb_kv >= target:
+                    # 동작점 도달 — 남은 디코더는 다른 슬롯/다음 tick 의 몫.
+                    reached_target = True
             else:
                 # Defer — queue 의 그 자리 (상대 순서 유지) 위 re-push
-                # (seq 상한 / KV 부족 / per-mb 예산 초과 중 하나)
+                # (동작점 도달 / seq 상한 / KV 부족 / per-mb 예산 초과 중 하나)
                 if not self.request_queue.push(req):
                     raise RuntimeError(
                         f"admission re-push failed for req {req.id} "
@@ -129,23 +85,9 @@ class Admission:
         if not decode_reqs:
             return None
 
-        # Phase-2 S1 — 밸런스는 *시간 기준* 둘만: inter_AB(A_cycle vs B_cycle, 인스턴스 간)
-        # + pim_slack(t_pim vs t_gpu, A 내부 더블버퍼링). 유휴율 기반 balance_intra_A 는 삭제.
-        # Hybrid base = prefill_chunk_default, balance 가 adjustment.
+        # prefill 512 고정 (동적 chunk 사이징 삭제, §2.5). decode 조절 레버 없음(부산물).
+        # N_dec(개수)도 부산물 — mfu_floor 클램프 삭제(§2.5, 동작점 N_dec≈250≫n_sat 이라 사문).
         prefill_chunk_tokens = self.admission_cfg.prefill_chunk_default
-        prefill_chunk_tokens = self.balance_inter_AB(
-            prefill_chunk_tokens, a_cycle, b_cycle, ctx_tokens,
-        )
-
-        # decode 조절 레버 없음 (decode 충전 불가 — 부산물). n 은 admit 된 decode 수의 MFU floor.
-        n = self.mfu_floor(len(decode_reqs))
-        # Impl-10-pre-2 — PIM-time-driven adaptive *total* chunk budget.
-        # t_gpu_base = t_proj (= t_qkv + t_oproj) — GPU non-attention 영역 시간.
-        # chunk_total = max(0, t_pim × margin − t_proj) / per_token
-        prefill_chunk_tokens = self.balance_pim_slack(
-            prefill_chunk_tokens, t_pim_fn, n,
-            gpu_op_time_per_token_us, t_gpu_base=t_proj,
-        )
         kv_rows_total = sum(r.kv_length for r in decode_reqs)
         # Impl-8 — F5 ablation 위 lock-step penalty 입력. decode_reqs 비어 있으면 0.
         kv_rows_lockstep = max((r.kv_length for r in decode_reqs), default=0) * len(decode_reqs)
@@ -153,7 +95,6 @@ class Admission:
         return MicroBatchSpec(
             prefill_chunk_tokens=prefill_chunk_tokens,
             decode_requests=tuple(decode_reqs),
-            n=n,
             kv_rows_total=kv_rows_total,
             kv_rows_lockstep=kv_rows_lockstep,
         )

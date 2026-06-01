@@ -38,7 +38,7 @@ PULS 스케줄러 Phase-2(풀 모델 재설계)의 **구현**을 이어서 한�
 | **목표 KV 총량** | **25M 토큰** → PIM≈GPU-A≈B≈101µs (spread 0.6%) |
 | **허용 범위(15%)** | **21.5M ~ 29M 토큰** |
 | **prefill** | **512 토큰/배치 고정** (2^9). 동적 사이징 없음 (1024+ 는 GPU-A 폭주로 균형 불가, REPORT) |
-| **KV 캐파** | **30M 토큰** (hard ceiling, 넉넉) |
+| **KV 캐파** | **배치당 30M / 총 60M aggregate** (hard ceiling; 2 슬롯 disjoint, §0.8 A안) |
 | 균형 시간 X | ~101µs / N_dec = 부산물(평균 ctx 100K면 ~248개) |
 | 타깃 워크로드 | long-context agentic, 요청 ctx ~87K~117K |
 
@@ -84,8 +84,9 @@ PULS 스케줄러 Phase-2(풀 모델 재설계)의 **구현**을 이어서 한�
   TBT=`(completion−first_token)/(decoded−1)`. p50/p90/max. warm-start seed(§2.6) 플래그.
 
 ### S5 — 데드코드 정리 + 문서
-- S2 orphan(import·`micro_batch.prefill_chunk_budget` 등) 제거. KV 캐파 4M→30M(config.py
-  `default_dummy_config`).
+- S2 orphan(import·`micro_batch.prefill_chunk_budget` 등) 제거. KV 캐파 4M→**60M aggregate**
+  (config.py `default_dummy_config`; 배치당 30M × 2 슬롯, PLAN §0.8 A안). `_per_mb_kv_budget`
+  =60M/2=30M 자동 정합.
 - `배치_생애.md`·`README.md`(Target Workload=long-ctx agentic) 갱신. `debug_phase2/REPORT.md`
   에 측정 결과.
 

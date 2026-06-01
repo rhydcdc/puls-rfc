@@ -79,11 +79,12 @@ class TestSelfRescheduling:
         # KERNEL_COMPLETION 이 다음 재기동 경로 (이 단위 test 범위 밖).
         assert _admission_tick_count(scheduler_core) == 0
 
-    def test_arrival_tick_payload_freshly_composed(self, scheduler_core):
-        """REQUEST_ARRIVAL 재기동 tick payload = _compose_admission_payload 의 fresh 산출.
+    def test_arrival_tick_payload_trivial(self, scheduler_core):
+        """REQUEST_ARRIVAL 재기동 tick payload = trivial(빈 dict).
 
-        STEP 2.5 — 재기동 경로(`_schedule_admission_tick_with_default_payload`)가 scheduler
-        자기 상태 측정값 (6 key) 진정 주입.
+        Phase-2 S2 (§2.5) — 동작점 고정으로 cycle 측정 payload(`_compose_admission_payload`)
+        삭제. former 는 KV 합·prefill 512 만 보므로 payload 가 비어 있음. 재기동 cadence·
+        push 자체는 유지(빈 슬롯 재충전 트리거, §2.2.1).
         """
         scheduler_core.enable_admission_tick_rescheduling = True
         req = _make_request(req_id=0)
@@ -93,10 +94,7 @@ class TestSelfRescheduling:
         scheduler_core.step()
         ticks = _admission_ticks(scheduler_core)
         assert len(ticks) >= 1
-        assert set(ticks[0].payload.keys()) == {
-            "t_proj", "t_pim_fn", "a_cycle", "b_cycle", "ctx_tokens",
-            "gpu_op_time_per_token_us",
-        }
+        assert ticks[0].payload == {}
         # cadence — 재기동 tick 은 now + tick_interval_us 에 push
         assert ticks[0].timestamp == pytest.approx(
             scheduler_core.config.admission.tick_interval_us

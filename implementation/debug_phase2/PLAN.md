@@ -79,7 +79,7 @@ op-time 산식·closed-form 에 이미 존재 → 잃는 것 없음. **S0 후 �
 - **저ctx(<7K)**: PIM < GPU-proj (decode-attn 싸서 PIM 유휴 *정상*, ARCH §6.6). 동작점
   former 가 작은 배치로 흡수 — 별도 처리 불필요(§0.9).
 - **★ 삼중 균형(PIM=GPU-A=B)의 정밀 동작점·spread·KV 캐파는 모두 §0.8 이 최종**
-  (KV 합 25M, prefill 512, spread 0.6%, 캐파 30M). 여기엔 옛 prefill-free 추정치를 두지
+  (KV 합 25M/배치, prefill 512, spread 0.6%, 캐파 배치당 30M·총 60M). 여기엔 옛 prefill-free 추정치를 두지
   않음 — 충돌 방지. (§0.8 의 "평균 ctx ~100K" = 이 균형의 *요청 길이* 표현일 뿐.)
 
 ## 0.8 ★ 동작점(operating point) — KV 총량 기준 밸런스 (확정 2026-06-01)
@@ -109,9 +109,16 @@ op-time 산식·closed-form 에 이미 존재 → 잃는 것 없음. **S0 후 �
 - 그 밖: KV<21.5M → PIM 작아 GPU/B 그늘(놂). KV>29M → PIM bottleneck(A-bound). 둘 다
   레버로 못 고침 — 풀에 그 KV 합을 만들 디코더가 없으면(짧은 요청만) 균형 불가 = 정상.
 
-**KV 캐파 = 30M 토큰 (확정, 넉넉).** 목표 25M + 상한 29M 을 담고 여유. 스택당 ~80GB 급
-HBM4 가정 (64 stack, 가중치 137GB 제외 후 / 163,840 B per token). former 가 21.5~29M
-범위로 admit 하므로 캐파 30M 은 hard ceiling (OOM 방지) + 여유.
+**KV 캐파 = 배치당 30M, 총 60M aggregate (확정 2026-06-01, 사용자 A안).** 동작점 25M·상한
+29M 은 *마이크로 배치 하나*의 KV 합 → 배치당 천장 30M (former 가 21.5~29M 로 admit, OOM 방지
+여유). **마이크로 배치 2개가 A∥B(F3) 오버랩을 위해 동시 in-flight** 이고 디코더는 둘에
+disjoint·영구 상주(§3.3) → 총 상주 KV = **2 × 30M = 60M aggregate**.
+- HW = **160GB/stack × 64 stack = 10.24 TB** (= 80GB×64 의 2배). 가중치 137GB 제외 후 10.1 TB
+  / 163,840 B per token = **61.7M 토큰** → 60M 담고 여유. (옛 "80GB/64stack 5TB → 30M aggregate"
+  는 배치 *하나*치만 담겨 A∥B 오버랩 불가였음 — 사용자 정정.)
+- 코드 정합: `_per_mb_kv_budget = kv_capacity_aggregate / _STAGGERING_TARGET_MB(2)` = **60M/2 =
+  30M per micro-batch** → 배치당 천장과 자동 일치. config `kv_capacity_aggregate` = **60M** 으로
+  설정(S2/S5). per-mb 예산 cap/2 는 "땜질"이 아니라 *60M 총량의 2-슬롯 disjoint 분할*로 정합.
 
 **타깃 워크로드 = long-context agentic, 요청 ctx ~87K~117K (중심 100K).** README
 "Target Workload" 이 범위로 재프레이밍. 그 밖 ctx 는 균형 덜 맞음 = PULS 적용 범위 밖
@@ -216,18 +223,21 @@ HBM4 가정 (64 stack, 가중치 137GB 제외 후 / 163,840 B per token). former
 > KV = *원리적 2-슬롯 분할*. → S2 = 유휴 게이트 제거(연속 backfill) + 재프레이밍.
 > mb 컨테이너 전면 폐기 아님 (substrate 최대 재사용 — 프롬프트 "substrate 재사용·맹신 금지").
 
-- [x] **재충전 = sticky 슬롯 + 연속 backfill** (확정). 요청은 자기 슬롯에 sticky(배치_생애
-  "빠져나가는 게 아니라 같은 풀에서 단계만 바뀜"). decode 완료로 자리 나면 풀(queue)에서
-  *유휴 게이트 없이* backfill → 슬롯 지속 혼합. cold-start 코호트 동조는 warm-start seed(B)로 무해.
-- [x] **disjoint 보장:** backfill 은 request_queue 에서 pop(= 한 번만 admit) → 슬롯 간 자동
-  disjoint. 요청 동시 1슬롯 불변식 성립.
+- [x] **재충전 = backfill 삭제 (S2 최종, 사용자 확정 2026-06-01).** 초기엔 "sticky 슬롯 +
+  연속 backfill"로 봤으나, 동작점(세 시간 형성 시 균형)이 고정이라 **"균형 맞추려 이미 형성된
+  배치에 더 합류"시킬 이유가 사라짐.** former 가 한 번에 동작점까지 형성 → 멤버는 자기
+  μ-batch 안에서 단계 전이(prefill→decode)하며 돌다 완료 시 빠짐(슬롯 자연 축소). 새 부하는
+  새 μ-batch(ADMISSION_TICK former)로만 진입 → **풀→배치 진입 경로가 former 하나로 단일화.**
+  `_recompose_mb` = 잔존 멤버 phase 전진만(풀 pull 없음). `_backfill_slot` 삭제.
+- [x] **disjoint 보장:** 진입이 former(request_queue pop = 한 번만 admit) 하나뿐 → 슬롯 간
+  자동 disjoint. 요청 동시 1슬롯 불변식 성립.
 
 - [ ] **밸런스 = KV 총량 동작점 (§0.8 확정).** prefill 을 동적으로 키우는 게 아니라:
   - **디코더를 풀에서 골라 담아 KV 합을 21.5M~29M(목표 25M) 범위에 넣음** = PIM 시간을
     B 시간(~101µs)에 맞춤. 디코드는 쪼개기 불가 → 범위로 수렴(사용자).
   - **prefill = 512 토큰 고정** (배치당, 2^9). 동적 chunk 사이징(`balance_pim_slack`)·
     유휴율 게이트(`balance_intra_A`) 불필요 — 동작점이 곧 답.
-  - 슬롯당 KV 예산 = `_per_mb_kv_budget`(30M/2=15M)은 disjoint 2-슬롯 분할용으로 유지.
+  - 슬롯당 KV 예산 = `_per_mb_kv_budget`(60M/2=30M, §0.8 A안)은 disjoint 2-슬롯 분할용으로 유지.
   - `balance_inter_AB`·`balance_pim_slack` **둘 다 삭제**(§2.5) — 동작점 고정이라 동적
     조정 불필요. 워크로드가 동작점 벗어나면 그건 레버로 못 고침(ctx 입력, §0.8) = 정상.
 - [ ] **★ 생애 사이클(prefill→decode 전이)은 *반드시 유지* — 동적 밸런스 삭제와 무관.**
@@ -301,7 +311,8 @@ HBM4 가정 (64 stack, 가중치 137GB 제외 후 / 163,840 B per token). former
 
 **남는 핵심 (단순):**
 - former: 풀에서 디코더 골라 **Σkv ∈ [21.5M, 29M]** + **prefill 512** → 배치. 끝.
-- KV 캐파 30M = OOM 천장. window 3 = disjoint 2슬롯+여유. dispatcher/DAG/PIM/FFN substrate 그대로.
+- KV 캐파 = 배치당 30M·총 60M aggregate = OOM 천장(§0.8 A안). window 3 = disjoint 2슬롯+여유.
+  dispatcher/DAG/PIM/FFN substrate 그대로.
 
 > **풀 구성 (warm-start, §2.6):** 정상상태 풀엔 (a) decode-only 다수(prefill 끝남) +
 > (b) prefill-중 소수 + (c) 그 prefill 에 종속된 decode. former 는 (a)+(c) 로 KV 합을
@@ -363,15 +374,20 @@ HBM4 가정 (64 stack, 가중치 137GB 제외 후 / 163,840 B per token). former
   test_idle_telemetry chain 1개 제거, idle_telemetry.py 주석 갱신. **84 tests green**.
   ※ S1 당시엔 `balance_inter_AB`·`balance_pim_slack` 유지로 봤으나, **이후 §0.8 동작점
   확정으로 둘 다 S2 삭제 대상으로 변경**(§2.5). `max_mb_kv_tokens` 는 S2 에서 처리.
-- [~] **S2. `main_loop.py` 풀 former + 동적 밸런스 기계장치 제거** (§2.5) — 진행 중.
-  - 완료: `_try_join`→`_backfill_slot`(유휴 게이트 제거), `_join_gate_open` 삭제,
-    `_per_mb_kv_budget`→per-slot 재해석.
-  - 남음 (§2.5 moot): `_compose_admission_payload`·`_measure_cycles`·`_make_t_pim_fn`·
-    `_prev_a/b_active_snapshot` 제거. ADMISSION_TICK 핸들러를 **동작점 former**로 교체 —
-    "Σkv ∈ [21.5M,29M] 까지 디코더 admit + prefill 512" (cycle 측정·chunk 사이징 없음).
-  - `admission.layer1` 재작성: t_proj·t_pim_fn·a_cycle·b_cycle·per_token 인자 삭제,
-    `balance_inter_AB`·`balance_pim_slack` 호출 제거. `prefill_chunk_tokens = 512` 고정.
-  - L 도달 token 생성·전이(337~358) 유지.
+- [x] **S2. 동작점 former + 측정/밸런스/backfill 기계장치 제거** (§2.5) — 완료.
+  - `admission.layer1` 동작점 former 재작성: `balance_inter_AB`·`balance_pim_slack`·`mfu_floor`
+    삭제, t_proj·t_pim_fn·a_cycle·b_cycle·per_token 인자 제거. 종료 = Σkv ≥ 25M(목표) + prefill
+    512 고정 + per-mb·전역 KV. `MicroBatchSpec.n` 삭제(N_dec=len 과 중복).
+  - `main_loop`: `_compose_admission_payload`·`_measure_cycles`·`_make_t_pim_fn`·`_last_dispatched_mb`·
+    `_prev_a/b_active_snapshot` 삭제. ADMISSION_TICK payload trivial(빈 dict). `_fire_admission_tick`
+    cycle 인자 제거(snapshot a/b_cycle=0 — 진단은 idle_telemetry 로 분리).
+  - **backfill 삭제**(사용자 확정): `_backfill_slot` 제거, `_recompose_mb`=잔존 멤버 phase 전진만.
+  - `max_batch_size` config 필드 제거(N_dec 부산물). `_per_mb_kv_budget`=비바인딩 선언 유지(각주).
+  - config: `kv_capacity_aggregate` 4M→60M, `kv_operating_target_tokens`=25M 추가.
+  - L 도달 token 생성·생애 전이(prefill→decode) 유지 확인.
+  - 테스트: test_admission 재작성(21 green) + balance/payload/backfill 테스트 4파일 폐기 +
+    test_admission_tick·test_meta 갱신(직접 영향 29+13 green). **사전-깨짐(S0 O_PROJ→FFN
+    트리거) 34건은 HEAD 에서도 red(stash baseline 확인) → S3 일괄 갱신.**
 - [ ] **S3. window/F2 정합** → former 가 활성 슬롯 2개를 유지해 F2/F3 발현. capacity=3 유지.
   disjoint 분할 추적(요청→슬롯 매핑). + §2.7 미정리(opt instance_pipeline.dispatch 잔여 ·
   4노드 가정 옛 테스트) + 사전-깨짐 3개(0.x §) 정리.
@@ -391,7 +407,7 @@ HBM4 가정 (64 stack, 가중치 137GB 제외 후 / 163,840 B per token). former
 
 - [ ] **단위(모듈별):**
   - former: 디코더 골라 Σkv 가 [21.5M,29M] 범위 도달 시 정지 / prefill 512 고정 /
-    cap·KV캐파(30M) 초과 시 큐잉. (cycle 측정 없음 — 동작점 직접.)
+    cap·KV캐파(배치당 30M / 총 60M) 초과 시 큐잉. (cycle 측정 없음 — 동작점 직접.)
   - 전이: prefill 소진 → DECODE → 다음 iteration decode-set 포함.
   - FFN(S0): O_PROJ→FFN 종속, layer 경계=FFN 완료, F3 overlap.
 - [ ] **메타-테스트(플랜 정합):** 삭제 대상 심볼(`_try_join`·`balance_intra_A`·
@@ -508,3 +524,17 @@ HBM4 가정 (64 stack, 가중치 137GB 제외 후 / 163,840 B per token). former
   (F1·F5), closed-form 2(Aux). F2→"더블 버퍼링" 용어 통일. **분할 작업: 1차 S0~S2,
   2차 S3~S5** (사용자). 옛 전체 회귀 안 돎(다 교체) — 변경별 타깃 테스트만. test_invariants.py
   는 깨진 placeholder(마크다운 쓰레기 혼입) — 어차피 재작성.
+- 2026-06-01: **동작점 재실측 재현 + 캐파 의미 확정(§0.8 A안)**(사용자). op-time 직접 산출로
+  삼중 균형 재현: KV 25M/배치 → PIM 102/GPU-A 101/B 101µs, spread **0.7%**; 밴드 21.5M→12.4%,
+  29M→13.4% (≤15%). **25M = 마이크로 배치 *하나*의 decode-attn op KV (PIM op_time 1회 호출)** —
+  슬롯 분할 아님(이전 보고의 12.5M 오독 정정). 캐파 = **배치당 30M, 총 60M aggregate**(A∥B
+  오버랩 위해 2 배치 동시 in-flight, disjoint·영구 상주). HW 가정 80GB→**160GB/stack(10.24TB,
+  61.7M 담음)** 2배. `_per_mb_kv_budget = 60M/2 = 30M` 자동 정합 → 이전 "cap/2 가 동작점 막음"
+  우려 해소. config `kv_capacity_aggregate` 4M→**60M**(S2/S5). README HW 스펙도 갱신 대상(§6).
+- 2026-06-01: **S2 구현 완료(동작점 former + 측정/밸런스/backfill/max_batch/mfu 제거).** 검증
+  대화 중 추가 단순화 확정(사용자): (1) **max_batch_size 제거** — N_dec 은 부산물(=25M÷ctx),
+  개수 캡은 동작점이 먼저 멈춰 안 걸리는 중복 레버. ctx 짧/길 모두 cycle≈102µs 로 묶임을
+  op-time 산출로 재확인(짧으면 PIM 유휴·정상). (2) **backfill 제거** — 세 시간이 형성 시점에
+  맞춰져 "균형 맞추려 더 합류" 이유 소멸. former 단일 진입. (3) **mfu_floor/MicroBatchSpec.n
+  제거**(사문/중복). (4) per-mb 예산은 비바인딩 선언으로 보존(각주). 디코드→QKV/O-proj 기여가
+  balance 산식에 포함됨도 확인. 사전-깨짐 34건(S0 O_PROJ→FFN 트리거)은 baseline red → S3.
