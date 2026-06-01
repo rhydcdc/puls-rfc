@@ -500,7 +500,7 @@ Qualitative estimation of the *physical* bounds — which resource limits the cy
 
 The pool model's measured three-resource idle is the **floor** for this workload-and-algorithm: its spread tracks a directly-computed theoretical floor across batch compositions, with zero unexplained loss. Reproduced by [`implementation/analysis/floor_proof.py`](implementation/analysis/floor_proof.py), which calls the *exact* dispatcher op-time functions on the live μ-batches the simulator dispatched (no synthetic reconstruction).
 
-**Single-server model.** Each resource is a single server — one op at a time (dispatcher `gpu_busy` · `pim_busy` · `instance_b_busy`; I4/I5 for Instance A's GPU·PIM, the same constraint for the simple Instance B). In steady state, throughput is set by the busiest server's per-μ-batch work. Per μ-batch, per layer:
+Each resource runs one op at a time (`gpu_busy` · `pim_busy` · `instance_b_busy`), so per-resource work is serial and the cycle below is a `max`, not a sum. Per μ-batch, per layer:
 
 ```
 t_gpuA = QKV + PREFILL_ATTN + O_PROJ          (gpu_instance_a, serial)

@@ -500,7 +500,7 @@ PULS 스케줄러의 balanced steady state 에서 3 μ-batch in-flight window �
 
 풀 모델의 측정 idle 은 *이 워크로드 + 이 알고리즘* 의 **floor** 다: spread 가 직접 산출한 이론 floor 를 배치 구성 전반에서 추종하며 미설명 잔여손실 0. [`implementation/analysis/floor_proof.py`](implementation/analysis/floor_proof.py) 가 재현 — 시뮬레이터가 디스패치한 live μ-batch 에 *정확히 같은* dispatcher op-time 함수를 호출(합성 재구성 없음).
 
-**single-server 모델.** 각 자원은 단일 서버 — 동시 1 op (dispatcher `gpu_busy` · `pim_busy` · `instance_b_busy`; Instance A 의 GPU·PIM 은 I4/I5, 단순한 Instance B 도 동일 제약). steady state 에서 처리율은 가장 바쁜 서버의 per-μ-batch work 가 율속. μ-batch 당, layer 당:
+각 자원은 동시 1 op (`gpu_busy` · `pim_busy` · `instance_b_busy`)이라 자원별 work 가 직렬 — 그래서 아래 cycle 이 합이 아니라 `max`. μ-batch 당, layer 당:
 
 ```
 t_gpuA = QKV + PREFILL_ATTN + O_PROJ          (gpu_instance_a, 직렬)
