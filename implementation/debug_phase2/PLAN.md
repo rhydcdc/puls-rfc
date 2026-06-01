@@ -556,3 +556,27 @@ disjoint·영구 상주(§3.3) → 총 상주 KV = **2 × 30M = 60M aggregate**.
   (실 1M-ctx 트레이스 eager-preload 의 `[0]*num_prefill` materialize → OOM, harness 낭비). 스케줄러
   는 len 만 쓰므로 S4 에서 Request prompt_len 경량화로 해소.** F2/F3 명시 2슬롯은 S4 측정 후 판단.
   - **교훈(자기리뷰 보강): 심볼 삭제 시 tests 뿐 아니라 src 호출처도 grep** (run.py 누락 재발 방지).
+- 2026-06-01: **동작점 정밀화 + 배치 구성 알고리즘 확정 → [OPERATING_POINT.md](OPERATING_POINT.md)
+  신규 (canonical spec).** 스윕(코드 = [sweep_operating_point.py](sweep_operating_point.py))으로:
+  (1) **ctx 100K = 하드웨어 상수**(prefill 약분, 모든 prefill 에서 균형 ctx 100K). 경험값 아님.
+  (2) **prefill 은 스케일 knob** — 256→X51µs/512→101µs, 균형 ctx 불변. REPORT "512만 균형"은
+  측정 오류(정정 대상). (3) **prefill 256 기본 채택**(TBT·HBM 절반, TTFT·throughput 동일,
+  배치 구성 쉬움; 512 는 FFN MFU 포화 불가 시 대안 — MFU knee=deferred calibration).
+  (4) **배치 구성 = FIFO head-of-line + skip**: 도착순 누적, 상한(decodeKV·prefillKVwork) 넘으면
+  skip→다음 batch, 개수(N_dec≈123)/합(decodeKV 12.3M) 차면 정지, window 3개 순차 구성. context
+  -agnostic(KV 길이 알고 능동 조합). 고정값/KV캐파 표 = OPERATING_POINT.md §1. former-v2 가 구현.
+- 2026-06-02: **★ 배치 구성 알고리즘 확정 = 로컬 그리디 steering + age-cap (FIFO+skip 대체).**
+  프로토타입(proto_steering.py·proto_steering_fair.py)으로 검증하며 진화. 핵심 결론:
+  (1) **제어 타깃 = (count 123 AND Σkv 12.3M) 둘** — FIFO+skip(Σkv만 stop)은 *개수*를 놓쳐
+  off-avg 풀서 spread 22~30% 실패. **steering**: 매 step `ideal=(target_kv−S)/(target_count−n)`
+  가장 가까운 디코더 선택 → 두 타깃 동시 자기보정 수렴(검증 spread~1%). 상한/하한 밴드는 제어
+  아님(closest-to-ideal 이 오버슈트 자체 방지) — 밴드는 진단용 idle-SLA.
+  (2) **avg 100K = 워크로드 강제 아님, KV 캡(12.3M=123×100K) 유도용 중간값.** **길이분산 무관**:
+  거대 변종 풀서 짧+긴 *조합* 으로 두 타깃 명중. arrival 평균 통제·가정 불필요(사용자 핵심 통찰).
+  (3) **공정성 = age-cap(2)**: pure steering 은 ideal-크기만 cherry-pick → off-size **starvation**
+  (원소 분석으로 발견). wait≥AGE_CAP 강제 포함 → 모든 클래스 서빙(검증: 서빙분포=arrival분포,
+  starvation 0) + 강제분은 steering 이 보정해 균형 유지(spread 1.3%) + 대기 ≤AGE_CAP+1 batch.
+  AGE_CAP 트레이드오프(sweep): cap↑→spread↓·레이턴시↑ / cap↓→FIFO화. **2 채택**(균형·공정·지연).
+  (4) **퇴화 극단**(롱-only 라 짧은 게 고갈)만 A-bound(§6.6, PIM hero·age-cap 으로 안정·실트래픽
+  미발생). **canonical spec = [OPERATING_POINT.md](OPERATING_POINT.md)** (§3 알고리즘, §5 스윕).
+  prefill 256 기본(512 = MFU 포화 불가 시 대안, knee=deferred). **구현은 새 대화(STEP7).**
