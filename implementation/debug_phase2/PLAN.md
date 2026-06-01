@@ -150,8 +150,11 @@ HBM4 가정 (64 stack, 가중치 137GB 제외 후 / 163,840 B per token). former
   **재해석(삭제 아님).** (나) 분할이면 디코더를 μ-batch 들로 나누는 규칙이 *필요*. 단
   KV/2 band-aid(영속 mb 독점 방지)는 **former 의 명시적 disjoint 분할 + 활성 슬롯 목표
   (2)**로 대체. 분모 2(=동시 active μ-batch 목표)는 슬롯 수 개념으로 살아남음.
-- [ ] `main_loop.py::_join_gate_open` (53) + `_try_join` (395~455) + hysteresis 게이트 —
-  **삭제.** 멤버십=용량/밸런스=시간으로 대체, 합류·게이트 개념 소멸.
+- [x] `main_loop.py::_join_gate_open` + `_try_join` + hysteresis 게이트 — **삭제 완료(S2)**.
+  `_backfill_slot`(유휴 게이트 없음)으로 대체.
+- [ ] `main_loop.py::_compose_admission_payload`·`_measure_cycles`·`_make_t_pim_fn`·
+  `_prev_a/b_active_snapshot` — **삭제(§2.7).** 동작점 고정이라 매 tick cycle 측정 불필요.
+  ADMISSION_TICK payload 가 trivial 화 (동작점 former 는 KV 합·prefill 512 만 봄).
 - [ ] `main_loop.py::_recompose_mb` (373~393) — **교체.** "같은 req 집합 재구성+합류" →
   "풀에서 per-iteration 재선택".
 - [ ] `main_loop.py::_maybe_advance_forward_pass` (307~371) 의 recompose/evict 꼬리
@@ -263,6 +266,36 @@ HBM4 가정 (64 stack, 가중치 137GB 제외 후 / 163,840 B per token). former
 - [ ] **TTFT↔TBT 정책:** 슬랙 0(GPU 이미 PIM 보다 김)일 때 최소 prefill 보장 여부 —
   기본 *무보장*(TBT 우선, 배치_생애 §밸런스). 옵션으로 floor 노출만.
 
+### 2.7 ★ 동작점 고정이 코드를 단순화한다 (사용자 통찰 2026-06-01)
+
+> §0.9 에서 밸런스가 **"KV 합을 21.5~29M 범위에 들도록 디코더 골라 담기 + prefill 512
+> 고정"** 으로 확정 → **매 tick 동적 측정·계산하던 기계장치가 통째로 moot.** former 가
+> "측정→cycle 비교→chunk 사이징"이 아니라 "KV 합 채우기 + prefill 512"로 바뀜.
+
+**moot 되는 것 (S2 에서 삭제·격하):**
+- [ ] `_compose_admission_payload`(207~263) — a_cycle/b_cycle/t_proj/t_pim_fn/per_token
+  5개 payload 산출. **대부분 불필요.** 동작점이 고정이라 매 tick 측정 안 함.
+- [ ] `_measure_cycles`(272~285) + `_prev_a/b_active_snapshot` — cycle delta 측정. moot.
+- [ ] `_make_t_pim_fn`(287~305) — t_pim closure. former 가 KV 합 직접 보면 됨, closure 불필요.
+- [ ] `admission.balance_inter_AB`·`balance_pim_slack` — 동적 prefill 사이징. prefill 512
+  고정이면 둘 다 불필요(REPORT: 512 만 균형). deadband(`deadband.py`)도 같이 moot.
+- [ ] `admission.layer1` 의 t_proj·t_pim_fn·a_cycle·b_cycle·gpu_op_time_per_token 인자 —
+  전부 제거. layer1 = "KV 합 범위까지 디코더 admit + prefill 512" 로 축약.
+- [ ] `_fire_admission_tick`·`AdmissionSnapshot` 의 cycle 필드 — 측정 진단용으로만 격하
+  (evaluator 가 idle_telemetry 로 사후 산출, admission 경로에서 분리).
+
+**남는 핵심 (단순):**
+- former: 풀에서 디코더 골라 **Σkv ∈ [21.5M, 29M]** + **prefill 512** → 배치. 끝.
+- KV 캐파 30M = OOM 천장. window 3 = disjoint 2슬롯+여유. dispatcher/DAG/PIM/FFN substrate 그대로.
+
+> **풀 구성 (warm-start, §2.5):** 정상상태 풀엔 (a) decode-only 다수(prefill 끝남) +
+> (b) prefill-중 소수 + (c) 그 prefill 에 종속된 decode. former 는 (a)+(c) 로 KV 합을
+> 채우고 (b) 에 prefill 512 배분. 트레이스 = 한 요청 prefill→decode 종속 그대로.
+
+**예상 효과:** main_loop 에서 측정·payload·closure ~100 LOC 감소. admission 은 balance
+3종 메서드 삭제로 절반. 사용자 직관("생각보다 단순해진다") 맞음 — 단 *측정 substrate*
+(idle_telemetry·evaluator)는 **진단용으로 보존**(밸런스 입력에서만 분리).
+
 ### 2.5 측정용 warm-start seed (채택 = B)
 
 - [ ] measure 하네스에 "사전 decode 풀 seed" init 추가: t=0 에 *이미 decode 중인 요청들*
@@ -315,11 +348,18 @@ HBM4 가정 (64 stack, 가중치 137GB 제외 후 / 163,840 B per token). former
   former(S2)가 호출 경로 교체 시 함께 처리(S1 무변경). 테스트 정리: test_admission intra_A
   4개·test_chunk_size intra-A 2개·test_idle_telemetry chain 1개 제거, idle_telemetry.py
   주석 갱신. **84 tests green**(admission·chunk_size·idle_telemetry·pim_slack).
-- [ ] **S2. `main_loop.py` 풀 former** → `_try_join`·`_per_mb_kv_budget`·`_recompose_mb`
-  삭제, ADMISSION_TICK 핸들러를 per-iteration 배치 former 로 교체. L 도달 token 생성·전이
-  유지, 그 뒤 풀 재선택.
-- [ ] **S3. window/F2 정합** → former 가 활성 슬롯 2개를 유지해 F2 발현. capacity=3 유지.
-  disjoint 분할 추적(요청→슬롯 매핑) 추가. 코드 변경 최소.
+- [~] **S2. `main_loop.py` 풀 former + 동적 밸런스 기계장치 제거** (§2.7) — 진행 중.
+  - 완료: `_try_join`→`_backfill_slot`(유휴 게이트 제거), `_join_gate_open` 삭제,
+    `_per_mb_kv_budget`→per-slot 재해석.
+  - 남음 (§2.7 moot): `_compose_admission_payload`·`_measure_cycles`·`_make_t_pim_fn`·
+    `_prev_a/b_active_snapshot` 제거. ADMISSION_TICK 핸들러를 **동작점 former**로 교체 —
+    "Σkv ∈ [21.5M,29M] 까지 디코더 admit + prefill 512" (cycle 측정·chunk 사이징 없음).
+  - `admission.layer1` 재작성: t_proj·t_pim_fn·a_cycle·b_cycle·per_token 인자 삭제,
+    `balance_inter_AB`·`balance_pim_slack` 호출 제거. `prefill_chunk_tokens = 512` 고정.
+  - L 도달 token 생성·전이(337~358) 유지.
+- [ ] **S3. window/F2 정합** → former 가 활성 슬롯 2개를 유지해 F2/F3 발현. capacity=3 유지.
+  disjoint 분할 추적(요청→슬롯 매핑). + §2.6 미정리(opt instance_pipeline.dispatch 잔여 ·
+  4노드 가정 옛 테스트) + 사전-깨짐 3개(0.x §) 정리.
 - [ ] **S4. 측정 substrate** → `Request.first_token_time` 추가, 완료 요청 sink(evaluator
   또는 scheduler 에 `completed_requests` list), L 도달 첫 decode 시 first_token_time 기록.
 - [ ] **S5. 데드코드 정리** → S2 가 만든 orphan(import·필드·micro_batch.prefill_chunk_budget
@@ -335,11 +375,13 @@ HBM4 가정 (64 stack, 가중치 137GB 제외 후 / 163,840 B per token). former
 > CLAUDE.md §5 — "green" ≠ "correct". 아래 4종 커버.
 
 - [ ] **단위(모듈별):**
-  - former: decode 전부 선택 + KV 여유만큼 prefill, cap 초과 시 큐잉.
-  - balance(시간): t_pim>t_gpu → chunk>0 / t_pim≤t_gpu → chunk=0(슬랙 없음).
+  - former: 디코더 골라 Σkv 가 [21.5M,29M] 범위 도달 시 정지 / prefill 512 고정 /
+    cap·KV캐파(30M) 초과 시 큐잉. (cycle 측정 없음 — 동작점 직접.)
   - 전이: prefill 소진 → DECODE → 다음 iteration decode-set 포함.
+  - FFN(S0): O_PROJ→FFN 종속, layer 경계=FFN 완료, F3 overlap.
 - [ ] **메타-테스트(플랜 정합):** 삭제 대상 심볼(`_try_join`·`balance_intra_A`·
-  `_per_mb_kv_budget`) 부재 단언 / NodeType·RequestState enum 완전성 / DAG edge=I1~I3.
+  `balance_inter_AB`·`balance_pim_slack`·`_measure_cycles`·`_make_t_pim_fn`) 부재 단언 /
+  NodeType(5: +FFN)·RequestState enum 완전성 / DAG edge=I1~I3+O_PROJ→FFN.
 - [ ] **음성 파라트라이즈(enum 교차곱):** RequestState 전이 cross-product — 불법 전이
   전수 raise. former 입력 경계(빈 풀/cap=0/KV 0/prefill만/decode만).
 - [ ] **교차모듈 불변:** 임의 admit/evict/round-trip 후 (i) KVAccountant.used == Σ
@@ -422,7 +464,12 @@ HBM4 가정 (64 stack, 가중치 137GB 제외 후 / 163,840 B per token). former
   맞추기(쪼개기 불가 → 범위 수렴). 목표 KV 25M, 허용 21.5~29M(15% 오차), prefill 512 고정,
   균형 ~101µs. **KV 캐파 = 30M 확정**(넉넉). 타깃 = 요청 ctx ~87K~117K long-context agentic.
   vLLM 512 는 토큰(K 아님, web 확인) — 경험적 타협점 vs PULS 는 하드웨어 균형서 유도.
-  다음: S2 former(KV 총량 동작점 + length-aware).
+- 2026-06-01: prefill 1024/2048 sweep — **512 만 균형, 1024+ 는 GPU-A(PREFILL_ATTN) 폭주로
+  불가**(REPORT.md, commit 0e1f200).
+- 2026-06-01: **동작점 고정 → 동적 밸런스 기계장치 moot(§2.7)**(사용자 통찰). former =
+  "KV 합 채우기+prefill 512"라 `_compose_admission_payload`·`_measure_cycles`·`_make_t_pim_fn`·
+  balance 3종·deadband 삭제 대상. main_loop ~100 LOC↓, admission 절반↓. 측정 substrate
+  (idle_telemetry·evaluator)는 진단용 보존. S2 재정의(§2.7·§3 S2). 다음: S2 former 구현.
 - 2026-06-01: 가속 커버리지 확인(§0.6) — 동역학 2(더블버퍼링·인스턴스A∥B), op-time 2
   (F1·F5), closed-form 2(Aux). F2→"더블 버퍼링" 용어 통일. **분할 작업: 1차 S0~S2,
   2차 S3~S5** (사용자). 옛 전체 회귀 안 돎(다 교체) — 변경별 타깃 테스트만. test_invariants.py
