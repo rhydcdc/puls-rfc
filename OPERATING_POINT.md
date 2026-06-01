@@ -69,9 +69,9 @@ window=3 순차 (2 active F2/F3 overlap + 1 전이 여유).
 - **로컬 자기보정**: 긴 걸 골랐으면 다음 `ideal`↓ → 짧은 걸. 두 축 동시 수렴. 전역 분포 안 봄.
 - **[11.1M,13.5M] 밴드 = 진단용 idle-SLA 라벨**(±10%→idle≤10%), 제어값 아님.
 - **검증**:
-  - [proto_steering.py](proto_steering.py): 정규·heavy-tail·short-heavy·bimodal 전부 **N123
+  - [proto_steering.py](implementation/debug_phase2/proto_steering.py): 정규·heavy-tail·short-heavy·bimodal 전부 **N123
     Σ12.3M spread ~1%** (FIFO 는 off-avg 22~30% 실패). 원소 = 짧+중+긴 혼합(예 47+47+29).
-  - [proto_steering_fair.py](proto_steering_fair.py): 스트리밍서 **서빙 분포 = arrival 분포**
+  - [proto_steering_fair.py](implementation/debug_phase2/proto_steering_fair.py): 스트리밍서 **서빙 분포 = arrival 분포**
     (starvation 0, 모든 클래스 drain) + 매 배치 균형(spread 1.3%) + 대기 ≤3 batch.
 - **AGE_CAP 트레이드오프 (sweep)**: cap↑ → steering 자유도↑ → spread↓, 단 대기(레이턴시)↑.
   cap↓ → FIFO化 → 공정/저지연이나 spread↑.  | cap1: sp3.1% | **cap2: sp1.2%, 대기≤3** |

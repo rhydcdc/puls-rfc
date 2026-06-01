@@ -1,6 +1,6 @@
 # Phase-2 측정 기록 — idle floor 증명 (2026-06-02)
 
-> 단일 기준 = [OPERATING_POINT.md](OPERATING_POINT.md). 측정 substrate = [measure_steady.py](measure_steady.py),
+> 단일 기준 = [OPERATING_POINT.md](../../OPERATING_POINT.md). 측정 substrate = [measure_steady.py](measure_steady.py),
 > floor 증명 = [../analysis/floor_proof.py](../analysis/floor_proof.py).
 > **핵심 결론: 측정 idle 은 "이 워크로드 + 이 알고리즘"의 floor 이며, 그 floor 의 모든 구성요소가
 > 정량적으로 설명된다 (미설명 잔여손실 0).**

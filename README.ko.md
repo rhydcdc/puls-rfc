@@ -223,7 +223,8 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (F5 포함)**.
 ## Repository
 
 - [`README.md`](README.md) — 본 문서 (entry point)
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — 아키텍처 본문 (motivation, design principles, substrate, instance disaggregation, scheduler integration, adaptive admission, layer flow, prior art 비교)
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — 아키텍처 본문 (motivation, design principles, substrate, instance disaggregation, scheduler integration, 풀 모델 admission + idle floor §6.8, layer flow, prior art 비교)
+- [`OPERATING_POINT.md`](OPERATING_POINT.md) — Phase-2 동작점 & 배치 구성 canonical spec (풀 모델, steering 타깃, idle-floor 근거)
 - [`LICENSE`](LICENSE) — Apache 2.0
 
 ## License

@@ -1,13 +1,13 @@
 # STEP 8 — Phase-2 풀 모델 확정 후 S5 정리 (새 대화용 프롬프트)
 
 > 새 대화창에 그대로 붙여넣으세요. **알고리즘·측정 끝. 남은 건 S5 정리(문서·이동·폴더분리·데드코드).**
-> 단일 기준 = [`OPERATING_POINT.md`](OPERATING_POINT.md) (canonical spec).
+> 단일 기준 = [`OPERATING_POINT.md`](../../OPERATING_POINT.md) (canonical spec).
 > ⚠ `STEP6_PROMPT.md`·`STEP7_PROMPT.md` 는 이전 핸드오프 — **superseded, 볼 필요 없음. 이 STEP8 만.**
 
 ---
 
 PULS 스케줄러 Phase-2(풀 모델)의 **구현·검증은 끝났다.** 남은 건 S5(정리·문서). **시작 전 정독:**
-1. **[`OPERATING_POINT.md`](OPERATING_POINT.md)** — 동작점·배치 구성 알고리즘 *정답지*(canonical). 정독.
+1. **[`OPERATING_POINT.md`](../../OPERATING_POINT.md)** — 동작점·배치 구성 알고리즘 *정답지*(canonical). 정독.
 2. **현 풀 모델 코드** (§2) — `src/puls_sched/admission.py`(steer_decode_set), `main_loop.py`
    (_refill_pool·_compose_microbatch·_recompose_mb·_populate_mb_phases), `debug_phase2/measure_steady.py`.
 3. **[`PLAN.md`](PLAN.md)** 진행 로그 (맨 아래).
@@ -92,23 +92,29 @@ OPERATING_POINT §3 그대로. **세 관심사 분리** (이전 S2 는 셋을 �
     옛 모델 서술 문서 불필요). 코드 주석 2곳(main_loop.py:54 §밸런스, window.py:17 §세 한계)을
     OPERATING_POINT 참조로 repoint 후 삭제. **(미완 — 남음)**
   - [x] `README` (한/영) — 풀 모델 + floor 결과 간단 반영 완료(`58a9e79` 풀모델 + `4675ef0`/`3bb0136` floor).
-- [ ] **OPERATING_POINT.md → repo 루트로 이동** — README·ARCHITECTURE 와 같은 *근본 문서* 층위로.
-    `debug_phase2/OPERATING_POINT.md` 자리엔 포인터(또는 모든 링크 갱신). **복사 아니라 이동**
-    (사본 2개 = drift). canonical 격상.
-- [ ] **src 폴더 분리** — 스케줄링 정책 / HW 모델(op-time) / 계측 으로. taxonomy(2분/3분, run.py·
-    config·idle_telemetry 위치) **먼저 합의** 후 별도 커밋. 순수 구조 변경(거동 불변, import 경로
-    전수 갱신, `test_meta._EXPECTED_MODULES` 재구성, 순환 0 확인). ⚠ 측정 하네스는 이미 debug_phase2
-    밖이고 일부 계측(idle_telemetry)은 스케줄러에 짜여 있어 깔끔한 분리 난도 있음 — 합의 필수.
-- [ ] **데드코드 정리** — `MicroBatchSpec`(사문), `deadband.py`, `instance_pipeline`/`ForwardPass`
-    vestigial, config 사문 필드(§2 목록), `_populate` 옛 주석 잔재. 삭제 시 *src 호출처+tests grep*
-    (★S2 교훈: run.py 호출처 놓쳐 회귀한 적 있음). 사전존재 데드코드는 언급만.
+- [x] **OPERATING_POINT.md → repo 루트로 이동** — `implementation/debug_phase2/` → repo 루트
+    (README·ARCHITECTURE 층위). 양방향 링크 갱신 완료(들어오는 7: REPORT·PLAN·STEP7/8 →
+    `../../OPERATING_POINT.md`; 나가는 2: proto_steering → `implementation/debug_phase2/`). 코드
+    주석의 텍스트 멘션("OPERATING_POINT §X")은 경로 아님 → 무변경. canonical 격상 완료.
+- [skip] **src 폴더 분리** — 건너뛰기(사용자 확정 2026-06-02: ~15 모듈 flat 이 단순, 분리 이득 작음).
+- [~] **데드코드 정리** — 안전분 완료, 위험분 연기(사용자 확정 2026-06-02):
+  - [x] `MicroBatchSpec` 제거(`d877881`) — 사문 클래스, hot path 미사용.
+  - [x] config 고립 필드 3개 제거(`fe77fae`) — `idle_theta_low/high`·`pim_slack_safety_margin`·
+    `gpu_op_time_per_token_us`. test_meta `_EXPECTED_ADMISSION_FIELDS` 동반 갱신.
+  - [!] `deadband.py` — **데드 아님(유지)**: evaluator(라이브, report 산출)가 `in_band`/`lookup_width`
+    를 수렴 진단(`in_band_fraction`)에 사용. §6.4 폐기분은 *admission 제어용* deadband, evaluator
+    진단분은 별개로 live. 지우면 동작(report) 변경 → 데드코드 아님.
+  - [ ] `instance_pipeline`/`forward_pass.ForwardPass` — **진짜 dead-wiring 확인**(라이브는
+    LayerState.advance + dispatcher.dispatch_instance_b; ForwardPass.run 미사용). **연기** — run.py
+    재배선 + ~10 테스트 파일 정리 + 풀 스위트 1회 검증 필요한 refactor. 거동·floor 영향 0(잔존).
+    별도 세션. (LayerState 는 forward_pass.py 에 동거 — 모듈 통삭 불가, ForwardPass 클래스만 대상.)
+  - config `n_sat`·`ctx_tier_*` — 보류(n_sat=main_loop 주석·test_aux1 참조; ctx_tier=deadband wiring).
 - [x] **REPORT.md** — floor 증명 + prefill sweep 정정("512만 균형" 폐기 → family, OPERATING_POINT
     §5.2) **완료**(`d1e48a3`). (throughput/상주풀 통찰은 README Runtime Validation 에 이미 있음.)
-- [ ] **실트레이스 e2e/c3(3건) 처리** — cold-start 1M prefill 이 수억 step → 타임아웃(회귀 아님).
-    warm-start 패턴 적용 / 트레이스 cap / slow-mark 중 택. (test_cross_module_e2e, c3 real_50,
-    test_real_longbench.) **(미완 — disposition 사용자 확인 대기)** ※ 실 트레이스는 *idle/floor
-    검증의 vehicle 이 아님*(warm-start 합성으로 대체) — replay path 자체는 유효, full-sim e2e 3건만
-    처리 대상.
+- [x] **실트레이스 시뮬레이션 테스트 skip** — 완료(`4750e48`). 사용자 확정(안 쓰되 삭제 X). 실 trace
+    full cold-start 시뮬 4건 `@pytest.mark.skip`(prefill 47K~2.5M = 수억 step 비현실): e2e
+    TestE2eRealTrace(4), lifecycle real_longbench_100·capacity_bumped_500, stress_real_500. 빠른
+    로더/accounting/stats 단위테스트는 유지(sweep 파서 검증에도 유효). 검증 = sweep_* + warm-start.
 - [x] **★ idle floor 증명** — **완료**(`d1e48a3`, `analysis/floor_proof.py` + REPORT §1–5). 4 sub-item
     전부:
   1. [x] **이론 floor** — live μ-batch 에 dispatcher 와 동일 op-time 함수 직접 호출(합성 오차 0).

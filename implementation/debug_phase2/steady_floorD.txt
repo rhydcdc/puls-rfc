@@ -1,0 +1,8 @@
+=== steady measure: floorD ===
+trace=data/sweep_D_longdec.csv seed_pool=2000 warmup_steps=2003 measure_steps=95000 converged=True
+completed_total=0 steady(reset 이후)=0
+TTFT µs  p50=nan p90=nan max=nan (n=0)   (seed 제외, 실 도착 요청만)
+TBT  µs  p50=nan p90=nan max=nan (n=0)
+idle  gpu_a=0.0801 pim_a=0.1264 gpu_b=0.1261   spread=0.0462  (가장 한가한 자원 idle; 동작점 명중 시 ~0)
+batch(활성 mb avg, 타깃대비): decode개수=122/123  Σkv=12.33M/12.3M  prefill토큰=256/256  depth-work=27.10M/25.6M  (n_mb샘플=38)
+  cohort 구성: decode req 122 + prefill req 2 = 124 (layer1 admit 단위)

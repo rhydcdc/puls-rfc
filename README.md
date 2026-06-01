@@ -235,7 +235,8 @@ The core scheduler policy of PULS ([`ARCHITECTURE.md`](ARCHITECTURE.md) §6) is 
 ## Repository
 
 - [`README.md`](README.md) — this document (entry point)
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — architecture body (motivation, design principles, substrate, instance disaggregation, scheduler integration, adaptive admission, layer flow, prior-art comparison)
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — architecture body (motivation, design principles, substrate, instance disaggregation, scheduler integration, pool-model admission + idle floor §6.8, layer flow, prior-art comparison)
+- [`OPERATING_POINT.md`](OPERATING_POINT.md) — canonical Phase-2 operating-point & batch-composition spec (pool model, steering targets, idle-floor basis)
 - [`docs/scheduler_policy.html`](docs/scheduler_policy.html) — interactive reading guide (companion to ARCHITECTURE.md §6)
 - [`LICENSE`](LICENSE) — Apache 2.0
 

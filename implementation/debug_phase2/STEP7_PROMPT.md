@@ -1,7 +1,7 @@
 # STEP 7 — Phase-2 former-v2(steering) 구현 + 측정 (새 대화용 프롬프트)
 
 > 새 대화창에 그대로 붙여넣으세요. **설계·검증 끝. 구현(former-v2 → S4 → S5)만 남음.**
-> 단일 기준 = [`OPERATING_POINT.md`](OPERATING_POINT.md) (배치 구성 알고리즘 canonical spec)
+> 단일 기준 = [`OPERATING_POINT.md`](../../OPERATING_POINT.md) (배치 구성 알고리즘 canonical spec)
 > + [`PLAN.md`](PLAN.md) (살아있는 체크리스트). 측정 메모 = [`REPORT.md`](REPORT.md).
 > ⚠ `STEP6_PROMPT.md` 는 이전(FIFO+skip 시절) 핸드오프 — **superseded, 볼 필요 없음. 이 STEP7 만 보면 됨.**
 
@@ -14,7 +14,7 @@ PULS 스케줄러 Phase-2(풀 모델)의 **구현**을 이어서 한다. 설계�
    이후 설계가 *정적 동작점 + steering* 으로 진화했다.** 밸런스 로직이 ARCH 와 약간 다르니
    **구현은 OPERATING_POINT.md 대로 하라**(ARCH 의 idle-fraction 기계장치는 S2 에서 이미 삭제됨,
    유휴율은 진단 출력으로만). ARCH 의 F1~F5·인스턴스 분리·DAG 골격은 그대로 유효.
-2. **[`OPERATING_POINT.md`](OPERATING_POINT.md)** — 동작점·배치 구성 알고리즘의 *정답지*. 정독.
+2. **[`OPERATING_POINT.md`](../../OPERATING_POINT.md)** — 동작점·배치 구성 알고리즘의 *정답지*. 정독.
 3. **[`PLAN.md`](PLAN.md)** — 진행 로그(맨 아래) + 체크리스트.
 
 ## 0. 이미 끝난 것 (재작업 금지)

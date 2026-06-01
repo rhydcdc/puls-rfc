@@ -1,0 +1,26 @@
+=== floor proof: data/sweep_D_longdec.csv (n_mb샘플=38, converged=True) ===
+
+per-μ-batch op-time (µs, dispatcher 와 동일 산식):
+  t_gpuA =   52.886   t_pim =   50.428   t_ffn =   50.446
+    t_gpuA 분해: QKV 6.005 + PREFILL_ATTN 42.076 + O_PROJ 4.804
+  Σkv(평균) = 12.33M   cycle = max = 52.886 µs  (병목 = gpu_a)
+
+자원                                   이론floor    측정idle  overlap gap
+GPU-A (QKV+PREFILL_ATTN+O_PROJ)        0.00%     8.01%        8.01%
+PIM (DECODE_ATTN)                      4.65%    12.64%        7.99%
+FFN (Instance B)                       4.61%    12.61%        7.99%
+
+spread  이론 floor = 4.65%   측정 = 4.62%
+overlap gap(병목 GPU-A 측정 idle = 이론 floor 0 위의 fill/drain·전이 틈) = 8.01%
+
+해석: 비병목(PIM·FFN) 측정 ≈ 이론 floor + 병목 overlap gap 이면
+      = greedy dispatch 가 이 워크로드의 알고리즘 floor 에 근접.
+
+--- item 3: prefill depth-work 27.1M(>25.6M) 오버슈트 진단 ---
+이상 깊이(=25.6M/256) = 100K
+prefill 풀(in-flight PREFILL) 평균 크기 = 3.3  이상보다 얕은 후보 평균 = 1.3  풀 최소깊이 평균 = 57K
+실측 depth-work = 27.10M  (타깃 25.6M, 오버슈트 +5.8%)
+t_gpuA 분해: QKV 6.01 + PREFILL_ATTN 42.08(∝depth-work) + O_PROJ 4.80  → PREFILL_ATTN 이 t_gpuA 의 80%
+counterfactual(depth-work 정확히 25.6M): t_gpuA 50.56 → floor spread 0.26% (현 4.65%)
+⇒ 4.65% floor spread 의 대부분이 prefill 오버슈트(+6%) 기인. 단 풀 얇음(3.3)에 얕은 후보 제한적 — sweep_D(decode-우세 상주풀)의 prefill
+  풀 빈약이 한계지 dispatch 결함 아님. 풍부한 prefill 풀이면 floor 더 낮아짐.
