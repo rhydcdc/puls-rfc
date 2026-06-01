@@ -59,6 +59,40 @@ op-time 산식·closed-form 에 이미 존재 → 잃는 것 없음. **S0 후 �
 > 8 GPU 합산 128 TB/s (HBM4 hypothetical projection). 인스턴스 B FFN 은 compute-bound 라
 > 시간 모델에 메모리 항 *고의 생략*(HBM/GDDR 에서 FFN memory-bound 확률 0 — 죽은 분기 회피).
 
+## 0.7 ★ TP=8 분산 버그 수정 (2026-06-01) — 모든 균형 숫자의 토대
+
+> **발견(사용자 지적):** `compute_gpu_op_time_s`·`compute_ffn_op_time_s` 가 단일 GPU
+> peak(2200 TFLOPS *per GPU*)로만 나눠 GEMM wall-clock 을 **8배 과대평가**. PIM 은
+> `k_aggregate`(8-GPU 채널 합산)로 분산 반영하는데 GPU/FFN 만 단일 → 단위 불일치.
+> commit `40e812a` 수정 (num_gpus 파라미터, A=8·B=8).
+
+**수정 후 핵심 물리 (KV cap 18M 가정, op-time 직접 산출):**
+
+| 지표 | 버그(전) | 수정(후) |
+|---|---|---|
+| PIM = GPU-proj 임계 ctx | 56,160 | **~7,020** (÷8) |
+| 256 토큰 FFN | 273 µs | **34 µs** |
+| 세 단위(PIM=GPU-A=B) 균형 ctx | 280K (spread 17%) | **100K (spread 1.7%)** |
+
+- **PIM=GPU-proj 임계 7K**: 7K 토큰만 넘어도 PIM 이 GPU proj 추월 시작. long-context
+  진입 장벽 8배 하락.
+- **삼중 균형 @ ctx 100K**: PIM 39.2 ≈ GPU-A 38.6 ≈ B 38.8 µs (spread 1.7%). 여기가
+  PULS sweet spot — 셋이 다 바쁨(PIM 안 놂 → TBT 최적).
+- **저ctx(<7K)**: PIM < GPU-proj (decode-attn 싸서 PIM 유휴 *정상*, ARCH §6.6). 여기선
+  PIM 균형 강제 말고 일반 batching (§아래 length-aware).
+
+**아직 확정 안 된 파라미터 (사용자 확인 대기):**
+- [ ] **KV 캐파**: 현재 4M → 올려야. HBM4 48GB/stack = **18M tokens**, 64GB = 24M.
+  (Instance A 64 stack, 가중치 137GB 제외 후 / 163,840 B per token.)
+- [ ] **타깃 ctx**: 삼중 균형 = ~100K. README "long-context agentic" 재프레이밍 기준.
+
+## 0.8 짧은 컨텍스트 손실 최소화 — length-aware 아이디어 (사용자 2026-06-01, 설계 중)
+
+> 사용자 제안: 들어온 요청 중 *짧은 것*을 골라, FFN-bound 안 되게 디코드 개수를
+> 조절해 빨리 쳐냄. prefill 은 그 짧은 것들 손해 안 볼 만큼(GPU≈PIM)만. → 짧을 때도
+> TBT/TTFT 최적, 길 때도 유지. (vLLM/Sarathi 의 경험적 512 고정보다 SLO-aware.)
+> **TP 픽스로 임계가 7K 로 내려가 이 구간이 훨씬 넓어짐.** 상세 설계는 S2 former 에서.
+
 ## 1. 코드 인벤토리 — 재사용(substrate) vs 교체(scheduling)
 
 ### 1a. 재사용하는 기판 (substrate — 대부분 무수정, F3 확장만 추가)
@@ -145,7 +179,19 @@ op-time 산식·closed-form 에 이미 존재 → 잃는 것 없음. **S0 후 �
 - [ ] 한 요청은 prefill 소진 시 decode-set 으로 *전환*(빠지는 게 아님). `request.py` FSM
   (PREFILL→DECODE) 그대로.
 
-### 2.2 per-iteration 배치 former (핵심 신규 로직)
+### 2.2 per-iteration 배치 former — 핵심 (S2 구현 중 정밀화 2026-06-01)
+
+> **발견(코드 정독 후):** persistent-mb "병" = mb 컨테이너 자체가 아니라 **(1) `_try_join`
+> 유휴율 게이트**(합류 차단 → 슬롯이 "초기 전부 prefill → 후기 전부 decode" 코호트로 굳음)
+> + **(2) per-mb KV 예산 "땜질" 프레이밍**. (나) disjoint 결정에서 **mb = 슬롯**, per-mb
+> KV = *원리적 2-슬롯 분할*. → S2 = 유휴 게이트 제거(연속 backfill) + 재프레이밍.
+> mb 컨테이너 전면 폐기 아님 (substrate 최대 재사용 — 프롬프트 "substrate 재사용·맹신 금지").
+
+- [x] **재충전 = sticky 슬롯 + 연속 backfill** (확정). 요청은 자기 슬롯에 sticky(배치_생애
+  "빠져나가는 게 아니라 같은 풀에서 단계만 바뀜"). decode 완료로 자리 나면 풀(queue)에서
+  *유휴 게이트 없이* backfill → 슬롯 지속 혼합. cold-start 코호트 동조는 warm-start seed(B)로 무해.
+- [x] **disjoint 보장:** backfill 은 request_queue 에서 pop(= 한 번만 admit) → 슬롯 간 자동
+  disjoint. 요청 동시 1슬롯 불변식 성립.
 
 - [ ] **멤버십 = 용량 (disjoint 분할).** 빈/완료된 μ-batch 슬롯을 재충전: 풀에서 *다른
   in-flight 슬롯에 없는* decoder 를 cap(`max_batch_size`)까지 + KV 여유만큼 prefill admit.
@@ -316,6 +362,15 @@ op-time 산식·closed-form 에 이미 존재 → 잃는 것 없음. **S0 후 �
 
 ---
 
+## 알려진 사전-깨짐 테스트 (TP 픽스 무관, 별도 정리 필요)
+
+- [ ] `test_cross_module_inter_ab_wiring::test_instance_pipeline_dispatch_invoked_per_layer`
+  — S0 가 `instance_pipeline.dispatch` 를 hot path 에서 제거(FFN 노드 대체) → 호출 0.
+  의도된 결과. 테스트 폐기 또는 FFN 노드 기준으로 재작성 (S3).
+- [ ] `test_cross_module_pipeline::test_admission_to_dispatch_pim_op_time_chain` +
+  `::test_multiple_micro_batches_independent_signal_flow` — PIM op_time 을 ns(267.5)로
+  기대하나 dispatcher 는 µs(0.2675) 반환. 사전부터 깨짐(S0/S2 전). 단위 기대값 수정 (S3).
+
 ## 진행 로그
 
 - 2026-06-01: 정독 완료(배치_생애·ARCH §5.6/§6·REPORT §12~14·src 전모듈·measure 인프라).
@@ -330,6 +385,10 @@ op-time 산식·closed-form 에 이미 존재 → 잃는 것 없음. **S0 후 �
   미리"). 방식 (i) 단일 이벤트루프 + INSTANCE_B 자원(§2.6). 재설계 범위가 기판(node·dag·
   dispatcher)까지 확장. **구현 순서 변경: S0(F3 모델링) → S1(admission) → S2(former) → …**
   S0 가 former 의 토대라 먼저. 다음: S0 착수.
+- 2026-06-01: **★ TP=8 분산 버그 발견·수정**(사용자 지적, commit 40e812a). GPU/FFN 이
+  단일 GPU peak 으로만 나눠 8배 과대. PIM=GPU 임계 56K→7K, 삼중균형 280K→100K(§0.7).
+  모든 균형 결론의 토대 정정. 사전-깨짐 3개 식별(별도 정리). 다음: KV 캐파·타깃 ctx 확정 후
+  S2 former(length-aware 포함).
 - 2026-06-01: 가속 커버리지 확인(§0.6) — 동역학 2(더블버퍼링·인스턴스A∥B), op-time 2
   (F1·F5), closed-form 2(Aux). F2→"더블 버퍼링" 용어 통일. **분할 작업: 1차 S0~S2,
   2차 S3~S5** (사용자). 옛 전체 회귀 안 돎(다 교체) — 변경별 타깃 테스트만. test_invariants.py
