@@ -86,7 +86,9 @@ def _op_times_us(sched, mb):
     t_pim = sched.dispatcher.pim_executor.op_time(kv_rows_total=sigma_kv) * 1e-3
     t_ffn = compute_ffn_op_time_s(mb, cal, model, num_gpus=hw.num_gpus_instance_b) * 1e6
     depth_work = sum(sum(v) for v in mb.prefill_chunk.values())   # Σ token depth (measure_steady 정의)
-    return t_gpuA, t_pim, t_ffn, sigma_kv, _gpuA_parts, depth_work
+    n_dec = len(mb.decode_tokens)
+    n_pref = sum(len(v) for v in mb.prefill_chunk.values())
+    return t_gpuA, t_pim, t_ffn, sigma_kv, _gpuA_parts, depth_work, n_dec, n_pref
 
 
 def main():
@@ -100,6 +102,8 @@ def main():
     ap.add_argument("--label", default="floor")
     ap.add_argument("--age-cap", type=int, default=None,
                     help="age_cap 오버라이드 (item 4 ablation; 큰 값=∞ 무력화)")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="warm-start 풀 샘플링 난수 시드 오버라이드 (다른 비편향 스냅샷 관찰)")
     ns = ap.parse_args()
 
     run = Run.init("puls_sched.config:default_dummy_config", ns.trace,
@@ -108,7 +112,7 @@ def main():
     if ns.age_cap is not None:   # frozen dataclass — in-place 우회(모든 컴포넌트가 동일 객체 참조)
         object.__setattr__(sched.config.admission, "age_cap", ns.age_cap)
     tel = sched.admission.idle_telemetry
-    rng = random.Random(sched.config.seed)
+    rng = random.Random(ns.seed if ns.seed is not None else sched.config.seed)
     _seed_pool(sched, _trace_lengths(ns.trace), ns.seed_pool, rng)
 
     def drained():
@@ -165,6 +169,8 @@ def main():
     t_patt = sum(o[4][1] for o in ot) / n
     t_oproj = sum(o[4][2] for o in ot) / n
     dwork = sum(o[5] for o in ot) / n
+    n_dec = sum(o[6] for o in ot) / n
+    n_pref = sum(o[7] for o in ot) / n
     cycle = max(t_gpuA, t_pim, t_ffn)
     floor = {"gpu_a": 1 - t_gpuA / cycle, "pim_a": 1 - t_pim / cycle, "gpu_b": 1 - t_ffn / cycle}
     meas = {"gpu_a": g, "pim_a": p, "gpu_b": b}
@@ -177,6 +183,7 @@ def main():
         "per-μ-batch op-time (µs, dispatcher 와 동일 산식):",
         f"  t_gpuA = {t_gpuA:8.3f}   t_pim = {t_pim:8.3f}   t_ffn = {t_ffn:8.3f}",
         f"    t_gpuA 분해: QKV {t_qkv:.3f} + PREFILL_ATTN {t_patt:.3f} + O_PROJ {t_oproj:.3f}",
+        f"  batch: decode {n_dec:.0f}/123 · prefill {n_pref:.0f}/256 토큰",
         f"  Σkv(평균) = {skv/1e6:.2f}M   cycle = max = {cycle:.3f} µs  (병목 = "
         f"{max(('gpu_a', t_gpuA), ('pim_a', t_pim), ('gpu_b', t_ffn), key=lambda x: x[1])[0]})",
         "",
