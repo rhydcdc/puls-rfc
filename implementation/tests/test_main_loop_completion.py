@@ -89,6 +89,33 @@ def test_layer_advance_at_l_triggers_completion_check(scheduler_core, dummy_conf
     assert req.decoded_count == 1
 
 
+# ============================================================================
+# S4(b) — 측정 substrate (first_token_time + 완료 sink)
+# ============================================================================
+
+def test_first_token_time_recorded_at_first_decode(scheduler_core, dummy_config):
+    """첫 decode 토큰 생성 시 first_token_time = clock.now (그 전엔 None)."""
+    mb_id = _setup_mb_with_decode_reqs(scheduler_core, n_reqs=1, max_tokens=100)
+    mb = scheduler_core.dispatcher.micro_batches[mb_id]
+    req = next(iter(scheduler_core.in_flight_requests.values()))
+    assert req.first_token_time is None                      # prefill/미생성
+    mb.current_layer_index = dummy_config.model.num_layers - 1
+    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.FFN))
+    assert req.first_token_time == scheduler_core.clock.now  # 첫 토큰 marker
+
+
+def test_completed_request_goes_to_sink(scheduler_core, dummy_config):
+    """완료 요청은 in_flight 에서 빠지고 completed_requests sink 에 보존(버리지 않음)."""
+    mb_id = _setup_mb_with_decode_reqs(scheduler_core, n_reqs=1, max_tokens=1)  # 1토큰서 완료
+    mb = scheduler_core.dispatcher.micro_batches[mb_id]
+    req = next(iter(scheduler_core.in_flight_requests.values()))
+    mb.current_layer_index = dummy_config.model.num_layers - 1
+    scheduler_core._maybe_advance_forward_pass(_kernel_completion_event(mb_id, NodeType.FFN))
+    assert scheduler_core.completed_requests == [req]
+    assert req.id not in scheduler_core.in_flight_requests
+    assert req.completion_time is not None and req.first_token_time is not None
+
+
 def test_token_decode_signal_increments_decoded_count(scheduler_core, dummy_config):
     mb_id = _setup_mb_with_decode_reqs(scheduler_core, n_reqs=3, max_tokens=100)
     mb = scheduler_core.dispatcher.micro_batches[mb_id]

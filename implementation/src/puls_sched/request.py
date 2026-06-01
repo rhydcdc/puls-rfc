@@ -31,6 +31,9 @@ class Request:
     max_tokens: int = 0
     decoded_count: int = 0
     completion_time: float | None = None
+    # ---- Phase-2 S4(b) — 측정 substrate. 첫 decode 토큰 생성 시각(L 도달 첫 토큰).
+    # TTFT = first_token_time − arrival_time. None = 아직 prefill 중/미생성. ----
+    first_token_time: float | None = None
     # ---- Impl-10-pre-2 (O9.1) — prefill chunking position tracker ----
     prefill_processed: int = 0
     # ---- Phase-2 former-v2 — age-cap 공정성 추적 (OPERATING_POINT §3) ----

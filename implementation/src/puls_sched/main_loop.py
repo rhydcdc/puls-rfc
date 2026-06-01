@@ -46,6 +46,9 @@ class SchedulerCore:
     layer_state: LayerState
     completion: Completion
     in_flight_requests: dict[int, Request] = field(default_factory=dict)
+    # ---- Phase-2 S4(b) — 완료 요청 sink (측정용). 완료 시 pop 후 버리지 않고 보존 →
+    # measure_steady 가 TTFT/TBT 산출. (스케줄링 로직 무관, 진단 substrate.) ----
+    completed_requests: list[Request] = field(default_factory=list)
     _next_mb_id: int = 0
     # ---- Phase-2 S2 — 합류 게이트(_join_gate_open) 삭제. 풀 모델에선 멤버십=용량이라
     # 자리(KV·batch) 있고 일감 있으면 무조건 backfill (유휴율 게이트 개념 소멸, 배치_생애 §밸런스).
@@ -242,12 +245,15 @@ class SchedulerCore:
             if req is None:
                 continue
             req.decoded_count += 1
+            if req.first_token_time is None:        # S4(b) — 첫 decode 토큰 = TTFT marker
+                req.first_token_time = self.clock.now
             if req.state == RequestState.PREFILL:
                 # Defensive — prefill_processed 이미 도달했을 가능성 (race-free 보장 위)
                 req.transition_to(RequestState.DECODE)
             if self.completion.check(req, eos_seen=eos_seen):
                 self.completion.finalize(req)
                 self.in_flight_requests.pop(req_id, None)
+                self.completed_requests.append(req)   # S4(b) — sink (버리지 않고 보존)
         # 다음 token 의 forward pass 위 reset (multi-token decode 정합)
         mb.current_layer_index = 0
         # Phase-2 S2 — 슬롯 재구성 = 잔존 멤버 phase 전진만(backfill 없음, §2.5). evict 판정 =
