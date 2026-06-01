@@ -235,10 +235,31 @@ HBM4 가정 (64 stack, 가중치 137GB 제외 후 / 163,840 B per token). former
     유휴율 게이트(`balance_intra_A`) 불필요 — 동작점이 곧 답.
   - 슬롯당 KV 예산 = `_per_mb_kv_budget`(30M/2=15M)은 disjoint 2-슬롯 분할용으로 유지.
   - `balance_inter_AB`(시간 기준)는 워크로드가 동작점 벗어날 때(A-bound 전이 등) 미세 조정용.
-- [ ] **prefill→decode 전이 시 풀 복귀** — 다음 iteration 부터 PIM decode 채움. 현
-  `_maybe_advance_forward_pass` 의 전이 검출(345·353) 유지.
+- [ ] **★ 생애 사이클(prefill→decode 전이)은 *반드시 유지* — 동적 밸런스 삭제와 무관.**
+  동적 prefill/chunk 사이징(`balance_pim_slack` 등)은 없애지만, **요청의 생애 전이는
+  풀 모델의 본질이라 남는다**: 트레이스의 한 요청은 prefill 을 거쳐 decode 로 가고,
+  **prefill 이 끝나면(`prefill_processed ≥ len(prompt)`) 그 요청을 decode-only 로 전환**
+  (`RequestState.PREFILL→DECODE`) → 다음 iteration 부터 PIM(decode-attn) 을 채운다.
+  코드: [main_loop.py:345·353] `req.transition_to(DECODE)` — **S2 에서 유지(삭제 아님)**.
+  → "밸런스 계산은 정적 동작점으로 대체, 요청 생애는 그대로" (사용자 확인 2026-06-01).
 - [ ] **iteration 단위 = 1 forward pass(L=80 layer → decoder 당 1 token).** mb 의 layer
   반복(reset_micro_batch per layer)은 substrate 그대로. 바뀌는 건 L 도달 후 *재선택*.
+
+### 2.8 tick — 고정 주기 polling 불필요 (이미 event-driven), 재충전 트리거는 유지
+
+> 사용자 질문: "처음 배치 짤 때 정해지니 tick 도 필요 없지?" — 부분 맞음. 세 가지 분리:
+
+- [x] **고정 주기 polling tick = 이미 없음.** STEP 2.5(Phase-1)에서 폐기됨
+  ([main_loop.py:186] 주석 "고정 타이머 self-push 폐기"). 지금도 주기적으로 "비었나"
+  계속 체크 안 함 — ADMISSION_TICK 은 **완료(KERNEL_COMPLETION)·신규 도착(REQUEST_ARRIVAL)
+  이벤트에만** 재기동(line 129·137·144). `tick_interval_us`(10µs)는 그 재기동 지연값일 뿐
+  주기 polling 아님.
+- [ ] **매 tick cycle 측정·payload 계산 = 삭제(§2.7).** 동작점 고정이라 a_cycle/b_cycle/
+  t_pim 측정 불필요 → ADMISSION_TICK payload 가 trivial 화.
+- [ ] **빈 슬롯 재충전 트리거 = 유지(필수).** "한 번 짜고 끝"이 아님 — 요청이 완료돼 슬롯이
+  비면 그 자리를 풀에서 다시 채워야 풀이 계속 돈다(sticky 슬롯 + backfill, §2.2). 이
+  트리거(완료 이벤트 → former 재호출)는 풀 모델의 심장. 즉 ADMISSION_TICK *이벤트*는
+  남되 payload 가 가벼워지고, trigger 는 이미 이벤트 기반.
 
 ### 2.3 staggering — μ-batch *다수의 존재 이유* = F3(일차) + F2(이차)
 
@@ -431,6 +452,10 @@ HBM4 가정 (64 stack, 가중치 137GB 제외 후 / 163,840 B per token). former
   (STEP5 버그 재발 방지, REPORT §13).
 - [ ] **추측 말고 코드/측정** — op-time 은 diag_optime 로 직접.
 - [ ] **변경 즉시 커밋**, 커밋 메시지는 heredoc, `PYTHONIOENCODING=utf-8` + 파일 출력.
+- [ ] **검증은 철저하되 과도하지 말 것** (사용자 2026-06-01). 변경한 모듈+직접 영향
+  테스트는 *철저히* 돌려 확인하되, 무관한 전체 스위트를 반복 회귀하거나 같은 걸 여러 번
+  돌리지 않는다. 메타·음성·교차불변 테스트도 *핵심만* — 과잉 케이스 양산 금지(CLAUDE.md
+  §2 단순성). "green ≠ correct" 는 지키되 테스트를 위한 테스트는 만들지 않는다.
 
 ---
 
@@ -470,6 +495,9 @@ HBM4 가정 (64 stack, 가중치 137GB 제외 후 / 163,840 B per token). former
   "KV 합 채우기+prefill 512"라 `_compose_admission_payload`·`_measure_cycles`·`_make_t_pim_fn`·
   balance 3종·deadband 삭제 대상. main_loop ~100 LOC↓, admission 절반↓. 측정 substrate
   (idle_telemetry·evaluator)는 진단용 보존. S2 재정의(§2.7·§3 S2). 다음: S2 former 구현.
+- 2026-06-01: **생애 전이 유지 + tick 구분 명확화(§2.8)**(사용자). admission 호출은 당연히
+  필요(빈 슬롯 재충전) — 없애는 건 *주기적 체크 tick*뿐(이미 STEP 2.5 에서 폐기). 생애
+  전이(prefill→decode)는 동적 밸런스 삭제와 무관하게 유지(§2.2 ★).
 - 2026-06-01: 가속 커버리지 확인(§0.6) — 동역학 2(더블버퍼링·인스턴스A∥B), op-time 2
   (F1·F5), closed-form 2(Aux). F2→"더블 버퍼링" 용어 통일. **분할 작업: 1차 S0~S2,
   2차 S3~S5** (사용자). 옛 전체 회귀 안 돎(다 교체) — 변경별 타깃 테스트만. test_invariants.py
