@@ -87,7 +87,7 @@ Limitations of existing HBM-PIM research, grouped by axis:
 - **In-house scheduler** — compatible with chunked-prefill + mixed-batch primitives ([`ARCHITECTURE.md`](ARCHITECTURE.md) Section 6):
   - **Event-driven dispatch + dependency DAG** — encodes invariants (data dependency + resource) as a graph, reducing dispatch to a ready-node selection problem
   - **2-μ-batch lookahead** — starting work for the next μ-batch early + filling idle resources with work from another μ-batch (emerges naturally)
-  - **Adaptive admission with hysteresis deadband** — dynamic admission based on measured GPU / PIM idle fractions, stabilizing the PIM advantage across batch sizes
+  - **Pool-model composition with local-greedy steering** — admission (pool refill) ‖ decode-set steering ‖ prefill steering, each hitting fixed operating-point targets independently, with an age-cap for fairness (no global statistics, no idle-feedback loop)
 
 ## Approach Summary
 
@@ -197,7 +197,7 @@ Interpretation:
 - **All four operating-point targets hit** — steering composes the decode-set (123 / 12.3M) and prefill (256 / 25.6M) *independently* from the pool. Length-distribution-agnostic (hit by combining short + long).
 - **Three-resource idle 8–13%, spread 4.7%** — versus ~67% idle (t_A + t_B sum) under serialization, dropped to ~1/14 of that. **Quantitative evidence that F2 (projection ‖ PIM double-buffering) and F3 (inter-instance pipeline) manifest.** Within the ±10% diagnostic band = balanced.
 - **Emerges without tuning** — fixing a realistic abundant-pool workload makes idle ≈ 0 appear *on its own*. Real-server steady state (a large standing decode population + continuous prefill) is exactly this condition.
-- **GPU-A is the bottleneck (8% idle)** — the synthetic prefill distribution sits slightly deeper than the sweet spot, so depth-work 27.1M (over the 25.6M target) makes prefill-attn a touch heavy. A minor in-band imbalance (workload-depth-dependent, not the algorithm).
+- **Measured idle is the algorithm floor (proven).** Calling the exact op-time functions on the dispatched μ-batches gives a theoretical perfect-overlap floor whose **spread (4.65%) matches the measured spread (4.62%)**; the absolute idle is that floor plus a *uniform* 8% overlap gap (pipeline fill/drain + 2-active staggering), so there is **zero unexplained loss**. GPU-A is the bottleneck because the prefill depth-work overshoots (27.1M vs 25.6M) — and that overshoot is the **age-cap fairness cost**: with pure steering (age-cap off) the depth-work lands on target and the spread collapses to 0.1% (at the price of starvation). Detailed derivation — [`ARCHITECTURE.md`](ARCHITECTURE.md) §6.8, full record — [`implementation/debug_phase2/REPORT.md`](implementation/debug_phase2/REPORT.md).
 - **Throughput sustainability is a separate axis** — decode length is very long (large standing pool), so zero completions occur within the measure window → TTFT/TBT are not reported here (separate measurement). The validation target is the per-cycle balance (idle). Drain / completion / zero KV leak are separately verified by the synthetic acceptance suite (all requests complete · KV remaining = initial · clean termination).
 
 ### Honest Disclosure

@@ -29,10 +29,11 @@
   - [6.1 μ-batch Composition](#61-μ-batch-composition)
   - [6.2 Invariants](#62-invariants)
   - [6.3 Dispatch Policy: Event-driven + Dependency DAG](#63-dispatch-policy-event-driven--dependency-dag)
-  - [6.4 Adaptive Admission](#64-adaptive-admission)
+  - [6.4 Admission: The Operating Point (Pool Model)](#64-admission-the-operating-point-pool-model)
   - [6.5 Example Dispatch Trace](#65-example-dispatch-trace)
   - [6.6 Bound Analysis](#66-bound-analysis)
   - [6.7 Implementation Requirements](#67-implementation-requirements)
+  - [6.8 Idle Floor: Theory vs Measurement](#68-idle-floor-theory-vs-measurement)
 - [7. Orthogonality to Complementary Techniques](#7-orthogonality-to-complementary-techniques)
   - [7.1 Paged KV Memory Management](#71-paged-kv-memory-management)
   - [7.2 Speculative Attention](#72-speculative-attention)
@@ -249,9 +250,9 @@ Instance A's SP-PIM aggregate channel count is fixed at k_total = 2048. PIM acti
 Since PIM absorbs the KV-length dependency at the attention stage, the Instance A → Instance B inter-instance handoff tensor (§3.4) is always fixed-shape.
 
 - Decode batch: B × hidden
-- Uniform-chunk prefill batch: (B · chunk) × hidden
+- Prefill batch: (total prefill tokens) × hidden
 
-Instance B's GPUs perform only uniform FFN GEMMs without ragged batching handling, so intra-batch straggler bubbles are eliminated. (Instance A's GPUs still deal with the length dependency of prefill chunk attention, so they are not the direct beneficiary of this effect.)
+Instance B's FFN GEMM depends only on the *total token count* of the batch, not on how those tokens are split across requests — so per-request prefill chunks may be ragged (the pool-model prefill steering distributes the 256 tokens unevenly to steer the depth-sum, §6.4). The fixed-shape benefit is that the *attention*-stage KV-length variance has already been absorbed by PIM, so Instance B receives a shape that depends only on the token count; straggler bubbles from per-request KV-length variance are eliminated. (Instance A's GPUs still deal with the length dependency of prefill chunk attention, so they are not the direct beneficiary of this effect.)
 
 ### 5.3 PIM Overlap during Compute-Bound Windows
 
@@ -389,47 +390,52 @@ on event(kernel K of μ-batch X completes):
 
 **Natural emergence of look-ahead / back fill.** Since I2 is loose — *"any time after QKV completes"* — at moments when PIM is idle, decode-attn of another μ-batch can be started *regardless of which μ-batch the GPU is currently working on*. This emerges automatically from greedy dispatch without any separate policy specification.
 
-### 6.4 Adaptive Admission
+### 6.4 Admission: The Operating Point (Pool Model)
 
-The scheduler dynamically adjusts the per-μ-batch composition decision *on a per-iteration basis*. The GPU/PIM idle fractions of the previous iteration are measured to regulate the next μ-batch's admission. Hooked on top of the chunked-prefill policy as dynamic adjustment of chunk size · decode batch (§5.5).
+The scheduler composes each μ-batch to drive the three resources (PIM = decode-attn, GPU-A = projection + prefill-attn, FFN = Instance B) to equal time, minimizing inter-instance and intra-instance idle. Composition is **three separate concerns**, each steered independently from its own in-flight pool — *not* one cohort regulated by idle-fraction feedback. (An earlier draft used measured GPU/PIM idle fractions + a hysteresis deadband to adjust admission per iteration; that feedback model is superseded — see the closing note. The scheduler now hits *fixed targets* by steering rather than reacting to measured idle.)
 
-**Decision Rule.** The essential frame of admission control:
+1. **Admission = pool refill only.** `request_queue → in-flight (PREFILL)`, gated solely by the aggregate KV budget (`can_admit`). It does not look at the decode/prefill targets. A request with `prompt_len = 0` (decode-only), or one whose prefill is already complete, transitions straight to DECODE.
+2. **Decode-set steering.** From the in-flight **DECODE pool**, select a set hitting two targets at once — **count 123 ∧ Σkv 12.3M** — by local-greedy steering with an age-cap. Pure *selection* (no KV admission, no queue manipulation; KV is reserved at pool entry). Unselected requests age (`wait++`); selected reset (`wait = 0`).
+3. **Prefill steering.** From the in-flight **PREFILL pool**, distribute **256 tokens** (the fixed FFN-batch knob, ① below) across members so the PREFILL_ATTN depth-sum hits **25.6M**, by the same per-token local-greedy + age-cap. A member receiving 0 tokens *stays in the pool* (it is not added as an empty chunk, which would inflate the μ-batch and starve decode) — a separate axis from decode.
+4. **Per-iteration recomposition.** After every forward pass the μ-batch is re-selected from the pool (`_recompose_mb`), disjoint from other active μ-batches. The in-flight window holds 2 active μ-batches (`_STAGGERING_TARGET_MB = 2`; capacity 3 = 2 active + 1 transition slack), which is the staggering precondition for F2/F3 overlap (§5.6, §6.5). This restores the degree of freedom a sticky-cohort model destroys — composition tracks the pool as it drains and refills.
 
-- **Layer 1 — μ-batch composition** (on top of the chunked-prefill + mixed-batching primitive): decides the prefill-chunk vs decode token mix and N. **The determining factor of TTFT / TBT SLO condenses to this layer.**
-- **Layer 2 — DAG dispatch** (§6.3): Automatic ready-node selection on top of the Layer 1 result. Since processing is serial, it cancels with admission variables — adaptive degrees of freedom concentrate in Layer 1.
+**The operating point (causal chain ① → ⑤).** The prefill token count fixes the FFN batch, which fixes the decode count, which with the balance ctx fixes the decode-KV sum:
 
-Adaptive admission's primary objective = balancing the two instances of the inter-instance pipeline cycle `max(A_cycle, B_cycle)` (both fully utilized). Secondary objective = balance of GPU·PIM double-buffering inside Instance A (§5.6). A hysteresis deadband suppresses oscillation from GPU jitter · workload variance (see the Deadband Policy section).
-
-| Layer | Measurement | Diagnosis | Admission adjustment |
+| order | fixed value | value (prefill 256) | binding resource |
 |---|---|---|---|
-| Inter-AB (primary) | `A_cycle > B_cycle` (B idle) | A-bound (long-ctx) | admission ↓ effect limited (the PIM attention component of `A_cycle` depends on KV length) — B idle naturally accepted |
-| Inter-AB (primary) | `A_cycle < B_cycle` (A idle) | B-bound (short-ctx + low batch) | admit prefill chunk → `A_cycle` increases, balance restored |
-| Intra-A (secondary) | GPU idle > `θ_high`, PIM busy | PIM-dominant inside Instance A | admit prefill chunk → fill GPU window (utilize idle GPU with PREFILL_ATTN concurrent with PIM decode-attn) |
-| Intra-A (secondary) | PIM idle > `θ_high`, GPU busy | GPU-dominant inside Instance A | admit additional decode → fill PIM window (utilize idle PIM with decode-attn concurrent with GPU projection) |
-| — | Both layers below `θ_low` | balanced | maintain current admission |
-| — | Both layers idle | underloaded | enlarge μ-batch size or accelerate wait tokens |
+| ① | prefill tokens / batch | **256** (power-of-2, kernel-friendly) | GPU-A (PREFILL_ATTN = Σ chunk×depth) |
+| ② | balance time X | **~51 µs** (TBT ≈ X·L ≈ 4.1 ms) | — |
+| ③ | FFN batch | **379 tokens** | Instance B |
+| ④ | **decode count N_dec (control target)** | **123** (= 379 − 256) | Instance B |
+| ⑤ | **decode-KV sum (control target)** | **12.3M** | Instance A (PIM) |
+| + | prefill KV-work (control target) | **25.6M** (= 256 × depth) | GPU-A |
+| + | balance ctx | **~100K** (hardware constant) | — |
 
-**Deadband Policy: Ctx-tiered Static Lookup.**
+The *count* (123) is independent of KV length (FFN sees only the token count); the *KV sum* (12.3M) is the sum of lengths (PIM sees only the sum). Both satisfied ⟺ mean ctx ≈ 100K.
 
-- **Width formula** — Deadband width = `2σ_total` (control-theory standard, hysteresis stability condition).
-- **`σ_total` decomposition** — RSS sum of GPU jitter (L2 hit rate / warp scheduler / HBM controller queuing / kernel launch) and workload variance (KV length variance / arrival jitter).
-- **Rationale for ctx-tiered adoption** — The longer the ctx, the longer the cycle, the greater the accumulated `σ`, and the more dominant the KV variance influence → static per-ctx lookup.
+**Local-greedy steering + age-cap (the `former` algorithm).** The control target is the pair *(count 123, Σkv 12.3M)* — not a single average. Pure FIFO catches Σkv but misses the count on an off-average pool (measured spread 22–30%). So at each step the scheduler computes the *length it next needs* and admits the decoder closest to it (steering); a request that has waited `≥ AGE_CAP` is force-included (age-cap — fairness / FIFO intent). No global statistics, no future prediction — purely local:
 
-| ctx | σ_total estimate (qualitative) | deadband width |
-|---|---|---|
-| Short-ctx (2k–8k) | low (GPU-jitter dominated) | narrow |
-| Mid-ctx (~32k) | medium | medium |
-| Long-ctx (128k–1M) | high (KV-variance dominated) | wide (enters clamp 0% region) |
+```
+one μ-batch (decode):                 # AGE_CAP = 2
+  n=0, S=0
+  while n < target_count(123) and S < target_kv(12.3M) and pool:
+    if any request with wait ≥ AGE_CAP: admit the oldest             # fairness (forced)
+    else: admit decoder closest to ideal=(target_kv−S)/(target_count−n)   # steering
+  remaining waiters: wait += 1
+  → converges to (123, 12.3M); n increases monotonically → ≤123 steps.
+prefill: distribute 256 tokens to depth-sum 25.6M by the same steering + age-cap.
+window = 3 (2 active for F2/F3 overlap + 1 transition slack).
+```
 
-Quantification of `σ_total`, deadband sweep, and the online adaptive variant (a per-iteration `σ` estimator that auto-updates the width) are all future work outside the scope of this study — since the self-authored scheduler framework lacks a real-hardware jitter model, the very definition of σ measurement is absent. This evaluation measures only the qualitative behavior of the dispatch policy in the regime where the GPU·PIM cycle is balanced (balanced regime).
+- **★ Length-distribution-agnostic (the key property).** On a heavily varied pool (real traffic), short + long requests are *combined* to hit both targets. Heavy / mixed / bimodal — any distribution works, because the average is never read; only the two targets are matched. Even an age-cap-forced off-size request is corrected by steering (a forced long request lowers `ideal` → the next picks several short ones), so the batch stays (123, 12.3M). A request that arrives first is processed within ≤ AGE_CAP+1 batches.
+- **Operating parameters = target_count + target_kv + AGE_CAP.** The ±10% band [11.1M, 13.5M] is **not a control value** — it is a diagnostic idle-SLA label (band width ≈ worst-case tolerated idle: ±10% → edge idle ~8.6–10.6%). Steering hits the target, so realized idle ≈ 0; `former` does not stop on the band.
+- **AGE_CAP trade-off (sweep).** cap↑ → steering freedom↑ → spread↓, but waiting (latency)↑. cap↓ → FIFO-like → fair / low-latency but spread↑. `cap1: sp 3.1%` · `**cap2: sp 1.2%, wait ≤3**` · `cap5: sp 0.7%, wait 5` · `cap∞: sp 0.8% but starvation (wait 37)`. → **AGE_CAP = 2 adopted** (the spread / fairness / latency sweet spot). The fairness cost of this choice is quantified in §6.8.
 
-**Admission Lower Bound: MFU Floor.** `N ≥ N_sat` (FFN GEMM saturating knee) — below this, GEMM MFU is sub-saturating and kernel-launch overhead dominates. The upper bound belongs to the TPOT SLO model domain (future work). Per-ctx binding:
+**ctx 100K is a hardware constant, not an empirical guess.** Solving the triple balance yields `ctx_balance = (K2+1)/K1` from the op-time coefficient ratios (PIM tile rate ÷ FFN flops/tok ÷ prefill-attn flops/tok·depth ÷ proj flops/tok); *prefill cancels out*, so the balance ctx is 100K for **every** prefill (§5 sweep B confirms). Its role is to *derive* the targets (Σkv 12.3M = 123 × 100K), **not** to impose a mean on the workload. This is why the algorithm is length-distribution-agnostic: it matches the two derived targets, however individual request lengths are distributed.
 
-| ctx regime | Binding |
-|---|---|
-| 2k–256k | B-bound (FFN GEMM saturating knee) |
-| 256k–512k | Transition |
-| ≥ 512k | A-bound (B latency hidden inside A_cycle) |
+**prefill 256 vs 512.** prefill is not the balance ctx but the *scale knob* X. 256 halves TBT (51 vs 101 µs) and HBM (~30M → 5 TB vs 60M → 10 TB) at zero TTFT / throughput cost (X is linear in prefill, so chunk 2× · cycle ½ cancel). The sole risk is FFN GEMM MFU saturation — batch 379 must fill the tensor cores; wave-quant estimation says batch ~128 saturates (379 is ample), but the model fixes MFU = 0.6 so the knee is not observable (silicon absent). **512 is the fallback if FFN saturation proves infeasible** (batch 759, vLLM-convergent).
+
+> **Superseded note.** The legacy idle-fraction-feedback + hysteresis-deadband admission of earlier drafts is replaced by this pool model. Deadband width was `2σ_total`, but σ is unmeasurable on a self-authored framework with no hardware jitter model (§8 / OI4), so the feedback variant was never the operative mechanism. The pool model hits fixed targets directly via steering; the ±10% band survives only as a diagnostic idle-SLA label, not a control input.
 
 ### 6.5 Example Dispatch Trace
 
@@ -458,7 +464,7 @@ The table below is *one trace* of event-driven dispatch, not a fixed period. `T_
 
 ### 6.6 Bound Analysis
 
-Qualitative estimation. Since the scheduler recognizes the bound at runtime via the §6.4 idle fraction, this table is not a control input. After sim measurement, only the component times · transition ctx are updated.
+Qualitative estimation of the *physical* bounds — which resource limits the cycle at a given ctx. This table is descriptive, not a control input: the §6.4 pool model steers to fixed targets rather than reacting to a measured bound. After sim measurement, only the component times · transition ctx are updated.
 
 **Intra-A bound** — From the perspective of double-buffering (§5.6): Instance A's internal GPU stage (projection + AR) vs PIM stage (decode attention).
 
@@ -476,8 +482,75 @@ Qualitative estimation. Since the scheduler recognizes the bound at runtime via 
 
 - Self-authored event-driven framework: 1 event queue, 1 dependency DAG, 3-μ-batch state in the in-flight window. Same invocation cadence as the production scheduler step.
 - PIM completion-time predictor (FSM cycle-accurate).
-- Idle fraction telemetry (per GPU·PIM, accumulated per iteration).
-- Admission controller (dynamic adjustment of chunk size · decode batch).
+- Idle fraction telemetry (per GPU-A · PIM · FFN, accumulated per measurement window).
+- Pool-model composer (decode-set steering ‖ prefill steering ‖ admission refill, §6.4).
+
+### 6.8 Idle Floor: Theory vs Measurement
+
+The pool model converges to a measured three-resource idle of GPU-A **8.0%** / PIM **12.6%** / FFN **12.6%** (spread **4.6%**) on an abundant long-decode pool. This section proves that this idle is the **floor** for this workload-and-algorithm — and decomposes every component, leaving zero unexplained loss. (Reproduced by [`implementation/analysis/floor_proof.py`](implementation/analysis/floor_proof.py), which calls the *exact* dispatcher op-time functions on the live μ-batches the simulator dispatched — no synthetic reconstruction.)
+
+**Single-server model.** Each resource is a single server (dispatcher `gpu_busy` · `pim_busy` · `instance_b_busy` — invariants I4/I5/I6, one op at a time). In steady state, throughput is set by the busiest server's per-μ-batch work. Per μ-batch, per layer:
+
+```
+t_gpuA = QKV + PREFILL_ATTN + O_PROJ          (gpu_instance_a, serial)
+t_pim  = DECODE_ATTN(Σkv)                       (pim_instance_a)
+t_ffn  = FFN(batch)                             (gpu_instance_b)
+perfect overlap (F2 double-buffer · F3 pipeline) →
+  cycle        = max(t_gpuA, t_pim, t_ffn)      (the bottleneck server rate-limits)
+  floor idle_r = 1 − t_r / cycle
+```
+
+**Op-time of the measured batch (TP=8, µs):**
+
+```
+t_gpuA = QKV 6.01 + PREFILL_ATTN 42.08 + O_PROJ 4.80 = 52.89   ← bottleneck
+t_pim  = DECODE_ATTN(Σkv 12.33M)                       = 50.43
+t_ffn  = FFN(batch 378)                               = 50.45
+cycle  = 52.89 µs
+```
+
+| resource | theoretical floor | measured idle | overlap gap |
+|---|---|---|---|
+| GPU-A (QKV + PREFILL_ATTN + O_PROJ) | **0.00%** | 8.01% | 8.01% |
+| PIM (DECODE_ATTN) | 4.65% | 12.64% | 7.99% |
+| FFN (Instance B) | 4.61% | 12.61% | 7.99% |
+| **spread** | **4.65%** | 4.62% | — |
+
+**Two key matches.**
+
+1. **Theoretical floor spread 4.65% ≈ measured spread 4.62%.** The measured spread is not algorithm slack — it is this batch's intrinsic three-resource imbalance (t_gpuA 52.9 vs t_pim/t_ffn 50.4). The algorithm has reached the floor.
+2. **The overlap gap is a uniform 8.0% across all three resources.** The bottleneck (GPU-A) has theoretical floor 0, so its measured 8% *is* the overlap gap = pipeline fill/drain + the 2-active staggering transition slack. Being uniform, it does not widen the spread.
+
+So **measured idle = theoretical floor + uniform overlap gap (8%)**, a complete decomposition. Greedy dispatch reaches the floor.
+
+**What sets the floor spread — prefill depth-work overshoot.** PREFILL_ATTN is 80% of t_gpuA, and PREFILL_ATTN ∝ depth-work. GPU-A is the bottleneck because the measured depth-work (27.1M) overshoots the 25.6M target by +5.8%. Counterfactual: at exactly 25.6M, t_gpuA → 50.56 ≈ t_pim ≈ t_ffn, and the floor spread collapses from 4.65% to **0.26%**.
+
+**The overshoot is the age-cap fairness cost — not pool exhaustion.** prefill tokens stay at 256 (power-of-2 / kernel-friendly, the FFN-batch knob); only depth-work is free. An `--age-cap` ablation separates the two hypotheses:
+
+| age_cap | depth-work | theoretical floor spread | measured spread | note |
+|---|---|---|---|---|
+| **2** (default, fairness on) | 27.10M (+5.8%) | 4.65% | 4.62% | wait ≤ age_cap+1, starvation 0 |
+| **∞** (pure steering) | 25.73M (+0.5%) | 0.40% | **0.11%** | deepest requests starve (wait 37) |
+
+With fairness off (`age_cap = ∞`), pure steering hits depth-work 25.73M — on target. **The shallow material was in the pool** (diagnostic: ~1.3 candidates shallower than the 100K ideal, pool min depth 57K). The `age_cap = 2` overshoot comes from force-including long-waited *deep* prefill requests; with the token count locked at 256, those deep tokens displace steering's shallow picks and raise the depth-sum.
+
+```
+age_cap=2 → forced deep long-wait prefill (count fixed 256) → depth-work +5.8%
+          → PREFILL_ATTN ↑ (80% of t_gpuA) → GPU-A bottleneck → floor spread 4.65%
+age_cap=∞ → no forcing → steering hits 25.73M → spread 0.11%  (but starvation)
+```
+
+**Conclusion — floor reached, fully decomposed.**
+
+```
+measured spread 4.62% = theoretical floor spread 4.65%
+                      = fairness cost (age_cap=2 prefill overshoot)   ~4.4%
+                      + workload-intrinsic imbalance (age_cap=∞ residual) 0.26%
+measured idle (abs)   = theoretical floor + uniform overlap gap 8.0% (fill/drain · staggering)
+unexplained residual  = 0
+```
+
+The measured idle is the algorithm floor for this workload; the floor itself decomposes into (fairness cost + overlap gap). Lower idle is reachable *only* by trading away fairness (`age_cap ↑`) and accepting starvation — i.e. "cannot go lower" really means "lower requires giving up the fairness guarantee." Full record: [`implementation/debug_phase2/REPORT.md`](implementation/debug_phase2/REPORT.md).
 
 ## 7. Orthogonality to Complementary Techniques
 
