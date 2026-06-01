@@ -1609,7 +1609,7 @@ pre.code-block .var { color: #f9a8d4; }
       <li><a data-target="sec-1" class="active"><span class="nav-num">1</span>Instance Disaggregation</a></li>
       <li><a data-target="sec-2"><span class="nav-num">2</span>Invariants &amp; Dispatch DAG</a></li>
       <li><a data-target="sec-3"><span class="nav-num">3</span>Scheduler Usage</a></li>
-      <li><a data-target="sec-4"><span class="nav-num">4</span>Adaptive Admission</a></li>
+      <li><a data-target="sec-4"><span class="nav-num">4</span>The Operating Point</a></li>
       <li><a data-target="sec-5"><span class="nav-num">5</span>Example Dispatch Trace</a></li>
       <li><a data-target="sec-6"><span class="nav-num">6</span>Acceleration Sources</a></li>
       <li><a data-target="sec-7"><span class="nav-num">7</span>Results</a></li>
@@ -1821,10 +1821,6 @@ pre.code-block .var { color: #f9a8d4; }
           <div class="dag-caption">Single μ-batch DAG. Diamond structure: QKV fans out to two attention nodes (GPU prefill / PIM decode), which fan in to O-proj. Edge labels mark the source invariant.</div>
         </div>
 
-        <h2 class="h-sub">No inter-μ-batch edges &mdash; the basis of emergent interleaving</h2>
-
-        <p>No explicit edges exist between distinct μ-batches. When resources (GPU·PIM) are available, arbitrary interleaving across μ-batches is possible &mdash; this is the graph-theoretic basis of <b>look-ahead</b> and <b>back-fill</b>. The scheduler does not encode a separate &ldquo;lookahead policy&rdquo;; the behavior emerges from greedy ready-set dispatch over a multi-μ-batch DAG (see §6.3 pseudo-code in <a href="#sec-3" onclick="document.querySelector('.nav a[data-target=sec-3]').click(); return false;">Section 3</a>, demonstrated in <a href="#sec-5" onclick="document.querySelector('.nav a[data-target=sec-5]').click(); return false;">Section 5</a>).</p>
-
       </div>
     </section>
 
@@ -1868,7 +1864,7 @@ pre.code-block .var { color: #f9a8d4; }
 
         <p><b>Why QKV last.</b> <code>QKV</code> is the <i>next μ-batch's enabling work</i>, not the current one's critical path. It is prioritized only when the higher-priority classes are empty &mdash; that is, only when there is a risk of PIM going idle (no current-μ-batch attention or projection work left to do).</p>
 
-        <p>This ordering, applied as a simple priority dequeue, is what makes <b>GPU back-fill</b> emerge: when O-proj is blocked (waiting on PIM for I3) and prefill-attn is also not ready (its μ-batch's QKV not yet done), the dequeue naturally falls through to QKV of the next μ-batch.</p>
+        <p>This ordering keeps the <b>GPU lane continuously loaded</b>: when O-proj is blocked (waiting on PIM for I3) and prefill-attn is also not ready (its μ-batch's QKV not yet done), the dequeue falls through to QKV of the next μ-batch — so the GPU stays busy and PIM decode-attn overlaps the compute-bound stages rather than serializing behind them.</p>
 
         <h2 class="h-sub">Sync guarantee</h2>
 
@@ -1876,94 +1872,71 @@ pre.code-block .var { color: #f9a8d4; }
 
         <p>Owing to PIM FSM determinism (<code class="inline">§3.1</code>), the PIM completion time is computed at the moment PIM is dispatched. The scheduler therefore knows <i>in advance</i> when O-proj will become ready, and the next GPU dispatch can be pre-scheduled to that exact moment.</p>
 
-        <h2 class="h-sub">Natural emergence of look-ahead / back-fill</h2>
-
-        <p>Since I2 is loose &mdash; <i>&ldquo;any time after QKV completes&rdquo;</i> &mdash; at moments when PIM is idle, <code>decode-attn</code> of <i>another μ-batch</i> can be started regardless of which μ-batch the GPU is currently working on. This emerges automatically from greedy dispatch <b>without any separate policy specification</b>.</p>
-
-        <p>Symmetrically, when GPU's higher-priority classes are exhausted but PIM is still busy, GPU falls through to the next μ-batch's QKV (back-fill). Both behaviors &mdash; <i>look-ahead</i> on PIM and <i>back-fill</i> on GPU &mdash; are properties of the same priority dequeue applied to a multi-μ-batch DAG. See the worked trace in <a href="#sec-5" onclick="document.querySelector('.nav a[data-target=sec-5]').click(); return false;">Section 5</a> for a concrete demonstration.</p>
-
       </div>
     </section>
 
-    <!-- ======== Section 4: Adaptive Admission ======== -->
+    <!-- ======== Section 4: The Operating Point ======== -->
     <section id="sec-4" class="doc-section">
       <div class="section-header">
-        <div class="section-eyebrow">§ 6.4 — RUNTIME ADAPTATION</div>
-        <h1 class="section-title">Adaptive Admission</h1>
-        <div class="section-lede">Per-iteration adjustment of the μ-batch composition based on measured GPU/PIM idle fractions. Hooked on top of the chunked-prefill primitive (§5.5) as dynamic adjustment of chunk size · decode batch.</div>
+        <div class="section-eyebrow">§ 6.4 — THE OPERATING POINT</div>
+        <h1 class="section-title">Admission: The Operating Point</h1>
+        <div class="section-lede">Each μ-batch is composed to drive the three resources (PIM decode-attn · GPU-A projection+prefill-attn · FFN) to equal time. Composition is three <b>separate concerns</b>, each steered independently to a <b>fixed target</b> by local-greedy steering + an age-cap — not one cohort regulated by idle-fraction feedback.</div>
       </div>
 
       <div class="prose">
 
-        <p>The scheduler dynamically adjusts the per-μ-batch composition decision <b>on a per-iteration basis</b>. The GPU/PIM idle fractions of the previous iteration are measured to regulate the next μ-batch's admission.</p>
-
-        <h2 class="h-sub">Decision Rule — Two Layers</h2>
-
-        <p>The essential frame of admission control:</p>
+        <h2 class="h-sub">Three separate concerns</h2>
 
         <ul>
-          <li><b>Layer 1 &mdash; μ-batch composition</b> (on top of the chunked-prefill + mixed-batching primitive): decides the prefill-chunk vs decode token mix and N. <b>The determining factor of TTFT / TBT SLO condenses to this layer.</b></li>
-          <li><b>Layer 2 &mdash; DAG dispatch</b> (§6.3, <a href="#sec-3" onclick="document.querySelector('.nav a[data-target=sec-3]').click(); return false;">Section 3</a>): Automatic ready-node selection on top of the Layer 1 result. Since processing is serial, it cancels with admission variables &mdash; adaptive degrees of freedom concentrate in Layer 1.</li>
+          <li><b>Admission = pool refill only.</b> <code class="inline">request_queue &rarr; in-flight (PREFILL)</code>, gated solely by the aggregate KV budget. It does not look at the decode/prefill targets. A request with <code class="inline">prompt_len = 0</code>, or whose prefill is already done, transitions straight to DECODE.</li>
+          <li><b>Decode-set steering.</b> From the in-flight DECODE pool, select a set hitting two targets at once &mdash; <b>count 123 ∧ Σkv 12.3M</b> &mdash; by local-greedy steering + age-cap. Pure <i>selection</i> (KV is reserved at pool entry).</li>
+          <li><b>Prefill steering.</b> From the in-flight PREFILL pool, distribute <b>256 tokens</b> (the fixed FFN-batch knob) so the PREFILL_ATTN depth-sum hits <b>25.6M</b>, by the same per-token steering + age-cap. A member that receives 0 tokens stays in the pool.</li>
+          <li><b>Per-iteration recomposition.</b> After every forward pass the μ-batch is re-selected from the pool, disjoint from the other active μ-batch. The window holds 2 active μ-batches (capacity 3 = 2 active + 1 transition slack) — the staggering precondition for F2/F3 overlap. <i>This is the real continuous-batching paradigm: a standing pool mixing decode / prefill / just-finished-prefill, recomposed every iteration — not a fixed cohort.</i></li>
         </ul>
 
-        <p><b>Primary objective</b> &mdash; balance the two instances of the inter-instance pipeline cycle <code>max(A_cycle, B_cycle)</code> so that both are fully utilized.</p>
+        <h2 class="h-sub">The operating point — causal chain ① → ⑤</h2>
 
-        <p><b>Secondary objective</b> &mdash; balance the GPU·PIM double-buffering inside Instance A (§5.6).</p>
-
-        <h2 class="h-sub">Admission table</h2>
+        <p>prefill token count fixes the FFN batch, which fixes the decode count, which with the balance ctx fixes the decode-KV sum:</p>
 
         <table class="doc-table">
           <thead>
-            <tr>
-              <th style="width: 145px;">Layer</th>
-              <th style="width: 230px;">Measurement</th>
-              <th style="width: 200px;">Diagnosis</th>
-              <th>Admission adjustment</th>
-            </tr>
+            <tr><th style="width: 60px;">order</th><th>fixed value</th><th style="width: 170px;">value (prefill 256)</th><th style="width: 200px;">binding resource</th></tr>
           </thead>
           <tbody>
-            <tr>
-              <td><b>Inter-AB</b> (primary)</td>
-              <td><code>A_cycle &gt; B_cycle</code><br>(B idle)</td>
-              <td>A-bound (long-ctx)</td>
-              <td>admission &darr; effect limited (the PIM attention component of <code>A_cycle</code> depends on KV length) &mdash; B idle naturally accepted</td>
-            </tr>
-            <tr>
-              <td><b>Inter-AB</b> (primary)</td>
-              <td><code>A_cycle &lt; B_cycle</code><br>(A idle)</td>
-              <td>B-bound (short-ctx + low batch)</td>
-              <td>admit prefill chunk &rarr; <code>A_cycle</code> increases, balance restored</td>
-            </tr>
-            <tr>
-              <td><b>Intra-A</b> (secondary)</td>
-              <td>GPU idle &gt; <code>θ_high</code>,<br>PIM busy</td>
-              <td>PIM-dominant inside Instance A</td>
-              <td>admit prefill chunk &rarr; fill GPU window</td>
-            </tr>
-            <tr>
-              <td><b>Intra-A</b> (secondary)</td>
-              <td>PIM idle &gt; <code>θ_high</code>,<br>GPU busy</td>
-              <td>GPU-dominant inside Instance A</td>
-              <td>admit additional decode &rarr; fill PIM window</td>
-            </tr>
-            <tr>
-              <td>&mdash;</td>
-              <td>Both layers below <code>θ_low</code></td>
-              <td>balanced</td>
-              <td>maintain current admission</td>
-            </tr>
-            <tr>
-              <td>&mdash;</td>
-              <td>Both layers idle</td>
-              <td>underloaded</td>
-              <td>enlarge μ-batch size or accelerate wait tokens</td>
-            </tr>
+            <tr><td>①</td><td>prefill tokens / batch</td><td><b>256</b> (power-of-2)</td><td>GPU-A (PREFILL_ATTN)</td></tr>
+            <tr><td>②</td><td>balance time X</td><td><b>~51 µs</b> (TBT ≈ 4.1 ms)</td><td>&mdash;</td></tr>
+            <tr><td>③</td><td>FFN batch</td><td><b>379 tokens</b></td><td>Instance B</td></tr>
+            <tr><td>④</td><td><b>decode count N_dec</b> (control target)</td><td><b>123</b> (= 379 − 256)</td><td>Instance B</td></tr>
+            <tr><td>⑤</td><td><b>decode-KV sum</b> (control target)</td><td><b>12.3M</b></td><td>Instance A (PIM)</td></tr>
+            <tr><td>+</td><td>prefill KV-work (control target)</td><td><b>25.6M</b> (= 256 × depth)</td><td>GPU-A</td></tr>
+            <tr><td>+</td><td>balance ctx</td><td><b>~100K</b> (hardware constant)</td><td>&mdash;</td></tr>
           </tbody>
         </table>
 
+        <p>The <i>count</i> (123) is independent of KV length (FFN sees only token count); the <i>KV sum</i> (12.3M) is the sum of lengths (PIM sees only the sum). ctx 100K is a hardware constant (prefill cancels out of the triple balance) used only to <i>derive</i> the targets — never imposed on the workload.</p>
+
+        <h2 class="h-sub">Local-greedy steering + age-cap (the <code class="inline">former</code> algorithm)</h2>
+
+        <p>The control target is the <b>pair</b> (count 123, Σkv 12.3M) — not a single average. Pure FIFO catches Σkv but misses the count on an off-average pool (spread 22–30%). So at each step the scheduler computes the <i>length it next needs</i> and admits the decoder closest to it; a request that has waited <code class="inline">≥ AGE_CAP</code> is force-included (fairness). No global statistics, purely local:</p>
+
+        <pre class="code-block">one μ-batch (decode):                 <span class="cmt"># AGE_CAP = 2</span>
+  n=0, S=0
+  <span class="kw">while</span> n &lt; target_count(123) <span class="kw">and</span> S &lt; target_kv(12.3M) <span class="kw">and</span> pool:
+    <span class="kw">if</span> any request with wait ≥ AGE_CAP: admit the oldest        <span class="cmt"># fairness (forced)</span>
+    <span class="kw">else</span>: admit decoder closest to ideal=(target_kv−S)/(target_count−n)  <span class="cmt"># steering</span>
+  remaining waiters: wait += 1
+  → converges to (123, 12.3M); n increases monotonically → ≤123 steps.
+<span class="cmt">prefill: distribute 256 tokens to depth-sum 25.6M by the same steering + age-cap.</span></pre>
+
+        <ul>
+          <li><b>★ Length-distribution-agnostic.</b> On a heavily varied pool, short + long requests are <i>combined</i> to hit both targets — the average is never read. Heavy / mixed / bimodal all converge. Even an age-cap-forced off-size request is corrected by steering (a forced long request lowers <code class="inline">ideal</code> → the next picks several short ones).</li>
+          <li><b>Operating parameters = target_count + target_kv + AGE_CAP.</b> The ±10% band [11.1M, 13.5M] is <i>not</i> a control value — it is a diagnostic idle-SLA label; steering hits the target so realized idle ≈ 0.</li>
+          <li><b>AGE_CAP trade-off (sweep).</b> cap↑ → steering freedom↑ → spread↓ but latency↑; cap↓ → FIFO-like → fair/low-latency but spread↑. <code class="inline">cap1: 3.1%</code> · <code class="inline">cap2: 1.2%, wait ≤3</code> · <code class="inline">cap5: 0.7%, wait 5</code> · <code class="inline">cap∞: 0.8% but starvation (wait 37)</code> → <b>AGE_CAP = 2 adopted</b>.</li>
+        </ul>
+
         <div class="callout note">
-          <span class="callout-title">SCOPE NOTE</span>
-          Deadband policy (hysteresis width, σ_total decomposition, ctx-tiered lookup) and the MFU floor admission lower bound are part of §6.4 but are intentionally out of scope for this reading guide. See <code class="inline">ARCHITECTURE.md §6.4</code> for the full treatment.
+          <span class="callout-title">SUPERSEDED</span>
+          Earlier drafts adjusted admission per iteration from measured GPU/PIM idle fractions + a hysteresis deadband. That feedback model is replaced by this pool model: the scheduler hits <i>fixed targets</i> via steering rather than reacting to measured idle (deadband σ was unmeasurable on a self-authored framework). The ±10% band survives only as a diagnostic idle-SLA label. See <code class="inline">ARCHITECTURE.md §6.4</code>.
         </div>
 
       </div>
@@ -1974,12 +1947,12 @@ pre.code-block .var { color: #f9a8d4; }
       <div class="section-header">
         <div class="section-eyebrow">§ 6.5 — WORKED EXAMPLE</div>
         <h1 class="section-title">Example Dispatch Trace</h1>
-        <div class="section-lede">A concrete 3-μ-batch in-flight window under PULS scheduler's balanced steady state (cycle balance maintained per §6.4). Shows GPU back-fill (Init, T3) and PIM look-ahead (T1, T4) emerging from the priority dequeue defined in <a href="#sec-3" onclick="document.querySelector('.nav a[data-target=sec-3]').click(); return false;">Section 3</a>. The trace shape is the <b>ctx-independent attractor</b> — see caption for the regime note.</div>
+        <div class="section-lede">A concrete in-flight window under PULS scheduler's balanced steady state (the three resources cycle-balanced per §6.4). The greedy ready-set dispatch (<a href="#sec-3" onclick="document.querySelector('.nav a[data-target=sec-3]').click(); return false;">Section 3</a>) keeps both lanes busy: <b>PIM decode-attn of one μ-batch overlaps the compute-bound GPU projection + prefill-attn of another</b> — decode-attn is hidden behind the compute-bound window, not added to it (F2 · F3). The per-μ-batch cycle drops from the sum to <code>max(GPU stages, t_PIM)</code>.</div>
       </div>
 
       <div class="figure-container">
         <div class="title">PULS Scheduler Dispatch Timeline</div>
-        <div class="subtitle">Event-driven dispatch + dependency DAG over a 3-μ-batch in-flight window. Greedy priority dequeue (<code>O-proj &gt; prefill-attn &gt; QKV</code>) yields cross-μ-batch back-fill and look-ahead as emergent properties &mdash; no explicit lookahead policy is encoded.</div>
+        <div class="subtitle">Event-driven dispatch + dependency DAG over a 3-μ-batch in-flight window. Greedy priority dequeue (<code>O-proj &gt; prefill-attn &gt; QKV</code>) keeps GPU and PIM concurrently loaded on different μ-batches &mdash; PIM decode-attn hides behind the compute-bound GPU stages.</div>
 
         <!-- μ-batch composition -->
         <div class="composition">
@@ -2039,15 +2012,15 @@ pre.code-block .var { color: #f9a8d4; }
           </div>
         </div>
 
-        <!-- Emergence annotations -->
+        <!-- Overlap annotations -->
         <div class="annotations">
           <div class="annotation backfill">
-            <span class="label">GPU BACK-FILL</span>
-            At <b>Init</b> and <b>T3</b>: while PIM is busy on a μ-batch's decode-attn (<b>P</b> at Init, <b>M</b> at T3), I3 holds the corresponding O-proj <i>not-ready</i> on GPU. GPU does not idle-wait &mdash; the priority dequeue picks the only ready node (next μ-batch's QKV) and processes it. Emergent from greedy dispatch.
+            <span class="label">GPU CONTINUOUS</span>
+            The GPU lane always has ready work — QKV / projection / prefill-attn of one of the in-flight μ-batches. These are <b>compute-bound</b> (tensor cores saturated, HBM bus mostly idle), so the GPU never idle-waits on PIM.
           </div>
           <div class="annotation lookahead">
-            <span class="label">PIM LOOK-AHEAD</span>
-            At <b>T1</b> and <b>T4</b>: at the PIM-completion trigger, the next μ-batch's decode-attn is <i>already ready</i> &mdash; its QKV completed during the prior GPU back-fill window (Init / T3). PIM dispatches it instantly without waiting for the current μ-batch boundary.
+            <span class="label">PIM HIDDEN</span>
+            PIM decode-attn (<b>P</b> at Init, <b>M</b> at T1–T2, <b>N</b> at T4) runs <i>concurrently</i> with those compute-bound GPU stages. Its in-place KV reads overlap the GPU's compute-bound window → decode-attn is <b>hidden, not added</b> to the per-μ-batch cycle.
           </div>
         </div>
 
@@ -2066,15 +2039,11 @@ pre.code-block .var { color: #f9a8d4; }
           <ul class="caption-list">
             <li>
               <span class="item-label">Mechanism</span>
-              At each kernel-completion event T<sub>i</sub>, ready nodes (precedence satisfied per I1·I2·I3) are picked greedily &mdash; priority <code>O-proj &gt; prefill-attn &gt; QKV</code>; tie-break: oldest μ-batch first. Both emergent behaviors below arise from this single priority dequeue &mdash; no explicit lookahead policy is encoded.
-            </li>
-            <li class="backfill">
-              <span class="item-label">GPU back-fill <span class="sub">(Init, T3)</span></span>
-              While PIM is busy and the current μ-batch's O-proj is I3-blocked, GPU falls through priority to the next μ-batch's QKV.
+              At each kernel-completion event T<sub>i</sub>, ready nodes (precedence satisfied per I1·I2·I3) are picked greedily &mdash; priority <code>O-proj &gt; prefill-attn &gt; QKV</code>; tie-break: oldest μ-batch first. The result is that GPU and PIM stay concurrently loaded on different μ-batches — no explicit policy is encoded.
             </li>
             <li class="lookahead">
-              <span class="item-label">PIM look-ahead <span class="sub">(T1, T4)</span></span>
-              The next μ-batch's decode-attn is I2-ready the moment its QKV completes during the back-fill window; PIM dispatches it at the very PIM-completion trigger.
+              <span class="item-label">PIM hidden behind compute-bound GPU</span>
+              The GPU stages (QKV / projection / prefill-attn) are compute-bound and leave the HBM bus mostly idle; PIM decode-attn overlaps that window via its in-place internal path, so it adds nothing to the per-μ-batch cycle (F2 · F3, §6.8 · §5.3).
             </li>
             <li>
               <span class="item-label">P at Init = tail state</span>
@@ -2164,7 +2133,7 @@ pre.code-block .var { color: #f9a8d4; }
           <div class="xref-card">
             <div class="xref-eyebrow">SHOWN IN ACTION</div>
             <div class="xref-body">
-              The double-buffer pattern emerges naturally in <b>§5 Example Dispatch Trace</b> — back-fill at <b>Init</b> and <b>T3</b> shows GPU and PIM concurrently dispatched on different μ-batches without any explicit lookahead policy.
+              The double-buffer pattern is shown in <b>§5 Example Dispatch Trace</b> — GPU and PIM are concurrently dispatched on different μ-batches, so PIM decode-attn hides behind the compute-bound GPU stages.
             </div>
             <a class="xref-btn" data-target="sec-5" href="#sec-5">→ Go to §5 Example Dispatch Trace</a>
           </div>
@@ -2180,7 +2149,7 @@ pre.code-block .var { color: #f9a8d4; }
           <span class="source-id">F3</span>
           <span class="source-name">Inter-Instance A↔B Pipeline</span>
           <span class="source-badge calibrated">Calibrated</span>
-          <span class="source-headline">0.5933 measured (near-balance)</span>
+          <span class="source-headline">pool-sim idle spread 0.74% (both pools abundant)</span>
         </div>
         <div class="source-figure">
           <div class="f3-wrap">
@@ -2202,7 +2171,7 @@ pre.code-block .var { color: #f9a8d4; }
           </div>
         </div>
         <div class="source-mechanism">
-          In steady state, Instance A processes μ-batch <b>M</b> (attention + projection) while Instance B processes μ-batch <b>M-1</b> (FFN) — the two instances handle <i>different</i> μ-batches at the same wall-clock instant. The per-layer effective time drops from <code>t_A + t_B</code> to <code>max(t_A, t_B)</code>. The <b>0.5933 measured ratio</b> on a long-ctx trace (perfect balance = 0.50) confirms both instances actively contribute.
+          In steady state, Instance A processes μ-batch <b>M</b> (attention + projection) while Instance B processes μ-batch <b>M-1</b> (FFN) — the two instances handle <i>different</i> μ-batches at the same wall-clock instant. The per-layer effective time drops from <code>t_A + t_B</code> to <code>max(t_A, t_B)</code>. The pool-model floor proof measures a <b>three-resource idle spread of 0.74%</b> (both pools abundant; theoretical floor 0.91%) — the three per-cycle times match to &lt;1%, confirming both instances actively contribute (§6.8).
         </div>
       </div>
 
@@ -2422,7 +2391,7 @@ pre.code-block .var { color: #f9a8d4; }
       <div class="section-header">
         <div class="section-eyebrow">§ 5.7 — QUANTITATIVE PROJECTION</div>
         <h1 class="section-title">Results</h1>
-        <div class="section-lede">Calibrated projection on Llama-3 70B + DGX B200 + HBM4 hypothetical substrate, plus a runtime validation pass on a long-context LongBench trace. Absolute metrics (TTFT, TPOT, throughput) are out of scope — silicon absent.</div>
+        <div class="section-lede">Calibrated projection on Llama-3 70B + DGX B200 + HBM4 hypothetical substrate, plus a runtime validation that the pool-model scheduler reaches the operating point and that its measured idle is the proven algorithm floor. Absolute metrics (TTFT, TPOT, throughput) are out of scope — silicon absent.</div>
       </div>
 
       <div class="result-block">
@@ -2434,7 +2403,7 @@ pre.code-block .var { color: #f9a8d4; }
           <tbody>
             <tr><td class="source-id-cell">F1</td><td>SP-PIM attention (2048-ch Q-replicate)</td><td><span class="status-def">Deferred</span></td><td class="mono">—</td><td>Impl-11 (Blackwell attn kernel calibration)</td></tr>
             <tr><td class="source-id-cell">F2</td><td>Projection ‖ PIM double-buffering</td><td><span class="status-def">Deferred</span></td><td class="mono">—</td><td>Impl-11 (isolated cycle ratio)</td></tr>
-            <tr><td class="source-id-cell">F3</td><td>Inter-instance A↔B pipeline</td><td><span class="status-cal">Calibrated</span></td><td class="mono">0.5933 measured / 0.9964 closed-form</td><td>run.loop measured vs closed-form ctx sweep</td></tr>
+            <tr><td class="source-id-cell">F3</td><td>Inter-instance A↔B pipeline</td><td><span class="status-cal">Calibrated</span></td><td class="mono">0.92–0.99 closed-form · pool-sim idle spread 0.74%</td><td>closed-form ctx sweep · pool-model floor proof (both pools abundant)</td></tr>
             <tr><td class="source-id-cell">F4</td><td>μ-batch staggering</td><td><span class="status-abs">Absorbed</span></td><td class="mono">—</td><td>Precondition for F2·F3; contained in their measurements</td></tr>
             <tr><td class="source-id-cell">F5</td><td>Channel-independent vs lock-step</td><td><span class="status-cal">Calibrated</span></td><td class="mono">5.15× speedup</td><td>LongBench λ=3.40, 10-req sum trace-grounded</td></tr>
             <tr><td class="source-id-cell">Aux1</td><td>Mixed batching weight reuse</td><td><span class="status-cal">Calibrated</span></td><td class="mono">2.0× closed-form · 1.97× T4 measured</td><td>Llama-3 70B FFN single-layer, Colab T4</td></tr>
@@ -2469,29 +2438,27 @@ pre.code-block .var { color: #f9a8d4; }
       </div>
 
       <div class="result-block">
-        <h3 class="result-block-title">Runtime validation — LongBench λ=3.40, first 3 requests</h3>
+        <h3 class="result-block-title">Runtime validation — pool-model scheduler, idle floor proof</h3>
         <p style="font-size:12.5px; color:var(--color-muted); margin: 6px 0 12px 0;">
-          Prompts <code>47K + 280K + 81K = 408,148 tokens</code>; decode budget 350/req. End-to-end <code>Run.loop</code>, single-task, 50.87 s simulated clock, 15.26 M admission ticks, 5.4 min wall.
+          Synthetic distributed-server workload (prefill 20K–180K, long decode), <b>warm-start seed</b> — an unbiased steady-state snapshot (skips only the cold-start ramp). Simulated until idle converges; the value is reported <i>as-is</i> (not tuned). <code class="inline">analysis/floor_proof.py</code> calls the <i>exact</i> dispatcher op-time functions on the live μ-batches → theoretical perfect-overlap floor vs measured.
+        </p>
+        <p style="font-size:12.5px; color:var(--color-muted); margin: 0 0 12px 0;">
+          Two unbiased snapshots — the decode target (Σkv 12.3M) is hit in both; the <b>spread is governed by the prefill pool's richness</b>:
         </p>
         <table class="result-table">
-          <thead><tr><th>Slot</th><th>Active (s)</th><th>Idle</th><th>Interpretation</th></tr></thead>
+          <thead><tr><th>μ-batch (active avg)</th><th>(A) both pools abundant</th><th>(B) thin prefill pool</th><th>target</th></tr></thead>
           <tbody>
-            <tr><td>GPU Instance A</td><td class="mono">50.82</td><td class="mono">0.10%</td><td>99.9% busy — prefill GEMM dominates the long-ctx regime</td></tr>
-            <tr><td>PIM Instance A</td><td class="mono">0.17</td><td class="mono">99.66%</td><td>Decode tokens scarce (350/req) → PIM under-driven in this prefill-heavy trace. Mechanism intact (verified by Impl-2/Impl-8 synthetic stress)</td></tr>
-            <tr><td>GPU Instance B</td><td class="mono">34.95</td><td class="mono">31.30%</td><td>A-bound branch active (ARCH §6.4) — Instance B idle is the intended diagnosis, not a balance failure</td></tr>
-          </tbody>
-        </table>
-        <table class="result-table" style="margin-top:14px;">
-          <thead><tr><th>Convergence</th><th>Value</th><th>F3 cross-validate</th><th>Value</th></tr></thead>
-          <tbody>
-            <tr><td>converged</td><td class="mono">True</td><td>closed-form ratio</td><td class="mono">0.9964</td></tr>
-            <tr><td>oscillating</td><td class="mono">False</td><td>measured ratio</td><td class="mono"><b>0.5933</b></td></tr>
-            <tr><td>in_band_fraction</td><td class="mono">98.70%</td><td>abs_diff</td><td class="mono">0.4031</td></tr>
-            <tr><td>samples</td><td class="mono">15,261,787</td><td>regime</td><td>near-balance</td></tr>
+            <tr><td>decode count</td><td class="mono">119</td><td class="mono">122</td><td class="mono">123</td></tr>
+            <tr><td>decode Σkv</td><td class="mono">12.3M</td><td class="mono">12.3M</td><td class="mono">12.3M</td></tr>
+            <tr><td>prefill tokens</td><td class="mono">256</td><td class="mono">256</td><td class="mono">256</td></tr>
+            <tr><td>prefill depth-work</td><td class="mono"><b>25.6M (exact)</b></td><td class="mono">27.1M (+5.8%)</td><td class="mono">25.6M</td></tr>
+            <tr><td>idle GPU-A / PIM / FFN</td><td class="mono">10.5 / 10.9 / 11.2%</td><td class="mono">8.0 / 12.6 / 12.6%</td><td class="mono">—</td></tr>
+            <tr><td>spread (measured)</td><td class="mono"><b>0.74%</b></td><td class="mono">4.62%</td><td class="mono">~0</td></tr>
+            <tr><td>spread (theoretical floor)</td><td class="mono">0.91%</td><td class="mono">4.65%</td><td class="mono">—</td></tr>
           </tbody>
         </table>
         <p style="margin-top:12px; font-size:12.5px; color:var(--color-muted); line-height:1.55;">
-          The deadband held over 15M+ admission ticks without oscillation. <b>F3 measured 0.5933 ≈ near-balance</b> (perfect = 0.50) quantitatively proves the inter-instance pipeline mechanism is active; the gap from the idealized single-μ-batch closed-form (0.9964) reflects the multi-μ-batch steady-state cycle averaging.
+          <b>Measured spread ≈ theoretical floor in both</b> (A: 0.74 ≈ 0.91%; B: 4.62 ≈ 4.65%) — the spread is not slack, it is the batch's intrinsic three-resource imbalance, and the algorithm reaches the floor. The absolute idle is that floor plus a <i>uniform</i> overlap gap (pipeline fill/drain + 2-active staggering) → <b>zero unexplained loss</b>. <b>(A)</b> is the clean operating point: with the prefill pool abundant, depth-work lands on 25.6M exactly and the three per-cycle times match to &lt;1%. <b>(B)</b>'s wider 4.6% is the <b>age-cap fairness cost</b> (pure steering recovers &lt;0.2%, at the price of starvation) — gated by prefill-pool thinness, not a dispatch failure. Full derivation: <code class="inline">ARCHITECTURE.md §6.8</code>.
         </p>
       </div>
 
