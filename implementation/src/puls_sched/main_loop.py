@@ -51,7 +51,7 @@ class SchedulerCore:
     completed_requests: list[Request] = field(default_factory=list)
     _next_mb_id: int = 0
     # ---- Phase-2 S2 — 합류 게이트(_join_gate_open) 삭제. 풀 모델에선 멤버십=용량이라
-    # 자리(KV·batch) 있고 일감 있으면 무조건 backfill (유휴율 게이트 개념 소멸, 배치_생애 §밸런스).
+    # 자리(KV·batch) 있고 일감 있으면 무조건 backfill (유휴율 게이트 개념 소멸, OPERATING_POINT §3).
     # ---- Impl-8 — D1 admission tick hook (evaluator 등록 점) ----
     _admission_tick_callbacks: list[AdmissionTickCallback] = field(default_factory=list)
     # ---- Impl-9 Q1 — ADMISSION_TICK self-rescheduling opt-in (Run.init 가 enable). ----
