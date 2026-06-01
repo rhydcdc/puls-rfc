@@ -268,6 +268,15 @@ Within Instance A, when the GPU projection is compute-bound, HBM bandwidth becom
 - **Time derivation** — In both prefill chunk and decode batch scenarios, the number of tiles per channel is determined → tile count × tile time = SP-PIM attention time.
 - **Ratio vs GPU baseline** — Determined by combining the internal-path BW advantage of §3.1 (exceeds by a factor of 1 / η_HBM) with ctx-dependent KV variance. **Quantitative derivation enters Aux2 / F3 — see [`README.md`](README.md#results).**
 
+**Does PIM's KV bandwidth actually hide in the compute-bound window? (quantified grounds).** The *temporal* fit is shown in §6.8 (t_pim ≤ t_gpuA). The *bandwidth* fit rests on four grounds — three computable from spec, one silicon-deferred:
+
+1. **The headroom is real.** GPU-A projection is compute-bound: QKV arithmetic intensity ≈ 349 FLOP/byte ≫ the B200 roofline ridge (2200 TFLOPS ÷ 16 TB/s ≈ 137 FLOP/byte). So during projection only ~32% of the external HBM bus is used — ~68% sits idle.
+2. **PIM does not use the external bus at all.** One decode-attn layer reads Σkv 12.3M × 2 KB (FP8 K+V, n_kv=8 · d_head=128) = 25.2 GB; over t_pim ≈ 50 µs that is **~500 TB/s — ~4× the 128 TB/s external aggregate**. KV therefore *cannot* be streamed over the bus the GPU uses; PULS processes it in-place at the DRAM rows (the F1 / Aux2 premise). The "hiding" is **path separation, not fitting into leftover bus bandwidth**.
+3. **The internal path is faster, but not contention-free.** The attention SFU is on the logic die, so PIM still shares the TSV / cell-array path with GPU accesses to the same channels — contention exists. But by bypassing the external bus protocol it receives the TSV at η_internal, **≈ 1/η_external ≈ 1.35× the effective rate** of an external read. And channel-level toggling (§3.2) is itself an accelerator: normal-mode channels stream weights to the GPU *while* PIM-mode channels feed decode-attn — weight-load ‖ KV-compute proceed concurrently, not serially.
+4. **Silicon-deferred closure (honest gap).** Whether the TSV / cell-array bandwidth sustains PIM's full KV read *concurrently* with the GPU's residual weight loads, without saturation, depends on η_internal and per-channel TSV bandwidth — Ramulator2-*estimated*, not silicon-measured (OI9 / §3.5.3). The four factors are strong grounds and encode the P5 + §3.2 architectural premise; they are not a closed measurement.
+
+So PIM hides on **two axes**: temporally (t_pim ≤ t_gpuA, §6.8) and on bandwidth (in-place internal path at ~1.35× + channel concurrency, into a GPU window that is anyway ~68% bus-idle) — with the quantitative TSV-saturation closure deferred to silicon.
+
 For quantitative evaluation of the concrete scheduling policy, see Open Empirical Work (§8 E6).
 
 ### 5.4 Partial Resolution of Scheduling Predictability
@@ -489,7 +498,7 @@ Qualitative estimation of the *physical* bounds — which resource limits the cy
 
 ### 6.8 Idle Floor: Theory vs Measurement
 
-The pool model converges to a measured three-resource idle of GPU-A **8.0%** / PIM **12.6%** / FFN **12.6%** (spread **4.6%**) on an abundant long-decode pool. This section proves that this idle is the **floor** for this workload-and-algorithm — and decomposes every component, leaving zero unexplained loss. (Reproduced by [`implementation/analysis/floor_proof.py`](implementation/analysis/floor_proof.py), which calls the *exact* dispatcher op-time functions on the live μ-batches the simulator dispatched — no synthetic reconstruction.)
+The pool model's measured three-resource idle is the **floor** for this workload-and-algorithm: its spread tracks a directly-computed theoretical floor across batch compositions, with zero unexplained loss. Reproduced by [`implementation/analysis/floor_proof.py`](implementation/analysis/floor_proof.py), which calls the *exact* dispatcher op-time functions on the live μ-batches the simulator dispatched (no synthetic reconstruction).
 
 **Single-server model.** Each resource is a single server (dispatcher `gpu_busy` · `pim_busy` · `instance_b_busy` — invariants I4/I5/I6, one op at a time). In steady state, throughput is set by the busiest server's per-μ-batch work. Per μ-batch, per layer:
 
@@ -502,57 +511,64 @@ perfect overlap (F2 double-buffer · F3 pipeline) →
   floor idle_r = 1 − t_r / cycle
 ```
 
-**Op-time of the measured batch (TP=8, µs):**
+Two unbiased warm-start snapshots show the floor is reached and that **the spread is governed by the prefill pool's richness** (the decode target Σkv 12.3M is hit in both).
+
+**(A) Both pools abundant — the operating-point condition** (a rich prefill pool *and* the standing decode pool). batch: decode 119, Σkv 12.3M; prefill 256, **depth-work 25.6M (exact)**.
+
+```
+t_gpuA = QKV 5.95 + PREFILL_ATTN 39.75 + O_PROJ 4.76 = 50.46   ← bottleneck (barely)
+t_pim  = DECODE_ATTN(Σkv 12.32M)                       = 50.21
+t_ffn  = FFN(batch 375)                               = 50.01
+```
+
+| resource | theoretical floor | measured idle | overlap gap |
+|---|---|---|---|
+| GPU-A | 0.00% | 10.46% | 10.46% |
+| PIM | 0.51% | 10.94% | 10.43% |
+| FFN | 0.91% | 11.20% | 10.29% |
+| **spread** | **0.91%** | **0.74%** | — |
+
+→ All four targets hit exactly; the three per-cycle times match to <1% → near-perfect balance.
+
+**(B) Thin prefill pool** (long-decode workload; the prefill supply is squeezed by the KV budget). batch: decode 122, Σkv 12.3M; prefill 256, **depth-work 27.1M (+5.8% overshoot)**.
 
 ```
 t_gpuA = QKV 6.01 + PREFILL_ATTN 42.08 + O_PROJ 4.80 = 52.89   ← bottleneck
 t_pim  = DECODE_ATTN(Σkv 12.33M)                       = 50.43
 t_ffn  = FFN(batch 378)                               = 50.45
-cycle  = 52.89 µs
 ```
 
 | resource | theoretical floor | measured idle | overlap gap |
 |---|---|---|---|
-| GPU-A (QKV + PREFILL_ATTN + O_PROJ) | **0.00%** | 8.01% | 8.01% |
-| PIM (DECODE_ATTN) | 4.65% | 12.64% | 7.99% |
-| FFN (Instance B) | 4.61% | 12.61% | 7.99% |
-| **spread** | **4.65%** | 4.62% | — |
+| GPU-A | 0.00% | 8.01% | 8.01% |
+| PIM | 4.65% | 12.64% | 7.99% |
+| FFN | 4.61% | 12.61% | 7.99% |
+| **spread** | **4.65%** | **4.62%** | — |
 
-**Two key matches.**
+**Two invariants hold in both.**
 
-1. **Theoretical floor spread 4.65% ≈ measured spread 4.62%.** The measured spread is not algorithm slack — it is this batch's intrinsic three-resource imbalance (t_gpuA 52.9 vs t_pim/t_ffn 50.4). The algorithm has reached the floor.
-2. **The overlap gap is a uniform 8.0% across all three resources.** The bottleneck (GPU-A) has theoretical floor 0, so its measured 8% *is* the overlap gap = pipeline fill/drain + the 2-active staggering transition slack. Being uniform, it does not widen the spread.
+1. **Measured spread ≈ theoretical floor** (A: 0.74 ≈ 0.91%; B: 4.62 ≈ 4.65%) — the spread is not algorithm slack, it is the batch's intrinsic three-resource imbalance. The algorithm reaches the floor in both.
+2. **The overlap gap is uniform across the three resources** (A: ~10.4%; B: ~8.0%) — the bottleneck's theoretical floor is 0, so its measured idle *is* the overlap gap (pipeline fill/drain + 2-active staggering). Being uniform, it does not widen the spread. So **measured idle = theoretical floor + uniform overlap gap**, fully decomposed.
 
-So **measured idle = theoretical floor + uniform overlap gap (8%)**, a complete decomposition. Greedy dispatch reaches the floor.
+**What sets the spread — prefill depth-work, gated by pool richness.** PREFILL_ATTN is ~80% of t_gpuA and is ∝ depth-work. When the prefill pool is rich (A), steering hits depth 25.6M exactly → t_gpuA ≈ t_pim ≈ t_ffn → spread 0.74% (the intrinsic floor). When it is thin (B), the age-cap force-includes long-waited *deep* prefill requests — with the token count locked at 256, those deep tokens displace steering's shallow picks → depth overshoots 27.1M → GPU-A becomes the bottleneck → spread 4.62%. The overshoot is the **age-cap fairness cost**, and an `--age-cap` ablation on the thin pool confirms it:
 
-**What sets the floor spread — prefill depth-work overshoot.** PREFILL_ATTN is 80% of t_gpuA, and PREFILL_ATTN ∝ depth-work. GPU-A is the bottleneck because the measured depth-work (27.1M) overshoots the 25.6M target by +5.8%. Counterfactual: at exactly 25.6M, t_gpuA → 50.56 ≈ t_pim ≈ t_ffn, and the floor spread collapses from 4.65% to **0.26%**.
+| age_cap (thin pool) | depth-work | measured spread | note |
+|---|---|---|---|
+| **2** (default, fairness on) | 27.10M (+5.8%) | 4.62% | wait ≤ age_cap+1, starvation 0 |
+| **∞** (pure steering) | 25.73M (+0.5%) | **0.11%** | deepest requests starve (wait 37) |
 
-**The overshoot is the age-cap fairness cost — not pool exhaustion.** prefill tokens stay at 256 (power-of-2 / kernel-friendly, the FFN-batch knob); only depth-work is free. An `--age-cap` ablation separates the two hypotheses:
+Pure steering recovers the balance (the shallow material was in the pool) — so the thin-pool 4.6% is *bought* fairness, not a dispatch failure.
 
-| age_cap | depth-work | theoretical floor spread | measured spread | note |
-|---|---|---|---|---|
-| **2** (default, fairness on) | 27.10M (+5.8%) | 4.65% | 4.62% | wait ≤ age_cap+1, starvation 0 |
-| **∞** (pure steering) | 25.73M (+0.5%) | 0.40% | **0.11%** | deepest requests starve (wait 37) |
-
-With fairness off (`age_cap = ∞`), pure steering hits depth-work 25.73M — on target. **The shallow material was in the pool** (diagnostic: ~1.3 candidates shallower than the 100K ideal, pool min depth 57K). The `age_cap = 2` overshoot comes from force-including long-waited *deep* prefill requests; with the token count locked at 256, those deep tokens displace steering's shallow picks and raise the depth-sum.
+**Conclusion — robust to batch composition, floor reached in every case.**
 
 ```
-age_cap=2 → forced deep long-wait prefill (count fixed 256) → depth-work +5.8%
-          → PREFILL_ATTN ↑ (80% of t_gpuA) → GPU-A bottleneck → floor spread 4.65%
-age_cap=∞ → no forcing → steering hits 25.73M → spread 0.11%  (but starvation)
+decode axis (Σkv 12.3M)  : hit regardless of composition (length-distribution-agnostic)
+spread = intrinsic imbalance + age-cap cost(gated by prefill-pool thinness) + 0 unexplained
+       = 0.74% (rich prefill)  →  4.6% (thin prefill)  →  <0.2% (fairness off, with starvation)
+measured idle (abs)      = theoretical floor + uniform overlap gap (fill/drain · staggering)
 ```
 
-**Conclusion — floor reached, fully decomposed.**
-
-```
-measured spread 4.62% = theoretical floor spread 4.65%
-                      = fairness cost (age_cap=2 prefill overshoot)   ~4.4%
-                      + workload-intrinsic imbalance (age_cap=∞ residual) 0.26%
-measured idle (abs)   = theoretical floor + uniform overlap gap 8.0% (fill/drain · staggering)
-unexplained residual  = 0
-```
-
-The measured idle is the algorithm floor for this workload; the floor itself decomposes into (fairness cost + overlap gap). Lower idle is reachable *only* by trading away fairness (`age_cap ↑`) and accepting starvation — i.e. "cannot go lower" really means "lower requires giving up the fairness guarantee." Full record: [`implementation/debug_phase2/REPORT.md`](implementation/debug_phase2/REPORT.md).
+The measured idle is the algorithm floor; the floor decomposes into intrinsic imbalance + a pool-thinness-gated fairness cost + a uniform overlap gap, with no unexplained residual. Lower idle than (A) requires either a richer prefill pool (already near-floor) or dropping the fairness guarantee. Full record: [`implementation/debug_phase2/REPORT.md`](implementation/debug_phase2/REPORT.md).
 
 ## 7. Orthogonality to Complementary Techniques
 

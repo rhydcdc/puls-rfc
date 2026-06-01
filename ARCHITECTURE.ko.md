@@ -268,6 +268,15 @@ Instance A 내에서 GPU projection 이 compute-bound 상태일 때 HBM 대역�
 - **시간 산출** — Prefill chunk / decode batch 양 시나리오에서 channel 당 tile 수가 결정 → tile 수 × tile 시간 = SP-PIM attention 시간.
 - **GPU baseline 대비 ratio** — §3.1 internal path BW 우위 (1 / η_HBM 배 초과) 와 ctx 종속 KV variance 의 결합으로 결정. **정량 산출은 Aux2 / F3 산식에 진입 — [`README.md`](README.md#results) 참조.**
 
+**PIM KV 대역폭이 정말 compute-bound 윈도우에 숨는가? (정량 근거).** *시간* 적합은 §6.8(t_pim ≤ t_gpuA). *대역폭* 적합은 네 근거에 의존 — 셋은 spec 계산, 하나는 silicon-deferred:
+
+1. **헤드룸은 실재.** GPU-A projection 은 compute-bound: QKV arithmetic intensity ≈ 349 FLOP/byte ≫ B200 roofline ridge (2200 TFLOPS ÷ 16 TB/s ≈ 137 FLOP/byte). 그래서 projection 중 외부 HBM 버스는 ~32% 만 사용 — ~68% 유휴.
+2. **PIM 은 외부 버스를 아예 안 쓴다.** decode-attn 한 layer 가 읽는 KV = Σkv 12.3M × 2 KB (FP8 K+V, n_kv=8 · d_head=128) = 25.2 GB; t_pim ≈ 50 µs 안에 = **~500 TB/s — 외부 총대역 128 TB/s 의 ~4배**. 즉 KV 는 GPU 가 쓰는 버스로 *흘릴 수 없다* → PULS 는 DRAM row 에서 in-place 처리(F1 / Aux2 전제). "숨음"은 **남은 버스 대역에 끼어드는 게 아니라 경로 분리**.
+3. **내부 경로는 더 빠르나 contention 0 은 아님.** attention SFU 가 로직다이에 있어 PIM 은 같은 채널 위 GPU 접근과 **TSV / 셀어레이 경로를 여전히 공유** — contention 존재. 단 외부 버스 프로토콜을 우회해 TSV 를 η_internal 로 받음, **≈ 1/η_external ≈ 1.35배** 의 유효 속도. 그리고 채널 토글(§3.2) 자체가 가속: normal-mode 채널이 GPU 에 가중치를 *주는 동시에* PIM-mode 채널이 decode-attn 을 먹임 — weight-load ‖ KV-compute 가 직렬이 아니라 동시 진행.
+4. **silicon-deferred 폐쇄 (정직한 gap).** TSV / 셀어레이 대역폭이 GPU 잔여 weight-load 와 *동시에* PIM 전체 KV read 를 saturation 없이 버티는지는 η_internal · per-channel TSV 대역에 의존 — Ramulator2 *추정* 이지 silicon 측정 아님(OI9 / §3.5.3). 네 요인은 강한 근거이자 P5 + §3.2 아키텍처 전제이지 닫힌 측정은 아니다.
+
+즉 PIM 은 **두 축**으로 숨는다: 시간(t_pim ≤ t_gpuA, §6.8) + 대역폭(in-place 내부 경로 ~1.35× + 채널 동시성, 어차피 ~68% 버스-유휴인 GPU 윈도우로) — 정량 TSV-saturation 폐쇄는 silicon 대기.
+
 구체적 스케줄링 정책의 정량 평가는 Open Empirical Work (§8 E6) 참조.
 
 ### 5.4 스케줄링 예측 가능성의 부분적 해소
@@ -489,7 +498,7 @@ PULS 스케줄러의 balanced steady state 에서 3 μ-batch in-flight window �
 
 ### 6.8 Idle Floor: 이론 vs 측정
 
-풀 모델은 풍부한 long-decode 풀에서 세 자원 idle 이 GPU-A **8.0%** / PIM **12.6%** / FFN **12.6%** (spread **4.6%**)로 수렴한다. 본 절은 이 idle 이 *이 워크로드 + 이 알고리즘* 의 **floor** 임을 증명하고, 모든 구성요소를 분해해 미설명 잔여손실을 0 으로 만든다. ([`implementation/analysis/floor_proof.py`](implementation/analysis/floor_proof.py) 가 재현 — 시뮬레이터가 디스패치한 live μ-batch 에 *정확히 같은* dispatcher op-time 함수를 호출, 합성 재구성 없음.)
+풀 모델의 측정 idle 은 *이 워크로드 + 이 알고리즘* 의 **floor** 다: spread 가 직접 산출한 이론 floor 를 배치 구성 전반에서 추종하며 미설명 잔여손실 0. [`implementation/analysis/floor_proof.py`](implementation/analysis/floor_proof.py) 가 재현 — 시뮬레이터가 디스패치한 live μ-batch 에 *정확히 같은* dispatcher op-time 함수를 호출(합성 재구성 없음).
 
 **single-server 모델.** 각 자원은 단일 서버(dispatcher `gpu_busy` · `pim_busy` · `instance_b_busy` — 불변식 I4/I5/I6, 동시 1 op). steady state 에서 처리율은 가장 바쁜 서버의 per-μ-batch work 가 율속. μ-batch 당, layer 당:
 
@@ -502,57 +511,64 @@ t_ffn  = FFN(batch)                             (gpu_instance_b)
   floor idle_r = 1 − t_r / cycle
 ```
 
-**측정 batch 의 op-time (TP=8, µs):**
+비편향 warm-start 스냅샷 두 개로, floor 도달 + **spread 가 prefill 풀의 풍부도에 좌우됨**(decode 타깃 Σkv 12.3M 은 둘 다 명중)을 보인다.
+
+**(A) 두 풀 모두 풍부 — 동작점 조건** (풍부한 prefill 풀 *그리고* 상주 decode 풀). batch: decode 119, Σkv 12.3M; prefill 256, **depth-work 25.6M (정확)**.
+
+```
+t_gpuA = QKV 5.95 + PREFILL_ATTN 39.75 + O_PROJ 4.76 = 50.46   ← 병목(간신히)
+t_pim  = DECODE_ATTN(Σkv 12.32M)                       = 50.21
+t_ffn  = FFN(batch 375)                               = 50.01
+```
+
+| 자원 | 이론 floor | 측정 idle | overlap gap |
+|---|---|---|---|
+| GPU-A | 0.00% | 10.46% | 10.46% |
+| PIM | 0.51% | 10.94% | 10.43% |
+| FFN | 0.91% | 11.20% | 10.29% |
+| **spread** | **0.91%** | **0.74%** | — |
+
+→ 네 타깃 모두 정확 명중; 세 per-cycle 시간이 <1% 로 일치 → 거의 완전 균형.
+
+**(B) prefill 풀이 얇음** (long-decode 워크로드; prefill 공급이 KV 예산에 눌림). batch: decode 122, Σkv 12.3M; prefill 256, **depth-work 27.1M (+5.8% 오버슈트)**.
 
 ```
 t_gpuA = QKV 6.01 + PREFILL_ATTN 42.08 + O_PROJ 4.80 = 52.89   ← 병목
 t_pim  = DECODE_ATTN(Σkv 12.33M)                       = 50.43
 t_ffn  = FFN(batch 378)                               = 50.45
-cycle  = 52.89 µs
 ```
 
 | 자원 | 이론 floor | 측정 idle | overlap gap |
 |---|---|---|---|
-| GPU-A (QKV + PREFILL_ATTN + O_PROJ) | **0.00%** | 8.01% | 8.01% |
-| PIM (DECODE_ATTN) | 4.65% | 12.64% | 7.99% |
-| FFN (Instance B) | 4.61% | 12.61% | 7.99% |
-| **spread** | **4.65%** | 4.62% | — |
+| GPU-A | 0.00% | 8.01% | 8.01% |
+| PIM | 4.65% | 12.64% | 7.99% |
+| FFN | 4.61% | 12.61% | 7.99% |
+| **spread** | **4.65%** | **4.62%** | — |
 
-**핵심 일치 두 가지.**
+**둘 다에서 성립하는 불변 두 가지.**
 
-1. **이론 floor spread 4.65% ≈ 측정 spread 4.62%.** 측정 spread 는 알고리즘 여유가 아니라 이 batch 의 본질적 3자원 불균형(t_gpuA 52.9 vs t_pim/t_ffn 50.4). 알고리즘은 floor 에 도달.
-2. **overlap gap 이 세 자원에 균일한 8.0%.** 병목(GPU-A)은 이론 floor 0 이므로 측정 8% 가 곧 overlap gap = pipeline fill/drain + 2-active staggering 전이 여유. 균일하므로 spread 를 안 키운다.
+1. **측정 spread ≈ 이론 floor** (A: 0.74 ≈ 0.91%; B: 4.62 ≈ 4.65%) — spread 는 알고리즘 여유가 아니라 batch 의 본질적 3자원 불균형. 둘 다 floor 도달.
+2. **overlap gap 이 세 자원에 균일** (A: ~10.4%; B: ~8.0%) — 병목의 이론 floor 가 0 이므로 그 측정 idle 이 곧 overlap gap(pipeline fill/drain + 2-active staggering). 균일하므로 spread 를 안 키움. 즉 **측정 idle = 이론 floor + 균일 overlap gap** 완전 분해.
 
-즉 **측정 idle = 이론 floor + 균일 overlap gap(8%)** 으로 완전 분해. greedy dispatch 가 floor 에 도달.
+**spread 를 정하는 것 — prefill depth-work, 풀 풍부도가 게이트.** PREFILL_ATTN 이 t_gpuA 의 ~80% 이고 depth-work 에 비례. prefill 풀이 풍부하면(A) steering 이 depth 25.6M 정확 명중 → t_gpuA ≈ t_pim ≈ t_ffn → spread 0.74%(본질 floor). 얇으면(B) age-cap 이 오래 기다린 *깊은* prefill 을 강제 — 토큰 256 고정이라 그 깊은 토큰이 steering 의 얕은 선택을 밀어내 → depth 27.1M 오버슈트 → GPU-A 병목 → spread 4.62%. 이 오버슈트가 **age-cap 공정성 비용**이고, 얇은 풀 위 `--age-cap` ablation 이 확정:
 
-**floor spread 를 정하는 것 — prefill depth-work 오버슈트.** PREFILL_ATTN 이 t_gpuA 의 80%, 그리고 PREFILL_ATTN ∝ depth-work. GPU-A 가 병목인 이유는 측정 depth-work(27.1M)가 타깃 25.6M 을 +5.8% 초과해서다. counterfactual: 정확히 25.6M 이면 t_gpuA → 50.56 ≈ t_pim ≈ t_ffn, floor spread 가 4.65% → **0.26%** 로 붕괴.
+| age_cap (얇은 풀) | depth-work | 측정 spread | 비고 |
+|---|---|---|---|
+| **2** (기본, 공정성 ON) | 27.10M (+5.8%) | 4.62% | 대기 ≤ age_cap+1, starvation 0 |
+| **∞** (순수 steering) | 25.73M (+0.5%) | **0.11%** | 가장 깊은 요청 starvation(대기 37) |
 
-**오버슈트는 age-cap 공정성 비용 — 풀 고갈 아님.** prefill 토큰은 256 고정(2의 거듭제곱·커널 친화, FFN-batch knob); depth-work 만 가변. `--age-cap` ablation 이 두 가설을 가른다:
+순수 steering 이 균형 회복(얕은 재료는 풀에 있었음) — 즉 얇은 풀의 4.6% 는 *사들인* 공정성이지 dispatch 실패가 아니다.
 
-| age_cap | depth-work | 이론 floor spread | 측정 spread | 비고 |
-|---|---|---|---|---|
-| **2** (기본, 공정성 ON) | 27.10M (+5.8%) | 4.65% | 4.62% | 대기 ≤ age_cap+1, starvation 0 |
-| **∞** (순수 steering) | 25.73M (+0.5%) | 0.40% | **0.11%** | 가장 깊은 요청 starvation(대기 37) |
-
-공정성을 끄면(`age_cap = ∞`) 순수 steering 이 depth-work 25.73M(타깃 명중)에 맞춘다. **얕은 재료는 풀에 있었다**(진단: 이상 깊이 100K 보다 얕은 후보 ~1.3, 풀 최소깊이 57K). `age_cap = 2` 의 오버슈트는 오래 기다린 *깊은* prefill 요청을 강제 포함한 결과 — 토큰 개수가 256 으로 잠겨 있어 그 깊은 토큰이 steering 의 얕은 선택을 밀어내 depth-합을 올린다.
+**결론 — 배치 구성에 robust, 모든 경우 floor 도달.**
 
 ```
-age_cap=2 → 깊은 long-wait prefill 강제(개수 256 고정) → depth-work +5.8%
-          → PREFILL_ATTN ↑ (t_gpuA 의 80%) → GPU-A 병목 → floor spread 4.65%
-age_cap=∞ → 강제 없음 → steering 25.73M 명중 → spread 0.11%  (단 starvation)
+decode 축 (Σkv 12.3M)  : 구성 무관 명중 (길이분산 무관)
+spread = 본질 불균형 + age-cap 비용(prefill 풀 얇음이 게이트) + 미설명 0
+       = 0.74% (rich prefill)  →  4.6% (thin prefill)  →  <0.2% (공정성 끔, starvation 동반)
+측정 idle (절대)        = 이론 floor + 균일 overlap gap (fill/drain · staggering)
 ```
 
-**결론 — floor 도달, 완전 분해.**
-
-```
-측정 spread 4.62% = 이론 floor spread 4.65%
-                  = 공정성 비용 (age_cap=2 prefill 오버슈트)        ~4.4%
-                  + 워크로드 본질 불균형 (age_cap=∞ 잔여)             0.26%
-측정 idle (절대)  = 이론 floor + 균일 overlap gap 8.0% (fill/drain · staggering)
-미설명 잔여손실    = 0
-```
-
-측정 idle 은 이 워크로드의 알고리즘 floor 이며, floor 자체는 (공정성 비용 + overlap gap)으로 분해된다. 더 낮은 idle 은 *오직* 공정성을 포기(`age_cap ↑`)하고 starvation 을 받아들일 때만 도달 가능 — 즉 "더 낮출 수 없음"은 "더 낮추려면 공정성 보장을 포기해야 함"을 뜻한다. 전체 기록: [`implementation/debug_phase2/REPORT.md`](implementation/debug_phase2/REPORT.md).
+측정 idle 은 알고리즘 floor 이며, floor 는 본질 불균형 + (풀 얇음이 게이트하는) 공정성 비용 + 균일 overlap gap 으로 분해되고 미설명 잔여 0. (A)보다 낮추려면 더 풍부한 prefill 풀(이미 floor 근접) 또는 공정성 포기뿐. 전체 기록: [`implementation/debug_phase2/REPORT.md`](implementation/debug_phase2/REPORT.md).
 
 ## 7. Orthogonality to Complementary Techniques
 
