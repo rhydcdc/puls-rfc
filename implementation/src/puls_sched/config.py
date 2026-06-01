@@ -67,15 +67,20 @@ class AdmissionConfig:
     idle_theta_high: float
     request_queue_capacity: int
     tick_interval_us: float = 10.0
-    prefill_chunk_default: int = 512
+    prefill_chunk_default: int = 256
     pim_slack_safety_margin: float = 0.9
-    # Phase-2 §0.8 — 동작점(operating point): former 가 디코더를 골라 담아 한 μ-batch 의
-    # Σ(decoder KV) 를 이 목표에 맞춘다. 25M 토큰 → PIM≈GPU-A≈B≈101µs (spread 0.6%, op-time
-    # 직접 산출 검증). 디코드는 쪼개 넣기 불가 → 허용 밴드 [21.5M,29M](15% 오차)로 수렴.
-    kv_operating_target_tokens: int = 25_000_000
-    # Phase-2 §0.8 — seq(요청 개수) 상한 `max_batch_size` 제거. 동작점이 (decode KV 25M,
-    # prefill 512) 둘로 정의되고 N_dec 은 부산물(=25M÷ctx)이라 개수 캡은 동작점이 먼저 멈춰
-    # 안 걸리는 중복 레버였음 (사용자 확정). former 정지선 = KV 목표 + per-mb 예산 + 전역 KV.
+    # Phase-2 former-v2 (OPERATING_POINT §1·§3, prefill 256 기본) — 동작점은 *두 타깃*으로
+    # 정의되고 former 가 steering 으로 둘에 동시 수렴한다(개수+KV-work 동시 명중, 쪼개기 불가).
+    #   decode: 개수 123 (decode_count_target) AND Σkv 12.3M (kv_operating_target_tokens)
+    #   prefill: 256 토큰 (prefill_chunk_default) AND depth-합 25.6M (prefill_kv_work_target_tokens)
+    # → PIM≈GPU-A≈B≈51µs (spread~1%, op-time 직접 산출 + proto_steering 검증).
+    kv_operating_target_tokens: int = 12_300_000
+    decode_count_target: int = 123
+    # prefill steering 타깃: Σ(chunk_per_req × depth) — GPU-A PREFILL_ATTN=O(chunk×ctx) 균형.
+    prefill_kv_work_target_tokens: int = 25_600_000
+    # age-cap(공정성): wait ≥ age_cap 인 요청은 steering 무시하고 강제 포함 → starvation 0,
+    # 대기 ≤ age_cap+1 batch. sweep 상 2 가 spread·공정·지연 sweet spot (OPERATING_POINT §3).
+    age_cap: int = 2
 
 
 @dataclass(frozen=True)
@@ -309,11 +314,11 @@ def default_dummy_config() -> Config:
         slo=SLOConfig(ttft_target_ms=100.0, tpot_target_ms=10.0),
         admission=AdmissionConfig(
             n_sat=16,
-            # Phase-2 §0.8 A안 — 총 60M aggregate (= 배치당 30M × 2 슬롯 disjoint).
-            # main_loop._per_mb_kv_budget = 60M / _STAGGERING_TARGET_MB(2) = 30M per μ-batch
-            # → 동작점 25M(상한 29M)이 배치당 30M 천장 안에 안착. A∥B(F3) 오버랩 위해 2 배치
-            # 동시 in-flight(KV 영구 상주, §3.3) → 총 60M. HW = 160GB/stack × 64 = 10.24TB.
-            kv_capacity_aggregate=60_000_000,
+            # Phase-2 former-v2 (prefill 256 기준) — 총 30M aggregate (= 배치당 12.3M×2슬롯+여유).
+            # main_loop._per_mb_kv_budget = 30M / _STAGGERING_TARGET_MB(2) = 15M per μ-batch
+            # → decode 동작점 12.3M 이 배치당 15M 천장 안에 안착. A∥B(F3) 오버랩 위해 2 배치
+            # 동시 in-flight(KV 영구 상주) → 총 30M. HW = 80GB/stack·5TB (256 기준, OPERATING_POINT §1).
+            kv_capacity_aggregate=30_000_000,
             ctx_tier_short_max=8_000,
             ctx_tier_mid_max=32_000,
             deadband_width={"short": 1.0, "mid": 2.0, "long": 3.0},

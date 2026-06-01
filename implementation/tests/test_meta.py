@@ -71,9 +71,13 @@ _EXPECTED_ADMISSION_FIELDS = {
     "prefill_chunk_default",
     # Impl-10-pre-2 (B option) — PIM-GPU TSV BW contention margin (ARCH §3.5.3)
     "pim_slack_safety_margin",
-    # Phase-2 §0.8 — 동작점 KV 총량 목표 (former 가 디코더를 이 합까지 admit)
+    # Phase-2 §0.8 — 동작점 decode KV 합 목표 (steering 타깃 2)
     "kv_operating_target_tokens",
-    # Phase-2 §0.8 — seq 상한 max_batch_size 제거 (N_dec 은 부산물, 개수 캡 중복 레버)
+    # Phase-2 former-v2 (OPERATING_POINT §3) — steering 타깃 1(decode 개수) + prefill
+    # depth-work 타깃 + age-cap 공정성. max_batch_size 는 S2 에서 제거(N_dec 은 부산물).
+    "decode_count_target",
+    "prefill_kv_work_target_tokens",
+    "age_cap",
 }
 
 

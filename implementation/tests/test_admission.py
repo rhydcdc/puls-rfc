@@ -49,15 +49,15 @@ def test_layer1_stops_at_kv_capacity(request_queue, admission_config, idle_telem
 
 
 def test_layer1_stops_at_operating_target(admission, request_queue):
-    """§0.8 동작점 — Σkv 가 kv_operating_target(25M) 도달 시 정지, 나머지 defer."""
+    """former-v2 — Σkv 가 kv_operating_target(12.3M) 도달 시 정지, 나머지 defer."""
     for i in range(5):
         request_queue.push(_make_req(i, kv_length=10_000_000))   # 각 10M
     spec = admission.layer1()
     assert spec is not None
-    # 10M+10M+10M = 30M ≥ 25M → 3개 admit 후 정지 (마지막이 목표 넘김, 쪼개기 불가)
-    assert len(spec.decode_requests) == 3
+    # 10M+10M = 20M ≥ 12.3M → 2개 admit 후 정지 (마지막이 목표 넘김, 쪼개기 불가)
+    assert len(spec.decode_requests) == 2
     assert spec.kv_rows_total >= admission.admission_cfg.kv_operating_target_tokens
-    assert len(request_queue) == 2          # 나머지 2개는 다음 슬롯/tick 몫
+    assert len(request_queue) == 3          # 나머지 3개는 다음 슬롯/tick 몫
 
 
 def test_layer1_per_mb_kv_budget_splits(admission, request_queue):
@@ -71,21 +71,52 @@ def test_layer1_per_mb_kv_budget_splits(admission, request_queue):
 
 
 def test_layer1_per_mb_kv_first_req_exception(admission, request_queue):
-    """빈 mb 는 예산 초과 단일 거대요청도 1개 허용(starvation 방지), 이후 req 는 defer."""
+    """빈 batch 는 per-mb 예산 초과 단일 거대요청도 첫 후보로 허용(starvation 방지)."""
     request_queue.push(_make_req(0, kv_length=3_000_000))   # > 예산 2M
-    request_queue.push(_make_req(1, kv_length=500_000))
     spec = admission.layer1(max_mb_kv_tokens=2_000_000)
     assert spec is not None
-    assert len(spec.decode_requests) == 1    # 거대요청 단독 admit (첫 req 예외)
+    assert len(spec.decode_requests) == 1    # 거대요청 단독 admit (빈 batch 첫 후보 면제)
     assert spec.decode_requests[0].id == 0
-    assert len(request_queue) == 1            # req1 은 이미 3M 초과라 defer
+    # (예산 초과분의 후속 defer 는 test_layer1_per_mb_kv_budget_splits 가 커버)
+
+
+# --- former-v2 steering + age-cap (OPERATING_POINT §3) ---
+
+def test_layer1_steering_picks_closest_to_ideal(admission, request_queue):
+    """첫 step ideal=12.3M/123≈100K — kv_length 가 가장 가까운 디코더를 먼저 admit."""
+    request_queue.push(_make_req(0, kv_length=10_000))
+    request_queue.push(_make_req(1, kv_length=100_000))    # ideal 최근접
+    request_queue.push(_make_req(2, kv_length=500_000))
+    spec = admission.layer1()
+    assert spec is not None
+    assert spec.decode_requests[0].id == 1                 # closest-to-ideal 먼저
+
+
+def test_layer1_age_cap_forces_aged_request(admission, request_queue):
+    """wait ≥ age_cap 인 off-size 요청은 steering 무시하고 강제 admit (공정성)."""
+    aged = _make_req(0, kv_length=2_000_000)               # off-size — steering 이면 후순위
+    aged.wait = admission.admission_cfg.age_cap            # age_cap 도달
+    request_queue.push(aged)
+    request_queue.push(_make_req(1, kv_length=100_000))    # ideal 근접 (steering 이면 먼저)
+    spec = admission.layer1()
+    assert spec.decode_requests[0].id == 0                 # 강제 → aged 가 먼저
+
+
+def test_layer1_deferred_requests_age(admission, request_queue):
+    """타깃 도달로 미선택된 후보는 wait += 1 후 re-push (age-cap 누적)."""
+    for i in range(3):
+        request_queue.push(_make_req(i, kv_length=10_000_000))   # 10M each → 2개서 12.3M 초과
+    admission.layer1()
+    leftover = request_queue.peek_oldest()
+    assert leftover is not None
+    assert leftover.wait == 1
 
 
 def test_layer1_returns_microbatch_spec(admission, request_queue):
     request_queue.push(_make_req(0))
     spec = admission.layer1()
     assert isinstance(spec, MicroBatchSpec)
-    # prefill 512 고정 (§0.8 동작점)
+    # prefill 256 고정 (former-v2 동작점)
     assert spec.prefill_chunk_tokens == admission.admission_cfg.prefill_chunk_default
     assert isinstance(spec.decode_requests, tuple)
 

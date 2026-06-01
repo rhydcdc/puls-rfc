@@ -31,6 +31,10 @@ class Request:
     completion_time: float | None = None
     # ---- Impl-10-pre-2 (O9.1) — prefill chunking position tracker ----
     prefill_processed: int = 0
+    # ---- Phase-2 former-v2 — age-cap 공정성 추적. former 가 한 batch 구성에서 이 요청을
+    # 선택하지 않으면 +1, 선택(admit)되면 의미 종료. wait ≥ age_cap 이면 steering 무시하고
+    # 강제 포함(OPERATING_POINT §3) → starvation 0. ----
+    wait: int = 0
 
     def transition_to(self, new_state: RequestState) -> None:
         if new_state not in _VALID_TRANSITIONS[self.state]:
