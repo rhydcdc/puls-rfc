@@ -3,6 +3,7 @@
 > 새 대화창에 그대로 붙여넣으세요. **설계·검증 끝. 구현(former-v2 → S4 → S5)만 남음.**
 > 단일 기준 = [`OPERATING_POINT.md`](OPERATING_POINT.md) (배치 구성 알고리즘 canonical spec)
 > + [`PLAN.md`](PLAN.md) (살아있는 체크리스트). 측정 메모 = [`REPORT.md`](REPORT.md).
+> ⚠ `STEP6_PROMPT.md` 는 이전(FIFO+skip 시절) 핸드오프 — **superseded, 볼 필요 없음. 이 STEP7 만 보면 됨.**
 
 ---
 
@@ -53,6 +54,9 @@ PULS 스케줄러 Phase-2(풀 모델)의 **구현**을 이어서 한다. 설계�
 
 **길이분산 무관:** avg 100K 는 KV 캡 유도용 중간값일 뿐. former 는 avg 안 보고 **(개수 123, Σkv
 12.3M) 두 타깃** 만 맞춤 → 어떤 길이분포(짧/긴/혼합)든 거대 풀서 조합으로 동작.
+
+> ⚠ **밴드 [11.1M,13.5M] 는 former 입력이 *아님*** — S4 측정의 idle-SLA 진단 라벨(±10%→idle≤10%)일
+> 뿐. former-v2 는 타깃(12.3M, 123)+age-cap 만 봄(steering 이 오버슈트 자체 방지, 밴드 가드 불요).
 
 ## 2. 배치 구성 알고리즘 (OPERATING_POINT.md §3 — 이걸 구현)
 
