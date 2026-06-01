@@ -9,9 +9,9 @@
 
 ## 1. 측정 동작점 — 두 비편향 스냅샷 (spread 는 prefill 풀 풍부도에 좌우)
 
-`floor_proof.py --trace data/sweep_D_longdec.csv --seed-pool 2000 [--seed S]` (수렴 정지). 같은
-워크로드의 두 warm-start 스냅샷 — decode 축(Σkv 12.3M)은 둘 다 명중, **spread 차이는 prefill 풀
-풍부도**:
+재현: `python gen_sweep_traces.py` (→ `data/sweep_*.csv`, 합성·미커밋) → `python ../analysis/floor_proof.py
+--trace data/sweep_D_longdec.csv --seed-pool 2000 [--seed S]` (수렴 정지). 같은 워크로드의 두
+warm-start 스냅샷 — decode 축(Σkv 12.3M)은 둘 다 명중, **spread 차이는 prefill 풀 풍부도**:
 
 | 항목 | (A) 두 풀 풍부 (seed 2024) | (B) prefill 얇음 (기본 seed 42) | 타깃 |
 |---|---|---|---|
