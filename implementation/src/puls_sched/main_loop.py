@@ -47,10 +47,8 @@ class SchedulerCore:
     completion: Completion
     in_flight_requests: dict[int, Request] = field(default_factory=dict)
     _next_mb_id: int = 0
-    # ---- STEP 5 — 합류 게이트 hysteresis deadband latch (README 'adaptive admission
-    # with hysteresis deadband'). idle 신호가 θ_high 초과 시 열고, θ_low 미만 시 닫음.
-    # [θ_low, θ_high] 구간은 직전 상태 유지 → 경계 진동 방지. False = 닫힘에서 시작.
-    _join_gate_open: bool = False
+    # ---- Phase-2 S2 — 합류 게이트(_join_gate_open) 삭제. 풀 모델에선 멤버십=용량이라
+    # 자리(KV·batch) 있고 일감 있으면 무조건 backfill (유휴율 게이트 개념 소멸, 배치_생애 §밸런스).
     # ---- Impl-8 — D1 admission tick hook (evaluator 등록 점) ----
     _admission_tick_callbacks: list[AdmissionTickCallback] = field(default_factory=list)
     # ---- Impl-9 Q1 — ADMISSION_TICK self-rescheduling opt-in (Run.init 가 enable). ----
@@ -228,12 +226,16 @@ class SchedulerCore:
         # Stage 2 — Path C: last dispatched mb 위 spec-derived 산출 (정확, 평균/dummy 0).
         # Cold start (no mb yet) 위 fallback = 0.0 (admission balance 위 cold start anchor).
         last_mb = self._last_dispatched_mb()
+        # Phase-2 — Instance A TP=num_gpus_instance_a 분산 (dispatcher·PIM 단위 통일).
+        n_gpu_a = self.config.hw.num_gpus_instance_a
         if last_mb is not None:
             t_qkv_s = compute_gpu_op_time_s(
                 NodeType.QKV, last_mb, self.config.calibration, self.config.model,
+                num_gpus=n_gpu_a,
             )
             t_oproj_s = compute_gpu_op_time_s(
                 NodeType.O_PROJ, last_mb, self.config.calibration, self.config.model,
+                num_gpus=n_gpu_a,
             )
             t_proj_us = (t_qkv_s + t_oproj_s) * 1e6
             # per-token = PREFILL_ATTN total / chunk total (last mb 위 per-token 영역)
@@ -241,6 +243,7 @@ class SchedulerCore:
             if chunk_total > 0:
                 t_pattn_s = compute_gpu_op_time_s(
                     NodeType.PREFILL_ATTN, last_mb, self.config.calibration, self.config.model,
+                    num_gpus=n_gpu_a,
                 )
                 per_token_us = (t_pattn_s * 1e6) / chunk_total
             else:
@@ -248,7 +251,7 @@ class SchedulerCore:
                 avg_ctx = ctx_tokens if ctx_tokens > 0 else 1
                 peak_FLOPS = (
                     self.config.calibration.gpu_fp16_dense_peak_tflops * 1e12
-                    * self.config.calibration.gpu_mfu_default
+                    * self.config.calibration.gpu_mfu_default * n_gpu_a
                 )
                 per_token_us = (2 * self.config.model.hidden * avg_ctx / peak_FLOPS) * 1e6
         else:
@@ -364,11 +367,9 @@ class SchedulerCore:
                 self.in_flight_requests.pop(req_id, None)
         # 다음 token 의 forward pass 위 reset (multi-token decode 정합)
         mb.current_layer_index = 0
-        # STEP 3 — recompose 가 (1) mb 자기 잔여 req 재구성 + (2) 큐 신규 req 합류
-        # (_try_join_prefill) 를 함께 수행. evict 판정은 그 *결과* 위에서:
-        # 배치_생애 §5 — mb evict = 안의 req 모두 완료 AND 합류할 신규 req 없음(큐 빔/게이트
-        # 닫힘). 즉 recompose 후에도 prefill_chunk·decode_tokens 가 모두 비었을 때만 evict.
-        # (큐 비는 정상 종료 경로는 합류 0 → 기존과 동일하게 evict.)
+        # Phase-2 S2 — 슬롯 재구성 (1) 잔여 req 재배치 + (2) 풀(queue)에서 연속 backfill.
+        # evict 판정 = 재구성 후에도 prefill_chunk·decode_tokens 모두 빔 (완료 + 풀 빔).
+        # 배치_생애 §종료 — 요청 단위 종료, 슬롯은 자연히 비면 evict.
         self._recompose_mb(mb)
         if mb.prefill_chunk or mb.decode_tokens:
             self.dag.reset_micro_batch(mb.id)
@@ -377,18 +378,17 @@ class SchedulerCore:
             self.dispatcher.unregister(mb.id)
 
     def _recompose_mb(self, mb: MicroBatch) -> None:
-        """Impl-10-pre-2 (O9.1 + B) — mb 의 다음 L-cycle 위 prefill_chunk + decode_tokens 갱신.
+        """Phase-2 S2 — 슬롯의 다음 L-cycle 위 prefill_chunk + decode_tokens 갱신.
 
-        Adaptive budget 보존 — mb.prefill_chunk_budget (admission 위 산출) 영원 사용.
-        Fallback (legacy mb 위 budget=0) — prefill_chunk_default.
+        잔여 req(완료 안 된 것) sticky 유지 + 풀(queue)에서 빈 자리 연속 backfill.
+        Adaptive budget 보존 — mb.prefill_chunk_budget (admission 위 산출). Fallback = default.
         """
         budget = mb.prefill_chunk_budget if mb.prefill_chunk_budget > 0 else self.config.admission.prefill_chunk_default
         active_req_ids = set(mb.prefill_chunk.keys()) | set(mb.decode_tokens.keys())
         active_req_ids = {rid for rid in active_req_ids if rid in self.in_flight_requests}
-        # STEP 3 — 양방향 합류. 큐의 신규 요청을 이 mb 에 끌어와 빈 자원을 채움 (배치_생애
-        # §4). prefill/decode 구분은 _populate_mb_phases 가 prompt 유무로 자동 분류 —
-        # 끌어오기만 하면 됨. 게이트·가능량은 헬퍼에서.
-        joined_ids = self._try_join(active_req_ids)
+        # Phase-2 S2 — 풀(queue) 신규 요청을 이 슬롯의 빈 자리에 backfill (배치_생애 §4).
+        # prefill/decode 구분은 _populate_mb_phases 가 prompt 유무로 자동 분류. 유휴 게이트 없음.
+        joined_ids = self._backfill_slot(active_req_ids)
         active_req_ids |= joined_ids
         active_reqs = [self.in_flight_requests[rid] for rid in active_req_ids]
         new_prefill_chunk, new_decode_tokens, new_prefill_processed = self._populate_mb_phases(
@@ -398,47 +398,25 @@ class SchedulerCore:
         mb.decode_tokens = new_decode_tokens
         mb.prefill_processed = new_prefill_processed   # Impl-10 main — re-composition causal ctx refresh
 
-    def _try_join(self, active_req_ids: set[int]) -> set[int]:
-        """STEP 3 — 진행 중 mb 에 큐의 신규 요청을 합류 (양방향).
+    def _backfill_slot(self, active_req_ids: set[int]) -> set[int]:
+        """Phase-2 S2 — 슬롯의 빈 자리에 풀(queue) 신규 요청을 연속 backfill (유휴 게이트 없음).
 
-        배치_생애 §4 (합류) + §5 (게이트). 연속 배칭의 backfill — 자리 나면 큐에서 들임.
-        prefill/decode 구분 없이 끌어오기만 하고, 실제 prefill_chunk/decode_tokens 배치는
-        `_populate_mb_phases` 가 prompt 유무로 자동 분류:
-        - prompt 남은 req → prefill chunk (GPU PREFILL_ATTN 채움 — PIM-bound 구간 해소)
-        - prompt 소진/없는 req → decode token (PIM decode-attn 채움 — GPU-bound 구간 해소)
+        풀 모델 멤버십 = 용량: 자리(batch·KV) 있고 일감 있으면 무조건 들임 (배치_생애 §밸런스
+        "놀까봐 가져온다가 아니라 용량 있고 일감 있으니 넣는다"). prefill/decode 구분은
+        `_populate_mb_phases` 가 prompt 유무로 자동 분류.
 
-        게이트 = hysteresis deadband (STEP 5). 신호 = max(gpu_idle, pim_idle) — 어느
-        한쪽이라도 놀면 채움(단일임계 `gpu_idle>θ OR pim_idle>θ` 와 동치). 닫힘 상태에서
-        신호 > θ_high 면 열고, 열림 상태에서 신호 < θ_low 면 닫음. [θ_low, θ_high] 사이는
-        직전 상태 유지 → 경계 진동 방지 (배치_생애 §5: 밸런스 맞으면 합류 중단). 방향
-        (prefill/decode)은 큐 head 의 성질이 자동 결정 — idle 자원에 맞는 일을 끌어옴.
+        가능량 = min(seq 여유, 전역 KV 여유, per-slot KV 예산). FIFO. KV 안 맞는 head 만나면
+        중단(head-of-line — 다음 완료 경계에서 캐파 회수 후 재시도). per-slot KV 예산은
+        2-슬롯 disjoint 분할의 원리적 한계 (한 슬롯이 KV 독점해 다른 슬롯 굶기는 것 방지).
 
-        가능량 = min(seq 여유, KV 여유). FIFO. KV 안 맞는 head 만나면 중단(head-of-line
-        은 다음 완료 경계에서 캐파 회수 후 재시도).
-
-        Returns: 합류된 신규 요청 id 집합 (kv_accountant.admit + in_flight 등록 완료 상태).
+        Returns: backfill 된 신규 요청 id 집합 (kv_accountant.admit + in_flight 등록 완료).
         """
-        tel = self.admission.idle_telemetry
-        theta_high = self.config.admission.idle_theta_high
-        theta_low = self.config.admission.idle_theta_low
-        idle_signal = max(tel.gpu_idle_fraction(), tel.pim_idle_fraction())
-        # Hysteresis deadband — 닫힘→θ_high 초과 시 열고, 열림→θ_low 미만 시 닫음.
-        # 사이 구간은 _join_gate_open 직전 상태 유지.
-        if self._join_gate_open:
-            if idle_signal < theta_low:
-                self._join_gate_open = False
-        else:
-            if idle_signal > theta_high:
-                self._join_gate_open = True
-        if not self._join_gate_open:
-            return set()  # 게이트 닫힘 (양쪽 포화 또는 deadband 하한 미달)
         seq_room = self.config.admission.max_batch_size - len(active_req_ids)
         if seq_room <= 0:
             return set()
-        # STEP 5.5 — 합류도 이 mb 의 per-mb KV 예산 한도까지만. freed KV 를 한 mb 가
-        # 다 backfill 해 다른 mb 몫을 잠식(단일 mb 독점)하던 것을 차단 (diag_join_race).
-        per_mb_kv = self._per_mb_kv_budget()
-        mb_kv = sum(
+        # per-slot KV 예산 = 전역 KV / 활성 슬롯 목표(2). 한 슬롯의 KV 독점 방지 (disjoint 분할).
+        per_slot_kv = self._per_mb_kv_budget()
+        slot_kv = sum(
             self.in_flight_requests[rid].kv_length
             for rid in active_req_ids if rid in self.in_flight_requests
         )
@@ -448,12 +426,12 @@ class SchedulerCore:
             if req is None:
                 break
             if not self.kv_accountant.can_admit(req):
-                break  # 전역 KV 부족 → 합류 중단
-            if mb_kv + req.kv_length > per_mb_kv:
-                break  # per-mb KV 예산 초과 → 이 mb 합류 중단 (다른 mb 몫 보존)
+                break  # 전역 KV 부족 → backfill 중단
+            if slot_kv + req.kv_length > per_slot_kv:
+                break  # per-slot KV 예산 초과 → 다른 슬롯 몫 보존
             self.request_queue.pop_oldest()
             self.kv_accountant.admit(req)
-            mb_kv += req.kv_length
+            slot_kv += req.kv_length
             if req.state == RequestState.PENDING:
                 req.transition_to(RequestState.PREFILL)
             self.in_flight_requests[req.id] = req
@@ -499,12 +477,13 @@ class SchedulerCore:
         return prefill_chunk, decode_tokens, prefill_processed
 
     def _per_mb_kv_budget(self) -> int:
-        """STEP 5.5 — per-mb KV 예산 = KV캐파 / 동시 활성 목표(2).
+        """Phase-2 — per-slot KV 예산 = 전역 KV / 활성 슬롯 목표(2). 2-슬롯 disjoint 분할의
+        *원리적* 한계 (Phase-1 의 "땜질" 아님).
 
-        한 mb 가 KV캐파 전체를 독점하면 동시 다중 mb(ARCH §5.6/F2 double-buffering,
-        window={M-1,M,M+1})가 불가 → 강제 분할. 배치_생애 §세한계 "여러 배치가 나눠
-        쓴다"의 강제 장치. 분모 = `_STAGGERING_TARGET_MB`(=2, F2 동시 활성 목표),
-        window.capacity 보다 크지 않게 clamp (F2 ablation 시 cap=1 → 분모 1 → 단일 mb).
+        풀 모델 (나) 결정: 디코더를 2 active μ-batch 슬롯으로 disjoint 분할 → 더블 버퍼링
+        (A 내부 proj∥attn) + 인스턴스 A∥B(F3) overlap. 한 슬롯이 KV 독점하면 둘째 슬롯이
+        못 생겨 overlap 불가 → 슬롯당 KV 절반. 분모 = `_STAGGERING_TARGET_MB`(=2, 활성 슬롯
+        목표), window.capacity 보다 크지 않게 clamp (F2 ablation cap=1 → 분모 1 → 단일 슬롯).
         """
         divisor = min(_STAGGERING_TARGET_MB, self.window.capacity)
         if divisor <= 0:

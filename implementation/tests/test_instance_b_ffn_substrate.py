@@ -84,7 +84,10 @@ def test_b2_dispatch_records_gpu_instance_b(cfg, alpha_pipeline):
     assert alpha_pipeline.idle_telemetry.active_duration("gpu_instance_b") == 0.0
     alpha_pipeline.dispatch(mb)
     recorded = alpha_pipeline.idle_telemetry.active_duration("gpu_instance_b")
-    expected_us = compute_ffn_op_time_s(mb, cfg.calibration, cfg.model) * 1e6
+    # Phase-2 — Instance B TP=num_gpus_instance_b 분산 (dispatch 가 동일 num_gpus 전달).
+    expected_us = compute_ffn_op_time_s(
+        mb, cfg.calibration, cfg.model, num_gpus=cfg.hw.num_gpus_instance_b,
+    ) * 1e6
     assert abs(recorded - expected_us) / expected_us < 1e-6
 
 

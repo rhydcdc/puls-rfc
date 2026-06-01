@@ -186,6 +186,7 @@ def compute_gpu_op_time_s(
     cal: CalibrationConfig,
     model: ModelConfig,
     time_cfg: TimeConfig | None = None,
+    num_gpus: int = 1,
 ) -> float:
     """Per-mb spec-derived per-op time for DAG 4 node types (Instance A).
 
@@ -194,9 +195,12 @@ def compute_gpu_op_time_s(
     Args:
         node_type: NodeType — QKV / PREFILL_ATTN / O_PROJ / DECODE_ATTN (F1 ablation)
         mb: MicroBatch — per-mb batch (decode + prefill) + per-req ctx 산출
-        cal: CalibrationConfig — B200 peak × MFU
+        cal: CalibrationConfig — B200 peak × MFU (peak = *per-GPU*, provenance "2200 TFLOPS per GPU")
         model: ModelConfig — hidden, num_kv_heads, head_dim
         time_cfg: TimeConfig — DECODE_ATTN F1 ablation reference (Impl-11 영역)
+        num_gpus: tensor-parallel GPU 수 (ARCH §3.4 TP=8). GEMM 이 num_gpus 장에 분산되어
+            wall-clock = single-GPU FLOPs / num_gpus. PIM op_time 이 k_aggregate(=8 GPU 채널
+            합산)로 이미 분산을 반영하는 것과 *단위 통일*. 기본 1 = 단위 test 의 산식 검증 보존.
 
     Returns:
         op_time_s (seconds, float)
@@ -206,7 +210,9 @@ def compute_gpu_op_time_s(
     """
     from puls_sched.node import NodeType as _NT
 
-    peak_FLOPS = cal.gpu_fp16_dense_peak_tflops * 1e12 * cal.gpu_mfu_default
+    # Phase-2 — TP=num_gpus 분산: GEMM wall-clock = single-GPU FLOPs / num_gpus.
+    # PIM 은 k_aggregate(8-GPU 채널 합산)로 이미 분산 반영 → GPU 도 통일.
+    peak_FLOPS = cal.gpu_fp16_dense_peak_tflops * 1e12 * cal.gpu_mfu_default * num_gpus
     batch_decode = len(mb.decode_tokens)
     # prefill_chunk = dict[req_id, list[int]] — list length = chunk size per req
     batch_prefill = sum(len(v) for v in mb.prefill_chunk.values()) if mb.prefill_chunk else 0
@@ -247,6 +253,7 @@ def compute_ffn_op_time_s(
     mb: "MicroBatch",
     cal: CalibrationConfig,
     model: ModelConfig,
+    num_gpus: int = 1,
 ) -> float:
     """Instance B FFN op_time (α path Carry-1 해소).
 
@@ -254,8 +261,12 @@ def compute_ffn_op_time_s(
     DAG 노드 영역 아님 — Instance B substrate 만, NodeType enum 외.
 
     FLOPs = 6 × batch × hidden × intermediate (Llama-3 70B: intermediate=28672)
+
+    num_gpus: Instance B tensor-parallel GPU 수 (ARCH §3.4, 기본 8). FFN GEMM 이 num_gpus
+        장에 분산 → wall-clock = single-GPU FLOPs / num_gpus. compute_gpu_op_time_s 와 동일.
     """
-    peak_FLOPS = cal.gpu_fp16_dense_peak_tflops * 1e12 * cal.gpu_mfu_default
+    # Phase-2 — TP=num_gpus 분산 (compute_gpu_op_time_s 와 단위 통일).
+    peak_FLOPS = cal.gpu_fp16_dense_peak_tflops * 1e12 * cal.gpu_mfu_default * num_gpus
     batch_decode = len(mb.decode_tokens)
     batch_prefill = sum(len(v) for v in mb.prefill_chunk.values()) if mb.prefill_chunk else 0
     batch_total = batch_decode + batch_prefill

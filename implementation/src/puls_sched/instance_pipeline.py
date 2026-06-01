@@ -108,8 +108,11 @@ class InstancePipeline:
         # α path Carry-1 — Instance B FFN op_time substrate (Stage 2 Impl-10 main)
         if self.clock is None or self.idle_telemetry is None:
             return  # backward-compat (test fixture 영역)
+        # Phase-2 — Instance B TP 분산 (dispatcher FFN 노드와 단위 통일). 단 이 telemetry
+        # 경로는 S0 에서 FFN 스케줄 노드로 대체됨 (production 미사용, S3 정리 대상).
         ffn_op_time_us = compute_ffn_op_time_s(
             mb, self.config.calibration, self.config.model,
+            num_gpus=self.config.hw.num_gpus_instance_b,
         ) * 1e6
         if ffn_op_time_us > 0:
             t_start = self.clock.now

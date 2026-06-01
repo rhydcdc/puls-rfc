@@ -103,7 +103,8 @@ def test_f3_7_t_qkv_formula(ev):
     model = ev.config.model
     r = ev.f3_closed_form(ctx_tokens=32000, batch=16)
     expected_flops = 2 * 16 * model.hidden * (model.hidden + 2 * model.num_kv_heads * model.head_dim)
-    peak = cal.gpu_fp16_dense_peak_tflops * 1e12 * cal.gpu_mfu_default
+    # Phase-2 — Instance A TP=num_gpus_instance_a 분산 (peak = per-GPU × num_gpus).
+    peak = cal.gpu_fp16_dense_peak_tflops * 1e12 * cal.gpu_mfu_default * ev.config.hw.num_gpus_instance_a
     expected_us = expected_flops / peak * 1e6
     assert abs(r.t_qkv_us - expected_us) / expected_us < 1e-6
 
@@ -118,7 +119,8 @@ def test_f3_8_t_ffn_formula(ev):
     model = ev.config.model
     r = ev.f3_closed_form(ctx_tokens=32000, batch=16)
     expected_flops = 6 * 16 * model.hidden * model.ffn_intermediate
-    peak = cal.gpu_fp16_dense_peak_tflops * 1e12 * cal.gpu_mfu_default
+    # Phase-2 — Instance B TP=num_gpus_instance_b 분산.
+    peak = cal.gpu_fp16_dense_peak_tflops * 1e12 * cal.gpu_mfu_default * ev.config.hw.num_gpus_instance_b
     expected_us = expected_flops / peak * 1e6
     assert abs(r.b_cycle_us - expected_us) / expected_us < 1e-6
 

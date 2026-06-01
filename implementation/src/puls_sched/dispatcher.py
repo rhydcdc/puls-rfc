@@ -147,12 +147,19 @@ class Dispatcher:
                 from puls_sched.micro_batch import MicroBatch
                 mb = MicroBatch(id=node.micro_batch_id, decode_tokens={0: 0})
             # Stage 2 — per-mb spec-derived (seconds → microseconds for clock unit)
-            return compute_gpu_op_time_s(node.type, mb, self.config.calibration, self.config.model) * 1e6
+            # Phase-2 — Instance A TP=num_gpus_instance_a 분산 (PIM k_aggregate 와 단위 통일).
+            return compute_gpu_op_time_s(
+                node.type, mb, self.config.calibration, self.config.model,
+                num_gpus=self.config.hw.num_gpus_instance_a,
+            ) * 1e6
         if node.type is NodeType.FFN:
             # Phase-2 — Instance B FFN spec-derived (inter-AB, ARCH §3.4 / §5.7 F3).
             if mb is None:
                 mb = MicroBatch(id=node.micro_batch_id, decode_tokens={0: 0})
-            return compute_ffn_op_time_s(mb, self.config.calibration, self.config.model) * 1e6
+            return compute_ffn_op_time_s(
+                mb, self.config.calibration, self.config.model,
+                num_gpus=self.config.hw.num_gpus_instance_b,
+            ) * 1e6
         # PIM (decode-attn).
         if self.config.ablation.f1_disabled:
             # F1 ablation — GPU fallback reference (Impl-11 영역). DECODE_ATTN spec-derived 영원

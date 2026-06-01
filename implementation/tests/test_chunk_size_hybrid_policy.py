@@ -70,40 +70,8 @@ def test_steady_state_balanced_keeps_base(dummy_config):
     assert spec.prefill_chunk_tokens == dummy_config.admission.prefill_chunk_default
 
 
-def test_steady_state_gpu_idle_adds_chunk_invert(dummy_config):
-    """Impl-10-pre-2 invert — gpu_idle high → balance_intra_A 위 prefill_chunk + n_sat 영역."""
-    adm, rq, tel = _make_adm(dummy_config)
-    # PIM 활동 → gpu_idle high, pim_idle low
-    tel.record_active("PIM", 0.0, 10.0)
-    rq.push(Request(id=0, prompt_tokens=[0] * 100, kv_length=100, max_tokens=10))
-    spec = adm.layer1(
-        t_proj=1e9, t_pim_fn=lambda n: 0.0,
-        a_cycle=10.0, b_cycle=10.0,   # inter-AB balanced
-        ctx_tokens=100,
-    )
-    # base + n_sat (intra-A invert: GPU idle → prefill admit)
-    expected = (
-        dummy_config.admission.prefill_chunk_default + dummy_config.admission.n_sat
-    )
-    assert spec.prefill_chunk_tokens == expected
-
-
-def test_steady_state_pim_idle_adds_decode_invert(dummy_config):
-    """Impl-10-pre-2 invert — pim_idle high → balance_intra_A 위 decode + 1 영역."""
-    adm, rq, tel = _make_adm(dummy_config)
-    # GPU 활동 → gpu_idle low, pim_idle high
-    tel.record_active("GPU", 0.0, 10.0)
-    for i in range(3):
-        rq.push(Request(id=i, prompt_tokens=[0] * 100, kv_length=100, max_tokens=10))
-    spec = adm.layer1(
-        t_proj=1e9, t_pim_fn=lambda n: 0.0,
-        a_cycle=10.0, b_cycle=10.0,
-        ctx_tokens=100,
-    )
-    # prefill_chunk_tokens 변경 0 (PIM idle 위), decode_count 영향 = n + 1
-    # mfu_floor(n) 산식 위 n_sat (16) max
-    # 단 본 test 는 spec.prefill_chunk_tokens 만 검증 (변경 0)
-    assert spec.prefill_chunk_tokens == dummy_config.admission.prefill_chunk_default
+# Phase-2 S1 — balance_intra_A(유휴율 기반 prefill/decode invert) 삭제됨.
+# steady state 밸런스는 balance_inter_AB(시간 기준, 위 테스트) 단일 레버.
 
 
 # ---- Cross-product — 9 case 영역 (inter-AB × intra-A) ----

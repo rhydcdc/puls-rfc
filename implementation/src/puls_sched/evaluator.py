@@ -456,7 +456,11 @@ class Evaluator:
         """
         cal = self.config.calibration
         model = self.config.model
-        peak_FLOPS = cal.gpu_fp16_dense_peak_tflops * 1e12 * cal.gpu_mfu_default
+        hw = self.config.hw
+        # Phase-2 — TP 분산 (peak = per-GPU). Instance A proj = ×8, Instance B FFN = ×8.
+        # PIM 이 k_aggregate(8-GPU 채널 합산)로 분산을 반영하는 것과 단위 통일.
+        peak_FLOPS_a = cal.gpu_fp16_dense_peak_tflops * 1e12 * cal.gpu_mfu_default * hw.num_gpus_instance_a
+        peak_FLOPS_b = cal.gpu_fp16_dense_peak_tflops * 1e12 * cal.gpu_mfu_default * hw.num_gpus_instance_b
 
         # GPU compute (spec-derived per-op, seconds)
         flops_QKV = 2 * batch * model.hidden * (
@@ -466,20 +470,19 @@ class Evaluator:
         flops_O_PROJ = 2 * batch * model.hidden * model.hidden
         flops_FFN = 6 * batch * model.hidden * model.ffn_intermediate
 
-        t_qkv_us = flops_QKV / peak_FLOPS * 1e6
-        t_prefill_attn_us = flops_PREFILL_ATTN / peak_FLOPS * 1e6
-        t_o_proj_us = flops_O_PROJ / peak_FLOPS * 1e6
+        t_qkv_us = flops_QKV / peak_FLOPS_a * 1e6
+        t_prefill_attn_us = flops_PREFILL_ATTN / peak_FLOPS_a * 1e6
+        t_o_proj_us = flops_O_PROJ / peak_FLOPS_a * 1e6
         t_proj_us = t_qkv_us + t_prefill_attn_us + t_o_proj_us
 
         # PIM attention (D5 calibrated, ns → µs)
-        hw = self.config.hw
         k_aggregate = hw.num_gpus_instance_a * hw.num_stacks_per_gpu * hw.num_channels_per_stack
         tile_rows = self.config.time.rtl_fsm_tile_rows
         num_tiles = math.ceil(batch * ctx_tokens / (k_aggregate * tile_rows)) if ctx_tokens > 0 else 0
         t_attn_us = num_tiles * cal.pim_tile_time_fp8_ns_calibrated * 1e-3
 
         a_cycle_us = max(t_proj_us, t_attn_us)
-        b_cycle_us = flops_FFN / peak_FLOPS * 1e6
+        b_cycle_us = flops_FFN / peak_FLOPS_b * 1e6
         total = a_cycle_us + b_cycle_us
         ratio = max(a_cycle_us, b_cycle_us) / total if total > 0 else 0.0
 
