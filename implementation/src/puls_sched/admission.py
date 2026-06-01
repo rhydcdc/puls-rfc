@@ -7,14 +7,6 @@ from puls_sched.request import Request
 from puls_sched.request_queue import RequestQueue
 
 
-@dataclass(frozen=True)
-class MicroBatchSpec:
-    prefill_chunk_tokens: int
-    decode_requests: tuple[Request, ...]
-    kv_rows_total: int                                   # Impl-5 — Σ kv_length over decode_requests (signal flow to dispatcher, F5 활성화 path)
-    kv_rows_lockstep: int                                # Impl-8 — max(kv_length) × num_decode_reqs (F5 ablation 위 lock-step penalty 산식)
-
-
 @dataclass
 class Admission:
     admission_cfg: AdmissionConfig

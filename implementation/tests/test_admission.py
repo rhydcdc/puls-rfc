@@ -1,6 +1,6 @@
 import pytest
 
-from puls_sched.admission import Admission, MicroBatchSpec
+from puls_sched.admission import Admission
 from puls_sched.request import Request, RequestState
 
 
@@ -77,12 +77,3 @@ def test_steer_no_kv_admit(admission):
     used_before = admission.kv_accountant.used
     admission.steer_decode_set([_make_dec(i, kv_length=100) for i in range(3)])
     assert admission.kv_accountant.used == used_before
-
-
-# --- MicroBatchSpec 필드 (signal flow substrate, 보존) ---
-
-def test_admission_spec_has_kv_rows_total():
-    """MicroBatchSpec 에 kv_rows_total 필드 존재 + int 타입."""
-    fields = MicroBatchSpec.__dataclass_fields__
-    assert "kv_rows_total" in fields
-    assert fields["kv_rows_total"].type is int

@@ -2,7 +2,6 @@ import inspect
 from pathlib import Path
 
 import puls_sched
-from puls_sched.admission import MicroBatchSpec
 from puls_sched.config import AdmissionConfig, ModelConfig, TimeConfig, default_dummy_config
 from puls_sched.dag import DAG
 from puls_sched.dispatcher import Dispatcher
@@ -198,12 +197,6 @@ def test_meta_micro_batch_has_prefill_chunk_budget_field():
     fields = MicroBatch.__dataclass_fields__
     assert "prefill_chunk_budget" in fields
     assert fields["prefill_chunk_budget"].type is int
-
-
-def test_meta_micro_batch_spec_has_kv_rows_total_field():
-    fields = MicroBatchSpec.__dataclass_fields__
-    assert "kv_rows_total" in fields
-    assert fields["kv_rows_total"].type is int
 
 
 def test_meta_dispatcher_has_micro_batches_field():
@@ -480,11 +473,6 @@ def test_meta_micro_batch_has_kv_rows_lockstep_field():
     """MicroBatch.kv_rows_lockstep field (Q8 — F5 ablation signal flow)."""
     assert "kv_rows_lockstep" in MicroBatch.__dataclass_fields__
     assert MicroBatch.__dataclass_fields__["kv_rows_lockstep"].type is int
-
-
-def test_meta_micro_batch_spec_has_kv_rows_lockstep_field():
-    """MicroBatchSpec.kv_rows_lockstep field."""
-    assert "kv_rows_lockstep" in MicroBatchSpec.__dataclass_fields__
 
 
 def test_meta_dispatcher_has_on_dispatch_method():
