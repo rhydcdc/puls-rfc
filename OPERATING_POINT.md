@@ -13,7 +13,7 @@ projection+prefill-attn / FFN=인스턴스 B)의 시간을 맞춰 인스턴스 �
 | 순서 | 고정값 | 값 (prefill 256) | 조건 자원 |
 |---|---|---|---|
 | ① | prefill 토큰/배치 | **256** | GPU-A (PREFILL_ATTN = Σ chunk×depth) |
-| ② | 균형 시간 X | **~51 µs** (TBT ≈ X·L ≈ 4.1ms) | — |
+| ② | 균형 시간 X (= 산출주기) | **~51 µs** (X·L ≈ 4.1ms = 배치 forward-pass 산출주기) | — |
 | ③ | FFN batch | **379 토큰** | 인스턴스 B |
 | ④ | **decode 개수 N_dec (제어 타깃)** | **123** (= 379 − 256) | 인스턴스 B |
 | ⑤ | **decode KV 합 (제어 타깃)** | **12.3M** | 인스턴스 A (PIM) |
@@ -104,14 +104,14 @@ proj flops/tok). **prefill 이 약분돼 사라짐** → 모든 prefill 에서 �
 > arrival 평균이 100K 여야 한다"가 *아니라*, "어떤 길이분포든 KV 합 12.3M·개수 123 으로 조합한다".
 
 **prefill 256 기본 (vs 512).** prefill 은 균형 ctx 가 아니라 *스케일 X* 를 정하는 knob. 256 이:
-- **TBT 절반** (X 51 vs 101µs → 4.1 vs 8.1ms).
+- **산출주기 절반** (X 51 vs 101µs → X·L 4.1 vs 8.1ms).
 - **HBM 절반** (aggregate ~30M→5TB vs 60M→10TB).
 - **TTFT 동일** — X 가 prefill 에 선형(X/prefill≈0.198 일정)이라 청크 2배·cycle 절반이
   상쇄, TTFT = prompt × 0.198 × L (prefill 무관).
 - **throughput 동일** (~30k tok/s).
 - decode/prefill KV 목표가 작아 **배치 구성도 쉬움**(변동·메모리 적음).
 
-→ 256 이 512 대비 TBT·HBM 을 반으로 줄이면서 TTFT·throughput 손해 0. **유일 risk = FFN GEMM
+→ 256 이 512 대비 산출주기·HBM 을 반으로 줄이면서 TTFT·throughput 손해 0. **유일 risk = FFN GEMM
 MFU 포화**: batch 379 가 텐서코어를 다 채우나? FFN inner dim 이 거대(K=8192, N=28672)해
 wave-quant 추정상 batch ~128 이면 포화(379 는 충분) → **256 채택**. 단 현 모델은 MFU=0.6
 고정이라 knee 를 못 봄 = **실측 불가(silicon 부재, ARCH "MFU plateau" deferred calibration).**

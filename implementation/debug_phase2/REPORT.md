@@ -132,5 +132,5 @@ idle trade-off, OPERATING_POINT §3 sweep). 끄면 idle 0.11% 까지 내려가�
 | 2048 | 100K | 406 | 991 | 99.1M | 204.8M | 0.39 |
 
 균형 ctx 는 prefill 무관 100K 고정(하드웨어 상수, §4 삼중균형서 prefill 약분). prefill 은 X·배치
-규모만 스케일. **256 채택**(TBT·HBM 반감, TTFT·throughput 동손 0); 512 는 FFN MFU 포화 불가
+규모만 스케일. **256 채택**(산출주기·HBM 반감, TTFT·throughput 동손 0); 512 는 FFN MFU 포화 불가
 판명 시 대안. 옛 "512만 가능"은 폐기.

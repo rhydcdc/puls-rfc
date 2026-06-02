@@ -88,6 +88,7 @@ Limitations of existing HBM-PIM research, grouped by axis:
   - **Event-driven dispatch + dependency DAG** — encodes invariants (data dependency + resource) as a graph, reducing dispatch to a ready-node selection problem
   - **2-μ-batch lookahead** — starting work for the next μ-batch early + filling idle resources with work from another μ-batch (emerges naturally)
   - **Pool-model composition with local-greedy steering** — admission (pool refill) ‖ decode-set steering ‖ prefill steering, each hitting fixed operating-point targets independently, with an age-cap for fairness (no global statistics, no idle-feedback loop)
+  - **Preemption-free deterministic admission** — full-length KV is reserved at admission, so an admitted request is *never evicted / recomputed* (zero lost work). Memory pressure is absorbed by admission backpressure (refusing new requests), not preemption, and the age-cap bounds waiting (starvation-free). The two bounds — space (KV cap) and time (age-cap) — are orthogonal: pressure on one axis is never repaid by reclaiming the other
 
 ## Approach Summary
 
@@ -193,7 +194,7 @@ Interpretation:
 
 - **Each batch hits the operating point** — Σkv 12.3M / prefill 256 / depth-work 25.6M are met in all three, independently, from the shared pool (length-distribution-agnostic). The first two also hit decode count 123 exactly, with per-batch spread <0.8% — the three per-cycle resource times match, **quantitative evidence that F2 (projection ‖ PIM double-buffering) and F3 (inter-instance pipeline) manifest**.
 - **The last batch spikes (mb#2: count 108, spread 3.74%) — because of the age-cap.** By the time the third batch is composed, the warm-start has left most pool members "waiting", so the age-cap force-includes already-aged requests over the steering — the *intended fairness mechanism* (bounded wait, no starvation), not a dispatch failure. On a real continuous-arrival stream requests are fresh, so the age-cap fires only on genuinely-old ones and the tail vanishes (pure steering → all three at 123). Full spectrum + the floor proof (measured ≈ theoretical floor) — [`ARCHITECTURE.md`](ARCHITECTURE.md) §6.8.
-- **Throughput sustainability is a separate axis** — decode length is very long (large standing pool), so zero completions occur within the measure window → TTFT/TBT are not reported here (separate measurement). The validation target is the per-cycle balance (idle). Drain / completion / zero KV leak are separately verified by the synthetic acceptance suite (all requests complete · KV remaining = initial · clean termination).
+- **Throughput is sustained by construction** — the per-cycle decode budget is pinned to the operating point (123, or fewer when the KV cap binds first), so each cycle processes a fixed token quantum as long as the pool stays abundant; sustainability is therefore a structural consequence of the fixed operating point, not a separate open axis. The validation target here is the per-cycle balance (idle); drain / completion / zero KV leak are separately verified by the synthetic acceptance suite (all requests complete · KV remaining = initial · clean termination). Absolute tok/s awaits silicon-calibrated cycle time (see Honest Disclosure).
 
 ### Honest Disclosure
 

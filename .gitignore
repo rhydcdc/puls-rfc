@@ -59,6 +59,9 @@ implementation/debug_phase2/_scratch_*/
 # Synthetic sweep traces — regenerate via implementation/debug_phase2/gen_sweep_traces.py
 implementation/data/sweep_*.csv
 
+# Local-only conceptual notes (personal understanding notes, not published)
+*.local.md
+
 # Phase-2 working handoff notes (Korean dev notes, like the ignored top-level PLAN.md)
 implementation/debug_phase2/PLAN.md
 implementation/debug_phase2/STEP6_PROMPT.md

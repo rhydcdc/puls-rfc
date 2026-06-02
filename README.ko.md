@@ -85,6 +85,7 @@
   - **Event-driven dispatch + dependency DAG** — invariant (data dependency + resource) 을 그래프로 코드화, ready-node 선택 문제로 환원
   - **2-μ-batch lookahead** — 다음 μ-batch 작업을 미리 시작 + idle 자원을 다른 μ-batch 의 작업으로 채움 (자연 산출)
   - **풀 모델 구성 + 로컬 그리디 steering** — admission(풀 보충) ‖ decode-set steering ‖ prefill steering, 각각 고정 동작점 타깃을 독립 명중, 공정성을 위한 age-cap (전역 통계·idle-feedback 루프 없음)
+  - **축출 없는 결정론적 admission** — admit 시 full-length KV 를 예약하므로 일단 admit 된 요청은 *축출·recompute 되지 않음*(lost work 0). 메모리 압박은 preemption 이 아니라 admission backpressure(신규 거절)로 흡수하고, age-cap 이 대기를 상한(starvation 0). 공간(KV 캡)·시간(age-cap) 두 bound 가 직교 — 한 축의 압박을 다른 축의 회수로 갚지 않음
 
 ## 접근 요약
 
@@ -188,7 +189,7 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (F5 포함)**.
 
 - **각 배치가 동작점 명중** — Σkv 12.3M / prefill 256 / depth-work 25.6M 을 세 배치 모두 공유 풀에서 *독립적으로* 충족(길이분산 무관). 앞 둘은 decode 개수 123 도 정확, 배치별 spread <0.8% — 세 per-cycle 자원 시간 일치, **F2(projection ‖ PIM double-buffering)·F3(inter-instance pipeline) 발현의 정량 증거**.
 - **마지막 배치가 튐 (mb#2: 개수 108, spread 3.74%) — age-cap 때문.** 세 번째 배치 구성 시점엔 warm-start 가 풀 멤버 대부분을 "대기" 상태로 만들어, age-cap 이 steering 을 누르고 *이미 오래 기다린* 요청을 강제 포함 — *의도된 공정성 메커니즘*(대기 상한, starvation 0)이지 dispatch 결함이 아님. 실서버 연속 도착에선 요청이 fresh 라 age-cap 이 산발적으로만 발동 → 꼬리 소멸(순수 steering → 셋 다 123). 전체 스펙트럼 + floor 증명(측정 ≈ 이론 floor) — [`ARCHITECTURE.md`](ARCHITECTURE.md) §6.8.
-- **throughput 지속성은 별개 축** — decode 길이가 매우 길어(상주 풀 큼) 측정창 내 완료 0 → TTFT/TBT 는 본 측정서 미산출(별도). 본 검증 대상은 per-cycle 균형(idle). 드레인·완료·KV 누수 0 은 합성 acceptance(전부 완료·KV remaining=initial·정상 종료)로 별도 검증.
+- **throughput 은 설계상 지속** — per-cycle decode 예산이 동작점에 고정(123, KV 캡에 먼저 닿으면 그 이하)이라 풀이 풍부한 한 매 cycle 이 고정된 토큰 양을 처리 → 지속성은 *별개로 열린 축이 아니라 동작점 고정의 구조적 귀결*. 본 검증 대상은 per-cycle 균형(idle); 드레인·완료·KV 누수 0 은 합성 acceptance(전부 완료·KV remaining=initial·정상 종료)로 별도 검증. 절대 tok/s 는 silicon 보정 cycle 시간 필요(Honest Disclosure 참조).
 
 ### Honest Disclosure
 

@@ -415,7 +415,7 @@ The scheduler composes each μ-batch to drive the three resources (PIM = decode-
 | order | fixed value | value (prefill 256) | binding resource |
 |---|---|---|---|
 | ① | prefill tokens / batch | **256** (power-of-2, kernel-friendly) | GPU-A (PREFILL_ATTN = Σ chunk×depth) |
-| ② | balance time X | **~51 µs** (TBT ≈ X·L ≈ 4.1 ms) | — |
+| ② | balance time X (= throughput cycle) | **~51 µs** (X·L ≈ 4.1 ms = batch forward-pass period) | — |
 | ③ | FFN batch | **379 tokens** | Instance B |
 | ④ | **decode count N_dec (control target)** | **123** (= 379 − 256) | Instance B |
 | ⑤ | **decode-KV sum (control target)** | **12.3M** | Instance A (PIM) |
@@ -444,7 +444,7 @@ window = 3 (2 active for F2/F3 overlap + 1 transition slack).
 
 **ctx 100K is a hardware constant, not an empirical guess.** Solving the triple balance yields `ctx_balance = (K2+1)/K1` from the op-time coefficient ratios (PIM tile rate ÷ FFN flops/tok ÷ prefill-attn flops/tok·depth ÷ proj flops/tok); *prefill cancels out*, so the balance ctx is 100K for **every** prefill (§5 sweep B confirms). Its role is to *derive* the targets (Σkv 12.3M = 123 × 100K), **not** to impose a mean on the workload. This is why the algorithm is length-distribution-agnostic: it matches the two derived targets, however individual request lengths are distributed.
 
-**prefill 256 vs 512.** prefill is not the balance ctx but the *scale knob* X. 256 halves TBT (51 vs 101 µs) and HBM (~30M → 5 TB vs 60M → 10 TB) at zero TTFT / throughput cost (X is linear in prefill, so chunk 2× · cycle ½ cancel). The sole risk is FFN GEMM MFU saturation — batch 379 must fill the tensor cores; wave-quant estimation says batch ~128 saturates (379 is ample), but the model fixes MFU = 0.6 so the knee is not observable (silicon absent). **512 is the fallback if FFN saturation proves infeasible** (batch 759, vLLM-convergent).
+**prefill 256 vs 512.** prefill is not the balance ctx but the *scale knob* X. 256 halves the throughput cycle X (51 vs 101 µs) and HBM (~30M → 5 TB vs 60M → 10 TB) at zero TTFT / throughput cost (X is linear in prefill, so chunk 2× · cycle ½ cancel). The sole risk is FFN GEMM MFU saturation — batch 379 must fill the tensor cores; wave-quant estimation says batch ~128 saturates (379 is ample), but the model fixes MFU = 0.6 so the knee is not observable (silicon absent). **512 is the fallback if FFN saturation proves infeasible** (batch 759, vLLM-convergent).
 
 > **Superseded note.** The legacy idle-fraction-feedback + hysteresis-deadband admission of earlier drafts is replaced by this pool model. Deadband width was `2σ_total`, but σ is unmeasurable on a self-authored framework with no hardware jitter model (§8 / OI4), so the feedback variant was never the operative mechanism. The pool model hits fixed targets directly via steering; the ±10% band survives only as a diagnostic idle-SLA label, not a control input.
 

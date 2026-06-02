@@ -415,7 +415,7 @@ on event(kernel K of μ-batch X completes):
 | 순서 | 고정값 | 값 (prefill 256) | 조건 자원 |
 |---|---|---|---|
 | ① | prefill 토큰/배치 | **256** (2의 거듭제곱·커널 친화) | GPU-A (PREFILL_ATTN = Σ chunk×depth) |
-| ② | 균형 시간 X | **~51 µs** (TBT ≈ X·L ≈ 4.1 ms) | — |
+| ② | 균형 시간 X (= 산출주기) | **~51 µs** (X·L ≈ 4.1 ms = 배치 forward-pass 산출주기) | — |
 | ③ | FFN batch | **379 토큰** | Instance B |
 | ④ | **decode 개수 N_dec (제어 타깃)** | **123** (= 379 − 256) | Instance B |
 | ⑤ | **decode-KV 합 (제어 타깃)** | **12.3M** | Instance A (PIM) |
@@ -444,7 +444,7 @@ window = 3 (2 active F2/F3 overlap + 1 전이 여유).
 
 **ctx 100K = 하드웨어 상수, 경험적 추측 아님.** 삼중 균형을 풀면 op-time 계수 비로 `ctx_balance = (K2+1)/K1`(PIM tile rate ÷ FFN flops/tok ÷ prefill-attn flops/tok·depth ÷ proj flops/tok); *prefill 이 약분돼 사라짐* → 균형 ctx 가 **모든** prefill 에서 100K(§5 스윕 B 실증). 역할은 타깃 *도출*(Σkv 12.3M = 123 × 100K)이지 워크로드에 평균을 *강제* 하는 게 아니다. 이것이 길이분산 무관성의 근거 — 개별 요청 길이가 어떻게 분산되든 도출된 두 타깃만 맞춘다.
 
-**prefill 256 vs 512.** prefill 은 균형 ctx 가 아니라 *스케일 knob* X. 256 은 TBT(51 vs 101 µs)와 HBM(~30M → 5 TB vs 60M → 10 TB)을 반으로 줄이며 TTFT / throughput 손해 0(X 가 prefill 에 선형이라 청크 2× · cycle ½ 상쇄). 유일 risk = FFN GEMM MFU 포화 — batch 379 가 텐서코어를 채우나; wave-quant 추정상 batch ~128 포화(379 충분), 단 모델은 MFU = 0.6 고정이라 knee 미관측(silicon 부재). **512 는 FFN 포화 불가 판명 시 대안**(batch 759, vLLM 수렴).
+**prefill 256 vs 512.** prefill 은 균형 ctx 가 아니라 *스케일 knob* X. 256 은 산출주기 X(51 vs 101 µs)와 HBM(~30M → 5 TB vs 60M → 10 TB)을 반으로 줄이며 TTFT / throughput 손해 0(X 가 prefill 에 선형이라 청크 2× · cycle ½ 상쇄). 유일 risk = FFN GEMM MFU 포화 — batch 379 가 텐서코어를 채우나; wave-quant 추정상 batch ~128 포화(379 충분), 단 모델은 MFU = 0.6 고정이라 knee 미관측(silicon 부재). **512 는 FFN 포화 불가 판명 시 대안**(batch 759, vLLM 수렴).
 
 > **맺음말 (superseded).** 이전 초안의 idle-fraction-feedback + hysteresis-deadband admission 은 이 풀 모델로 대체됐다. deadband width 는 `2σ_total` 이었으나 σ 는 hardware jitter 모델 없는 self-authored framework 에서 측정 불가(§8 / OI4)라 feedback variant 는 애초에 작동 메커니즘이 아니었다. 풀 모델은 steering 으로 고정 타깃에 직접 명중; ±10% 밴드는 제어 입력이 아니라 진단용 idle-SLA 라벨로만 남는다.
 
