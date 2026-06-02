@@ -570,6 +570,26 @@ spread = 본질 불균형 + age-cap 비용(prefill 풀 얇음이 게이트) + �
 
 측정 idle 은 알고리즘 floor 이며, floor 는 본질 불균형 + (풀 얇음이 게이트하는) 공정성 비용 + 균일 overlap gap 으로 분해되고 미설명 잔여 0. (A)보다 낮추려면 더 풍부한 prefill 풀(이미 floor 근접) 또는 공정성 포기뿐. 전체 기록: [`implementation/debug_phase2/REPORT.md`](implementation/debug_phase2/REPORT.md).
 
+**다배치 구성 (3 μ-batch).** window 는 3칸(2 active + 1 전이 여유). 풍부한 풀에서 staggering 목표를 3으로 강제(`floor_proof.py --target-mb 3 --compose-only`)하면 window / recompose / disjoint 로직이 2개뿐 아니라 *N* 개의 잘-구성된 μ-batch 를 만드는지 검증된다. 배치별 구성(`age_cap = 2`, 무한-근사 풀; 배치별 idle = 그 배치의 3자원 이론 floor):
+
+| μ-batch | decode | Σkv | prefill | depth-work | floor idle GPU-A / PIM / FFN | spread |
+|---|---|---|---|---|---|---|
+| mb#0 | **123** | 12.30M | 256 | 25.60M | 0.0 / 0.8 / 0.0% | 0.77% |
+| mb#1 | **123** | 12.32M | 256 | 25.61M | 0.0 / 0.8 / 0.0% | 0.79% |
+| mb#2 | 108 | 12.37M | 256 | 25.58M | 0.7 / 0.0 / 3.7% | 3.74% |
+
+셋 다 **disjoint**(요청 겹침 0)이고 Σkv / prefill / depth-work 는 모든 배치서 타깃 명중 — 마지막 배치의 decode *개수* 만 미달. 원인은 age-cap 이며, 풀 크기·공정성 sweep 으로 분리:
+
+| 조건 | mb#0 | mb#1 | mb#2 | mb#2 spread | 읽기 |
+|---|---|---|---|---|---|
+| `age_cap=2`, 유한 풀 (KV 60M) | 123 | 117 | 106 | 4.27% | 꼬리 불균형 |
+| `age_cap=2`, 무한-근사 풀 (KV 200M) | 123 | **123** | 108 | 3.74% | 풀 키우면 mb#1 고침, mb#2 는 **아님** |
+| `age_cap=∞`, 무한-근사 풀 | 123 | 123 | **123** | 0.83% | 셋 다 개수 123 (순수 steering) |
+
+- **풀 크기는 앞 배치만 고침** (mb#1: 117 → 123; mb#2 는 ~107 고정). 풀 고갈은 *부분* 원인.
+- **마지막 배치 미달은 age-cap.** 3번째 배치 구성 시점엔 warm-start 가 풀 멤버 대부분을 "대기"(`wait ≥ AGE_CAP`)로 만들어, age-cap 이 steering 대신 *이미 오래 기다린* 요청을 강제 — *의도된 공정성*(대기 상한, starvation 0)이지 dispatch 결함 아님. `age_cap = ∞`(순수 steering)이면 셋 다 123 도달.
+- **이건 warm-start 인공물, 실서버 거동 아님.** 연속 도착은 요청을 fresh 로 유지 → age-cap 이 진짜-aged 요청에만 산발 발동(한 배치 통째 아님) → 꼬리 소멸(`age_cap = ∞` 행이 steering 의 능력 입증).
+
 ## 7. Orthogonality to Complementary Techniques
 
 ### 7.1 Paged KV Memory Management

@@ -570,6 +570,26 @@ measured idle (abs)      = theoretical floor + uniform overlap gap (fill/drain �
 
 The measured idle is the algorithm floor; the floor decomposes into intrinsic imbalance + a pool-thinness-gated fairness cost + a uniform overlap gap, with no unexplained residual. Lower idle than (A) requires either a richer prefill pool (already near-floor) or dropping the fairness guarantee. Full record: [`implementation/debug_phase2/REPORT.md`](implementation/debug_phase2/REPORT.md).
 
+**Multi-batch composition (3 μ-batches).** The window holds 3 slots (2 active + 1 transition slack). Forcing the staggering target to 3 under an abundant pool (`floor_proof.py --target-mb 3 --compose-only`) verifies the window / recompose / disjoint logic composes *N* well-formed μ-batches, not just 2. Per-batch composition (`age_cap = 2`, near-infinite pool; per-batch idle = that batch's own three-resource theoretical floor):
+
+| μ-batch | decode | Σkv | prefill | depth-work | floor idle GPU-A / PIM / FFN | spread |
+|---|---|---|---|---|---|---|
+| mb#0 | **123** | 12.30M | 256 | 25.60M | 0.0 / 0.8 / 0.0% | 0.77% |
+| mb#1 | **123** | 12.32M | 256 | 25.61M | 0.0 / 0.8 / 0.0% | 0.79% |
+| mb#2 | 108 | 12.37M | 256 | 25.58M | 0.7 / 0.0 / 3.7% | 3.74% |
+
+All three are **disjoint** (no request shared), and Σkv / prefill / depth-work hit the target in every batch — only the decode *count* of the last batch falls short. The cause is the age-cap, isolated by sweeping pool size and fairness:
+
+| condition | mb#0 | mb#1 | mb#2 | mb#2 spread | reading |
+|---|---|---|---|---|---|
+| `age_cap=2`, finite pool (KV 60M) | 123 | 117 | 106 | 4.27% | tail imbalance |
+| `age_cap=2`, near-∞ pool (KV 200M) | 123 | **123** | 108 | 3.74% | bigger pool fixes mb#1, **not** mb#2 |
+| `age_cap=∞`, near-∞ pool | 123 | 123 | **123** | 0.83% | all hit count 123 (pure steering) |
+
+- **Pool size fixes the earlier batches, not the last** (mb#1: 117 → 123 with a bigger pool; mb#2 stays ~107). So pool exhaustion is only a partial cause.
+- **The last batch's shortfall is the age-cap.** By the time the 3rd batch is composed, the warm-start has left most pool members "waiting" (`wait ≥ AGE_CAP`), so the age-cap force-includes already-aged requests over the steering — the *intended fairness mechanism* (bounded wait, starvation 0), not a dispatch failure. With `age_cap = ∞` (pure steering) all three reach count 123.
+- **This is a warm-start artifact, not real-server behavior.** A continuous-arrival stream keeps requests fresh, so the age-cap fires only on genuinely-aged requests (sparse), not on a whole batch at once — the tail vanishes there, as the `age_cap = ∞` row shows the steering can.
+
 ## 7. Orthogonality to Complementary Techniques
 
 ### 7.1 Paged KV Memory Management

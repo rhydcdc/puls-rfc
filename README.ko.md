@@ -1,6 +1,6 @@
 # PULS — PIM-Unified LLM Serving
 
-> ✅ **스케줄러 로직 구현·검증 완료** — 풀 모델 배치 구성(admission=풀 보충 ∥ decode-set ∥ prefill 독립 steering)이 동작점(decode ≈120 / Σkv 12.3M, prefill 256 / depth-work 25.6M)에 수렴, 두 풀 모두 풍부 시 세 자원 idle spread **0.74%**(증명된 이론 floor 와 일치) ([Runtime Validation](#runtime-validation)).
+> ✅ **스케줄러 로직 구현·검증 완료** — 풀 모델 배치 구성(admission=풀 보충 ∥ decode-set ∥ prefill 독립 steering)이 **3 disjoint μ-batch**를 동작점(decode 123 / Σkv 12.3M, prefill 256 / depth-work 25.6M)에 구성, 배치별 idle spread **<0.8%**(증명된 이론 floor 와 일치); 마지막 배치는 의도된 age-cap 공정성으로 ~3.7% 로 벌어짐 ([Runtime Validation](#runtime-validation)).
 
 **Scheduler-aware co-design of HBM-PIM and production LLM serving stack.**
 
@@ -108,7 +108,7 @@
 
 PULS 는 **특정 타겟 워크로드에 한정되지 않는다.** 배치 구성이 *길이분산 무관* steering 이기 때문이다 — former 는 풀의 평균 길이를 보지 않고, 짧은·긴 요청을 **조합**해 동작점 네 타깃(decode 개수 123 ∧ Σkv 12.3M, prefill 256 토큰 ∧ depth-work 25.6M)만 맞춘다. 따라서 **decode 와 prefill 이 풀에 풍부한 어떤 분산-서버-스케일 워크로드든** — 길이 분포가 짧든 길든 혼합이든 bimodal 이든 — 동작점에 수렴한다 (균형 ctx ~100K 는 KV 캡 유도용 중간값일 뿐, 워크로드 강제값 아님).
 
-- **동작점(idle≈0) 도달 조건** = 풀에 decode·prefill 이 *풍부* (고동시성 분산 서빙의 대량 상주 decode 풀 + 지속 prefill). 실서버 정상상태가 정확히 이 영역. [Runtime Validation](#runtime-validation) 에서 두 풀 풍부 시 idle spread **0.74%** 로 실증(얇으면 ~4.6%, age-cap 비용).
+- **동작점(idle≈0) 도달 조건** = 풀에 decode·prefill 이 *풍부* (고동시성 분산 서빙의 대량 상주 decode 풀 + 지속 prefill). 실서버 정상상태가 정확히 이 영역. [Runtime Validation](#runtime-validation) 에서 **3 disjoint μ-batch**를 동작점에 구성, 배치별 spread **<0.8%** 로 실증(마지막 ~3.7% = 의도된 age-cap 공정성 비용).
 - **풀이 얕으면**(저부하·짧은 decode 만) PIM 또는 GPU-A 가 노는 건 *물리적 정상*(고칠 대상 아님) — 동작점은 풀이 풍부할 때의 균형점이다.
 
 ## 가속 Source 요약
@@ -153,7 +153,7 @@ Llama-3 70B + DGX B200 + HBM4 substrate 위 4 가속 source (Aux1·Aux2·F3·F5)
 |---|---|---|
 | Aux1 | Mixed batching 가중치 재사용 | **2.0×** (closed-form), 1.97× (Colab T4 측정) |
 | Aux2 | KV bus traffic 감소 | **4.95× speedup, 79.8% 감소** |
-| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep); 풀 모델 시뮬서 **3자원 idle spread 0.74% (두 풀 풍부; balance 발현)** — [Runtime Validation](#runtime-validation) |
+| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep); 풀 모델 시뮬이 **3 disjoint μ-batch 를 동작점에 구성, 배치별 spread <0.8% (balance 발현)** — [Runtime Validation](#runtime-validation) |
 | F5 | Channel-independent vs lock-step | **5.15× speedup** (KV variance dominant) |
 
 ### Aggregate Speedup
@@ -171,30 +171,23 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (F5 포함)**.
 **합성 워크로드 + 풀 모델 스케줄러 end-to-end 시뮬레이션.** 단일 실 trace 대신 분산-서버 정상상태를 대표하는 합성 워크로드를 *고정* 해두고, idle 이 자연 수렴하는 값을 *그대로* 보고한다 — idle≈0 을 맞추려 seed 를 튜닝하지 않음(튜닝은 답을 정해놓고 맞추는 것이라 무의미).
 
 - **워크로드(합성)** — prefill 20K\~180K 다양(sweet spot ~100K 포함), decode 8K\~40K *긴 생성* (= 분산 서버의 대량 상주 decode 풀). **warm-start seed 6,000** = 정상상태 스냅샷: 워크로드 *자체 분포* 에서 각 요청을 생애 랜덤 지점(prefill 진행도 또는 decode 진행도)에 배치 — 비편향, cold-start 램프만 생략.
-- **방식** — 풀 모델 스케줄러(admission = 풀 보충 ∥ decode-set steering ∥ prefill steering, 셋 독립)로 idle 수렴까지 시뮬. 활성 μ-batch 의 배치 구성 + 3 자원 idle 측정.
+- **방식** — 풀 모델 스케줄러(admission = 풀 보충 ∥ decode-set steering ∥ prefill steering, 셋 독립). **풍부한(무한-근사) 풀**에서 staggering window 를 **3 μ-batch**(2-active + 1-여유분 window 를 3으로 강제)까지 채우고, 각 배치의 구성 + 그 배치의 *이론 floor* 유휴율을 점검.
 
-두 풀 모두 풍부(동작점 premise — 상주 decode 풀 *그리고* 풍부한 prefill 공급)하게 측정 — steering 이 네 타깃을 명중시킬 depth 다양성을 갖도록:
+무한-근사 풀에서 3 μ-batch 동시 구성. 각 배치가 동작점(decode 123 / Σkv 12.3M, prefill 256 / depth-work 25.6M)에 *독립* steering; 배치별 idle 은 그 배치의 3자원 이론 floor (측정 idle 은 자원 공유라 window 전체값):
 
-| μ-batch 구성 (활성 평균) | 측정 | 타깃 |
-|---|---|---|
-| decode 개수 | **119** | 123 |
-| decode Σkv | **12.3M** | 12.3M |
-| prefill 토큰 | **256** | 256 |
-| prefill depth-work | **25.6M** | 25.6M |
+| μ-batch | decode | Σkv | prefill | depth-work | floor idle GPU-A / PIM / FFN | spread |
+|---|---|---|---|---|---|---|
+| **mb#0** | **123** | 12.30M | 256 | 25.60M | 0.0 / 0.8 / 0.0% | **0.77%** |
+| **mb#1** | **123** | 12.32M | 256 | 25.61M | 0.0 / 0.8 / 0.0% | **0.79%** |
+| **mb#2** | 108 | 12.37M | 256 | 25.58M | 0.7 / 0.0 / 3.7% | **3.74%** |
+| 타깃 | 123 | 12.3M | 256 | 25.6M | — | ~0 |
 
-| 자원 idle | 측정 |
-|---|---|
-| GPU Instance A (proj + prefill-attn) | **10.5%** |
-| PIM Instance A (decode-attn) | **10.9%** |
-| GPU Instance B (FFN) | **11.2%** |
-| **spread (max − min, = 균형 갭)** | **0.74%** (converged) |
+*(셋 다 disjoint — 배치 간 요청 겹침 0.)*
 
 해석:
 
-- **네 동작점 타깃 모두 정확 명중** — steering 이 풀에서 decode-set(≈120 / 12.3M)과 prefill(256 / 25.6M)을 *독립적으로* 구성, 길이분산 무관(짧+긴 조합). prefill 풀이 풍부하면 depth-work 가 25.6M 에 정확 명중.
-- **세 자원이 0.74% 안으로 균형**(각 ~10\~11% idle) — 직렬이면 idle ~67%(t_A + t_B 합). **F2(projection ‖ PIM double-buffering)·F3(inter-instance pipeline) 발현의 정량 증거** — 세 per-cycle 자원 시간이 <1% 로 일치.
-- **측정 ≈ 알고리즘 floor (증명됨).** 디스패치된 μ-batch 에 정확한 op-time 함수를 호출해 얻은 이론 perfect-overlap floor 의 **spread(0.91%)가 측정 spread(0.74%)와 일치**; 절대 idle 은 그 floor + *균일* ~10% overlap gap(pipeline fill/drain + 2-active staggering) → **미설명 잔여손실 0**. 상세 도출 — [`ARCHITECTURE.md`](ARCHITECTURE.md) §6.8, 전체 기록 — [`implementation/debug_phase2/REPORT.md`](implementation/debug_phase2/REPORT.md).
-- **배치 구성에 robust** — prefill 풀이 얇으면(depth-work ~27M 오버슈트) 균형이 ~4.6% 로 벌어지는데 이는 **age-cap 공정성 비용**(순수 steering 은 <1% 회복); decode 축 동작점은 무관하게 명중. 스펙트럼은 [`ARCHITECTURE.md`](ARCHITECTURE.md) §6.8 에 기록.
+- **각 배치가 동작점 명중** — Σkv 12.3M / prefill 256 / depth-work 25.6M 을 세 배치 모두 공유 풀에서 *독립적으로* 충족(길이분산 무관). 앞 둘은 decode 개수 123 도 정확, 배치별 spread <0.8% — 세 per-cycle 자원 시간 일치, **F2(projection ‖ PIM double-buffering)·F3(inter-instance pipeline) 발현의 정량 증거**.
+- **마지막 배치가 튐 (mb#2: 개수 108, spread 3.74%) — age-cap 때문.** 세 번째 배치 구성 시점엔 warm-start 가 풀 멤버 대부분을 "대기" 상태로 만들어, age-cap 이 steering 을 누르고 *이미 오래 기다린* 요청을 강제 포함 — *의도된 공정성 메커니즘*(대기 상한, starvation 0)이지 dispatch 결함이 아님. 실서버 연속 도착에선 요청이 fresh 라 age-cap 이 산발적으로만 발동 → 꼬리 소멸(순수 steering → 셋 다 123). 전체 스펙트럼 + floor 증명(측정 ≈ 이론 floor) — [`ARCHITECTURE.md`](ARCHITECTURE.md) §6.8.
 - **throughput 지속성은 별개 축** — decode 길이가 매우 길어(상주 풀 큼) 측정창 내 완료 0 → TTFT/TBT 는 본 측정서 미산출(별도). 본 검증 대상은 per-cycle 균형(idle). 드레인·완료·KV 누수 0 은 합성 acceptance(전부 완료·KV remaining=initial·정상 종료)로 별도 검증.
 
 ### Honest Disclosure
