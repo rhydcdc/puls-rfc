@@ -91,6 +91,31 @@ def _op_times_us(sched, mb):
     return t_gpuA, t_pim, t_ffn, sigma_kv, _gpuA_parts, depth_work, n_dec, n_pref
 
 
+def _per_batch_lines(sched, target_mb):
+    """활성 μ-batch 의 구성 + 배치별 *이론 floor* 유휴율 + disjoint 확인 (개별, 평균 아님)."""
+    mbs = list(sched.dispatcher.micro_batches.values())
+    L = [f"--- 개별 μ-batch 구성 (활성 {len(mbs)} / 목표 {target_mb}, "
+         f"KV cap {sched.kv_accountant.capacity/1e6:.0f}M) ---",
+         "  (배치별 유휴율 = 그 배치 구성의 *이론 floor*; 측정 idle 은 자원 공유라 window 전체값)"]
+    member_sets = []
+    for mb in mbs:
+        tg_i, tp_i, tf_i, skv_i, _pp, dw_i, ndec_i, npref_i = _op_times_us(sched, mb)
+        members = mb.request_ids()
+        member_sets.append((mb.id, members))
+        cyc_i = max(tg_i, tp_i, tf_i)
+        flg, flp, flf = 1 - tg_i / cyc_i, 1 - tp_i / cyc_i, 1 - tf_i / cyc_i
+        L.append(f"  mb#{mb.id}: decode {ndec_i:3d}/123 · Σkv {skv_i/1e6:5.2f}M/12.3M · "
+                 f"prefill {npref_i:3d}/256 · depth {dw_i/1e6:5.2f}M/25.6M · 멤버 {len(members)}")
+        L.append(f"         t(µs) GPU-A {tg_i:.2f} / PIM {tp_i:.2f} / FFN {tf_i:.2f}  →  "
+                 f"floor idle  GPU-A {flg*100:5.2f}% · PIM {flp*100:5.2f}% · FFN {flf*100:5.2f}%  "
+                 f"(spread {(max(flg,flp,flf)-min(flg,flp,flf))*100:.2f}%)")
+    overlaps = [(member_sets[i][0], member_sets[j][0], len(member_sets[i][1] & member_sets[j][1]))
+                for i in range(len(member_sets)) for j in range(i + 1, len(member_sets))
+                if member_sets[i][1] & member_sets[j][1]]
+    L.append(f"  {'⚠ disjoint 위반: ' + str(overlaps) if overlaps else '✓ disjoint — 활성 mb 멤버 겹침 0'}")
+    return L
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--trace", required=True)
@@ -104,13 +129,33 @@ def main():
                     help="age_cap 오버라이드 (item 4 ablation; 큰 값=∞ 무력화)")
     ap.add_argument("--seed", type=int, default=None,
                     help="warm-start 풀 샘플링 난수 시드 오버라이드 (다른 비편향 스냅샷 관찰)")
+    ap.add_argument("--target-mb", type=int, default=None,
+                    help="활성 μ-batch 목표 오버라이드 (기본 2). 3 으로 윈도우 세 칸 강제 형성 — "
+                         "스케줄러 소스 무수정, main_loop._STAGGERING_TARGET_MB 런타임 monkeypatch.")
+    ap.add_argument("--kv-cap", type=int, default=None,
+                    help="kv_capacity_aggregate 오버라이드 (3배치면 ~42M 필요; decode steering 은 "
+                         "여전히 123/12.3M 에서 정지).")
+    ap.add_argument("--per-batch", action="store_true",
+                    help="활성 μ-batch 의 구성을 *개별*(평균 아님) 출력 + disjoint 확인.")
+    ap.add_argument("--compose-only", action="store_true",
+                    help="무한-풀 근사: 풀을 크게 두고 목표 μ-batch 를 *구성하자마자 스냅샷·종료* "
+                         "(긴 측정 루프 없음). 풀 충분 시 모든 배치가 타깃 명중, 꼬리 불균형 0.")
     ns = ap.parse_args()
+
+    # 스케줄러 *소스* 무수정 — 런타임 상수 monkeypatch 만 (KV 오버라이드와 동급).
+    if ns.target_mb is not None:
+        import puls_sched.main_loop as _ml
+        _ml._STAGGERING_TARGET_MB = ns.target_mb
 
     run = Run.init("puls_sched.config:default_dummy_config", ns.trace,
                    f"analysis/_scratch_{ns.label}")
     sched = run.scheduler
     if ns.age_cap is not None:   # frozen dataclass — in-place 우회(모든 컴포넌트가 동일 객체 참조)
         object.__setattr__(sched.config.admission, "age_cap", ns.age_cap)
+    if ns.kv_cap is not None:
+        object.__setattr__(sched.config.admission, "kv_capacity_aggregate", ns.kv_cap)
+        sched.kv_accountant._capacity = ns.kv_cap   # Run.init 시 생성된 accountant 에도 전파
+    _target_mb = ns.target_mb if ns.target_mb is not None else 2
     tel = sched.admission.idle_telemetry
     rng = random.Random(ns.seed if ns.seed is not None else sched.config.seed)
     _seed_pool(sched, _trace_lengths(ns.trace), ns.seed_pool, rng)
@@ -121,11 +166,22 @@ def main():
 
     w = 0
     while w < ns.warmup_cap and not drained():
-        if len(sched.window.current_ids()) >= 2:
+        if len(sched.window.current_ids()) >= _target_mb:
             break
         if not sched.step():
             break
         w += 1
+
+    if ns.compose_only:
+        # 무한-풀 근사: 목표 배치가 *방금* 구성된 fresh 스냅샷 — 측정 루프(드레인) 없이 바로 보고.
+        head = (f"=== compose-only snapshot: {ns.trace} "
+                f"(seed-pool {ns.seed_pool}, 목표 {_target_mb}, warmup {w} step) ===\n"
+                f"무한-풀 근사 — 풀이 충분하면 모든 배치가 (123 · 12.3M · 256 · 25.6M) 명중, 꼬리 불균형 0.")
+        out = head + "\n" + "\n".join(_per_batch_lines(sched, _target_mb))
+        print(out)
+        Path(f"analysis/floor_{ns.label}.txt").write_text(out + "\n", encoding="utf-8")
+        return
+
     tel.reset(sched.clock.now)
 
     m, samples, converged = 0, [], False
@@ -192,6 +248,10 @@ def main():
     for k in ("gpu_a", "pim_a", "gpu_b"):
         L.append(f"{names[k]:<34} {floor[k]*100:8.2f}% {meas[k]*100:8.2f}% "
                  f"{(meas[k]-floor[k])*100:11.2f}%")
+
+    if ns.per_batch:
+        L.append("")
+        L += _per_batch_lines(sched, _target_mb)
     fl_spread = max(floor.values()) - min(floor.values())
     me_spread = max(meas.values()) - min(meas.values())
     L += [
