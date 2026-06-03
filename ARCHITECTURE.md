@@ -34,11 +34,17 @@
   - [6.6 Bound Analysis](#66-bound-analysis)
   - [6.7 Implementation Requirements](#67-implementation-requirements)
   - [6.8 Idle Floor: Theory vs Measurement](#68-idle-floor-theory-vs-measurement)
-- [7. Orthogonality to Complementary Techniques](#7-orthogonality-to-complementary-techniques)
-  - [7.1 Paged KV Memory Management](#71-paged-kv-memory-management)
-  - [7.2 Speculative Attention](#72-speculative-attention)
-  - [7.3 Prefix KV Caching](#73-prefix-kv-caching)
-- [8. Open Empirical Work](#8-open-empirical-work)
+- [7. Cluster Scale: Per-Node Pool 100K-Centering Routing](#7-cluster-scale-per-node-pool-100k-centering-routing)
+  - [7.1 Motivation: Idle Blowup Without Centering](#71-motivation-idle-blowup-without-centering)
+  - [7.2 What the Node's 30M HBM Actually Holds](#72-what-the-nodes-30m-hbm-actually-holds)
+  - [7.3 Cold-start: Edge Gating + Interleave Greedy](#73-cold-start-edge-gating--interleave-greedy)
+  - [7.4 Healing: Strategic Greedy Refill (No Eviction)](#74-healing-strategic-greedy-refill-no-eviction)
+  - [7.5 Measurement — E Sweep · Stability](#75-measurement--e-sweep--stability)
+- [8. Orthogonality to Complementary Techniques](#8-orthogonality-to-complementary-techniques)
+  - [8.1 Paged KV Memory Management](#81-paged-kv-memory-management)
+  - [8.2 Speculative Attention](#82-speculative-attention)
+  - [8.3 Prefix KV Caching](#83-prefix-kv-caching)
+- [9. Open Empirical Work](#9-open-empirical-work)
 
 ---
 
@@ -277,7 +283,7 @@ Within Instance A, when the GPU projection is compute-bound, HBM bandwidth becom
 
 So PIM hides on **two axes**: temporally (t_pim ≤ t_gpuA, §6.8) and on bandwidth (in-place internal path at ~1.35× + channel concurrency, into a GPU window that is anyway ~68% bus-idle) — with the quantitative TSV-saturation closure deferred to silicon.
 
-For quantitative evaluation of the concrete scheduling policy, see Open Empirical Work (§8 E6).
+For quantitative evaluation of the concrete scheduling policy, see Open Empirical Work (§9 E6).
 
 ### 5.4 Partial Resolution of Scheduling Predictability
 
@@ -446,7 +452,7 @@ window = 3 (2 active for F2/F3 overlap + 1 transition slack).
 
 **prefill 256 vs 512.** prefill is not the balance ctx but the *scale knob* X. 256 halves the throughput cycle X (51 vs 101 µs) and HBM (~30M → 5 TB vs 60M → 10 TB) at zero TTFT / throughput cost (X is linear in prefill, so chunk 2× · cycle ½ cancel). The sole risk is FFN GEMM MFU saturation — batch 379 must fill the tensor cores; wave-quant estimation says batch ~128 saturates (379 is ample), but the model fixes MFU = 0.6 so the knee is not observable (silicon absent). **512 is the fallback if FFN saturation proves infeasible** (batch 759, vLLM-convergent).
 
-> **Superseded note.** The legacy idle-fraction-feedback + hysteresis-deadband admission of earlier drafts is replaced by this pool model. Deadband width was `2σ_total`, but σ is unmeasurable on a self-authored framework with no hardware jitter model (§8 / OI4), so the feedback variant was never the operative mechanism. The pool model hits fixed targets directly via steering; the ±10% band survives only as a diagnostic idle-SLA label, not a control input.
+> **Superseded note.** The legacy idle-fraction-feedback + hysteresis-deadband admission of earlier drafts is replaced by this pool model. Deadband width was `2σ_total`, but σ is unmeasurable on a self-authored framework with no hardware jitter model (§9 / OI4), so the feedback variant was never the operative mechanism. The pool model hits fixed targets directly via steering; the ±10% band survives only as a diagnostic idle-SLA label, not a control input.
 
 ### 6.5 Example Dispatch Trace
 
@@ -590,28 +596,119 @@ All three are **disjoint** (no request shared), and Σkv / prefill / depth-work 
 - **The last batch's shortfall is the age-cap.** By the time the 3rd batch is composed, the warm-start has left most pool members "waiting" (`wait ≥ AGE_CAP`), so the age-cap force-includes already-aged requests over the steering — the *intended fairness mechanism* (bounded wait, starvation 0), not a dispatch failure. With `age_cap = ∞` (pure steering) all three reach count 123.
 - **This is a warm-start artifact, not real-server behavior.** A continuous-arrival stream keeps requests fresh, so the age-cap fires only on genuinely-aged requests (sparse), not on a whole batch at once — the tail vanishes there, as the `age_cap = ∞` row shows the steering can.
 
-## 7. Orthogonality to Complementary Techniques
+## 7. Cluster Scale: Per-Node Pool 100K-Centering Routing
 
-### 7.1 Paged KV Memory Management
+The §6 operating point (count 123 ∧ Σkv 12.3M) is hit by steering only when a node's in-flight pool is a **diverse pool centered at ~100K** (§6.4). On a single node admission maintains that pool, but at **server scale** (hundreds–thousands of nodes) the global arrival mean exceeds 100K, so per-node pools drift above 100K. This section covers the **cluster-layer routing** that prevents that drift and seats each node at the operating point.
+
+> **Independent of the PULS core.** This routing does not change the §6 batch-composition algorithm — it is a layer above that only decides *which requests go to which node*. The sim is PULS-independent: it checks only batch-composition accuracy (count · Σkv), not op-time. With no real traffic available it uses an assumed distribution **B** (short 20% [1–16K] / mid 70% [16–256K] / long 10% [256K–1M], mean ≈ 116K) — on the same footing as the README's honest disclosure.
+
+### 7.1 Motivation: Idle Blowup Without Centering
+
+Run a cluster without this logic and each node's in-flight pool tracks the global mean (116K), piling long requests onto a node. Under the 30M cap, a high resident mean fits fewer decoders: compose batches large (hundreds-scale) and **count falls below 123 while Σkv rises above 12.3M** — both control targets break at once, the three-resource balance (PIM / GPU-A / FFN) collapses, and the **idle index blows up**. The operating point holds only under *per-node* 100K centering (§6.4 — 100K is not a mean *forced* on the workload but the intermediate value 12.3M / 123 that derives the cap), so the cluster layer must seat each node's pool at that condition.
+
+### 7.2 What the Node's 30M HBM Actually Holds
+
+To understand the routing target, first see how a node uses its 30M (at mean ctx 100K):
+
+```
+HBM 30M = batch A's 123 decoders (12.3M, disjoint)
+        + batch B's 123 decoders (12.3M, disjoint)
+        + 54 surplus decoders     (5.4M)
+        = 300 decoders, all resident
+```
+
+It is not that 2 batches "use up 30M" — **the full 300 decoders fill the 30M.** The 2 batches merely *point at* 246 of them. (30M ÷ 12.3M ≈ 2.4 slots = 2 batches + surplus; and 30M ÷ 100K = 300 decoders; and 300 ÷ 123 ≈ 2.4 batches — all the same number.)
+
+**Forming a batch = zero memory allocation.** After warmup no new batch is created. Of the 2 active batches, the one whose forward pass finished is merely *recomposed* (`main_loop.py` `_recompose_mb`, §6.4-4):
+
+```
+batch A's forward pass finishes
+  → A's old 123 decoders return to the pool (still resident! memory unchanged)
+  → candidate = (A's old 123) + (54 surplus) = 177      ← all already resident
+  → reselect 123 of them → new batch A
+  → memory allocation = 0
+```
+
+So the node pool keeps **300 decoders resident at mean 100K**, and steering *selects* 123 of them each iteration to form a batch. The per-node routing target is therefore **count 246–300, mean ≈ 100K** (= 300 × 100K = 30M cap full) — once met, steering pulls two disjoint 12.3M batches and the reselection (177 → 123) also holds.
+
+> **The operating point is the 123-batch, not the 300-mean.** A node's 300-mean of 100K guarantees *capacity/count* (fit 246–300 under the 30M cap), not batch composition directly. That a 123-batch hits 12.3M is the job of the steering composer + pool diversity (§6.4, length-variance-agnostic). Sim measurement: the actually-composed 123-batch averages 99,996–100,000 tokens, Σ deviation < 0.2% (target 12.3M).
+
+### 7.3 Cold-start: Edge Gating + Interleave Greedy
+
+Filling the cluster initially:
+
+1. **Centering / gating (edge isolation).** View each request length L as deviation d = L − 100K. From the arrival pool, peel off the *longest first* to **edge nodes** until the remaining mean drops to ≤ 100K + E. Edge nodes serve the initial *abnormal (excessively long)* decodes — isolating them is what centers the normal-node pools at 100K. The peeled fraction = **edge% = f(E) alone** (the tail above threshold V(E) of distribution B = P(x > V(E))). Independent of node count / pool size; depends only on the distribution.
+2. **Interleave-greedy packing.** Place the remaining requests in *arrival order (shuffled)*, each into the node whose mean would land closest to 100K after insertion (min |post-add mean − 100K|, within cap / count limits). Long + short interleave naturally within a node, so **count 300 · cap 30M · mean 100K are satisfied simultaneously.**
+
+> **Why interleave, not magnitude sort.** Since 300 × 100K = 30M, satisfying all three (cap · count · mean) at once requires long and short mixed within a node. Packing by deviation magnitude (KK / LPT style) stacks the long ones first, so **count is low while the cap fills first** and short requests lose their slots (sim: many placement failures · on-point collapse). Over/under swap also converges immediately for no gain. → precise partition / swap dropped, plain interleave greedy adopted.
+
+### 7.4 Healing: Strategic Greedy Refill (No Eviction)
+
+In operation, when a request on a node **completes** (decode ends, KV release) its slot frees — memory churn happens only at this *completion* instant, with full reservation and no eviction (§6.4 pool model). The drop in count and resident KV sum pulls the node off the operating point. **Healing** restores it by pulling *from the pool only*, with no inter-node communication (swap):
+
+```
+N completions remove N → node (count, sum) drop
+while count < 300 and cap room:
+    slot  = 300 − count
+    ideal = (30M − sum) / slot           # remaining target footprint ÷ remaining slots
+    admit the pool request closest to ideal
+→ count → 300, sum → 30M (mean 100K) restored together
+```
+
+The `ideal` formula is the crux: when ideal is large it does **coarse hole-filling** (long requests), mid-size **count pumping**, small **fine zeroing** (short requests) — all three regimes happen in one loop (= the unified form of a separately-written 3-phase scheme). Because the pool is effectively infinite (trillions-scale arrivals) each admit nearly hits its ideal, so the mean sticks tightly to 100K. **Inter-node swap 0, edge 0** (it pulls only what it needs; the long requests not pulled are, by conservation, absorbed to edge at ≈ the cold-start rate).
+
+### 7.5 Measurement — E Sweep · Stability
+
+Assumed distribution B, Z = 256 nodes, cap 30M, on-point = compose(123, 12.3M ± 10%).
+
+**Cold-start E sweep** (edge% = fraction isolated to edge, on2% = disjoint 2-batch hit rate = the real meaning of the 246 floor):
+
+| E | edge% | count ∈ 246–300 | \|mean − 100K\| | on2% |
+|---|---|---|---|---|
+| 0 | 2.63 | 99.2% | 2.7K | 98.4 |
+| **1K** | **2.68** | **99.2%** | **2.95K** | **97.7** |
+| 5K | 2.47 | 97.7% | 6.1K | 93.4 |
+| 10K | 1.89 | 89.5% | 10.6K | 82.0 |
+| 20K | 1.22 | 68.4% | 17.3K | 61.3 |
+
+E ↓ → tighter centering but more edge; E ↑ → less edge but mean drifts → count floor missed. **E = 1K adopted** — edge 2.68% for near-perfect centering (a safety margin for a discrete distribution; E = 0 may be unattainable exactly). The cold-start on2 < 100% is not a composition failure but a *count-floor miss* on 1–2 nodes (239–245 < 246), which healing fills.
+
+**Healing stability** (completion probability p, last 150 rounds averaged):
+
+| p | count | ∈ 246–300 | \|mean − 100K\| | on2% | 123-batch mean / Σ-dev |
+|---|---|---|---|---|---|
+| 1% | 300 | 100% | 7 tokens | 100 | 99,997 tokens / 0.19% |
+| 3% | 300 | 100% | 6 tokens | 100 | 99,996 tokens / 0.02% |
+| 5% | 300 | 100% | 6 tokens | 100 | 100,000 tokens / 0.01% |
+
+After healing engages, **drift is 0** (just-post-warmup ≈ last round), every node at count 300 · mean 100K · on2 100%. The actually-composed 123-batch mean is within ±4 tokens of 100K, Σ deviation < 0.2% (tighter than proto_steering's ~1%). **Pay only the ~2.68% initial edge cost, and thereafter greedy cold-start + strategic healing run the PIM indefinitely and comfortably at the per-node 100K operating point.**
+
+> **Honest disclosure.** Sim assumptions: (a) distribution B is assumed (no real traffic), (b) the infinite pool is emulated by best-of-K sampling, (c) churn is abstracted as completion probability p (not real decode-step accumulation), (d) steady-state edge is not separately tracked (by conservation ≈ the cold-start rate). Real PULS pairs steering with the **age-cap** (§6.4) to prevent starvation — it is omitted in the cluster sim's composability check only because its effect there is < 1% (§6.4 sweep); it is retained in operation.
+
+---
+
+## 8. Orthogonality to Complementary Techniques
+
+### 8.1 Paged KV Memory Management
 
 - **Layer distinction:** Paged KV management is a *memory-management* layer that manages the KV cache as non-contiguous memory pages. PULS PIM is a *compute-offload* layer that executes attention operations over the KV data resident in HBM.
 - **Non-interference:** The two operate at different abstraction levels and share no interface. Since the PIM FSM can transparently handle a non-contiguous KV layout via page-table reference, page-based physical placement decisions do not affect the correctness of the PIM operation.
 - **Cumulative gains:** The fragmentation loss eliminated by page management and the GPU-side attention cost eliminated by PIM accumulate independently.
 
-### 7.2 Speculative Attention
+### 8.2 Speculative Attention
 
 - **Technique definition:** Speculative decoding generates draft tokens and then performs parallel verification in a single forward pass. Speculative attention optimizes the attention cost of this verification pass.
 - **PIM applicability:** Since PULS PIM processes the attention operation uniformly regardless of token origin (draft / verified / position within the speculation tree), PIM offload holds for the speculative attention pass as well.
 - **Combined gains:** Speculative decoding reduces the number of forward passes, and PIM lowers the attention cost of each pass. The throughput improvement from combining the two optimizations works multiplicatively.
 
-### 7.3 Prefix KV Caching
+### 8.3 Prefix KV Caching
 
 - **Technique definition:** A class of techniques that skip the prefill operation itself via shared-prefix KV cache hits.
 - **Hit region:** The PIM's prefill-side attention load also decreases proportionally.
 - **Miss and decode regions:** The PIM offload gain is preserved as is.
 - **Cumulative gains:** Prefix caching shrinks the overall compute scale via KV reuse, and PULS absorbs the attention cost of the remaining computation. The KV hit rate and the PIM offload gain are independent variables that contribute to performance with no cross term.
 
-## 8. Open Empirical Work
+## 9. Open Empirical Work
 
 *Common simulation assumption: all requests are treated as new requests entering for the first time without a KV cache hit (no prefix duplication). In real workloads where KV hits occur, the prefill-side attention load decreases further, so PULS's relative improvement is expected to exceed the present simulation results.*
 

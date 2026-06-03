@@ -34,11 +34,17 @@
   - [6.6 Bound 분석](#66-bound-분석)
   - [6.7 구현 요건](#67-구현-요건)
   - [6.8 Idle Floor: 이론 vs 측정](#68-idle-floor-이론-vs-측정)
-- [7. Orthogonality to Complementary Techniques](#7-orthogonality-to-complementary-techniques)
-  - [7.1 Paged KV Memory Management](#71-paged-kv-memory-management)
-  - [7.2 Speculative Attention](#72-speculative-attention)
-  - [7.3 Prefix KV Caching](#73-prefix-kv-caching)
-- [8. Open Empirical Work](#8-open-empirical-work)
+- [7. 클러스터 스케일: 노드 풀 100K 센터링 라우팅](#7-클러스터-스케일-노드-풀-100k-센터링-라우팅)
+  - [7.1 동기: 센터링 없는 클러스터의 idle 폭발](#71-동기-센터링-없는-클러스터의-idle-폭발)
+  - [7.2 노드 HBM 30M 의 실제 구성](#72-노드-hbm-30m-의-실제-구성)
+  - [7.3 Cold-start: 엣지 게이팅 + interleave greedy](#73-cold-start-엣지-게이팅--interleave-greedy)
+  - [7.4 Healing: 전략적 greedy refill (무축출)](#74-healing-전략적-greedy-refill-무축출)
+  - [7.5 측정 결과 — E 스윕 · 안정성](#75-측정-결과--e-스윕--안정성)
+- [8. Orthogonality to Complementary Techniques](#8-orthogonality-to-complementary-techniques)
+  - [8.1 Paged KV Memory Management](#81-paged-kv-memory-management)
+  - [8.2 Speculative Attention](#82-speculative-attention)
+  - [8.3 Prefix KV Caching](#83-prefix-kv-caching)
+- [9. Open Empirical Work](#9-open-empirical-work)
 
 ---
 
@@ -277,7 +283,7 @@ Instance A 내에서 GPU projection 이 compute-bound 상태일 때 HBM 대역�
 
 즉 PIM 은 **두 축**으로 숨는다: 시간(t_pim ≤ t_gpuA, §6.8) + 대역폭(in-place 내부 경로 ~1.35× + 채널 동시성, 어차피 ~68% 버스-유휴인 GPU 윈도우로) — 정량 TSV-saturation 폐쇄는 silicon 대기.
 
-구체적 스케줄링 정책의 정량 평가는 Open Empirical Work (§8 E6) 참조.
+구체적 스케줄링 정책의 정량 평가는 Open Empirical Work (§9 E6) 참조.
 
 ### 5.4 스케줄링 예측 가능성의 부분적 해소
 
@@ -446,7 +452,7 @@ window = 3 (2 active F2/F3 overlap + 1 전이 여유).
 
 **prefill 256 vs 512.** prefill 은 균형 ctx 가 아니라 *스케일 knob* X. 256 은 산출주기 X(51 vs 101 µs)와 HBM(~30M → 5 TB vs 60M → 10 TB)을 반으로 줄이며 TTFT / throughput 손해 0(X 가 prefill 에 선형이라 청크 2× · cycle ½ 상쇄). 유일 risk = FFN GEMM MFU 포화 — batch 379 가 텐서코어를 채우나; wave-quant 추정상 batch ~128 포화(379 충분), 단 모델은 MFU = 0.6 고정이라 knee 미관측(silicon 부재). **512 는 FFN 포화 불가 판명 시 대안**(batch 759, vLLM 수렴).
 
-> **맺음말 (superseded).** 이전 초안의 idle-fraction-feedback + hysteresis-deadband admission 은 이 풀 모델로 대체됐다. deadband width 는 `2σ_total` 이었으나 σ 는 hardware jitter 모델 없는 self-authored framework 에서 측정 불가(§8 / OI4)라 feedback variant 는 애초에 작동 메커니즘이 아니었다. 풀 모델은 steering 으로 고정 타깃에 직접 명중; ±10% 밴드는 제어 입력이 아니라 진단용 idle-SLA 라벨로만 남는다.
+> **맺음말 (superseded).** 이전 초안의 idle-fraction-feedback + hysteresis-deadband admission 은 이 풀 모델로 대체됐다. deadband width 는 `2σ_total` 이었으나 σ 는 hardware jitter 모델 없는 self-authored framework 에서 측정 불가(§9 / OI4)라 feedback variant 는 애초에 작동 메커니즘이 아니었다. 풀 모델은 steering 으로 고정 타깃에 직접 명중; ±10% 밴드는 제어 입력이 아니라 진단용 idle-SLA 라벨로만 남는다.
 
 ### 6.5 Example Dispatch Trace
 
@@ -590,28 +596,119 @@ spread = 본질 불균형 + age-cap 비용(prefill 풀 얇음이 게이트) + �
 - **마지막 배치 미달은 age-cap.** 3번째 배치 구성 시점엔 warm-start 가 풀 멤버 대부분을 "대기"(`wait ≥ AGE_CAP`)로 만들어, age-cap 이 steering 대신 *이미 오래 기다린* 요청을 강제 — *의도된 공정성*(대기 상한, starvation 0)이지 dispatch 결함 아님. `age_cap = ∞`(순수 steering)이면 셋 다 123 도달.
 - **이건 warm-start 인공물, 실서버 거동 아님.** 연속 도착은 요청을 fresh 로 유지 → age-cap 이 진짜-aged 요청에만 산발 발동(한 배치 통째 아님) → 꼬리 소멸(`age_cap = ∞` 행이 steering 의 능력 입증).
 
-## 7. Orthogonality to Complementary Techniques
+## 7. 클러스터 스케일: 노드 풀 100K 센터링 라우팅
 
-### 7.1 Paged KV Memory Management
+§6 의 동작점(개수 123 ∧ Σkv 12.3M)은 한 노드의 in-flight 풀이 **~100K 로 센터된 변종 풀**일 때 steering 이 명중한다(§6.4). 단일 노드는 admission 이 그 풀을 유지하지만, **서버스케일 클러스터**(노드 수백–수천)에선 글로벌 도착 평균이 100K 보다 높아 노드별 풀이 100K 위로 drift 한다. 이 절은 그 drift 를 막아 각 노드를 동작점에 앉히는 **클러스터 레이어 라우팅**을 다룬다.
+
+> **PULS 코어와 독립.** 이 라우팅은 §6 의 배치 구성 알고리즘을 바꾸지 않는다 — 노드에 *어떤 요청을 보내는가* 만 정하는 위층이다. sim 은 PULS 와 독립이며 배치 구성 명중(개수·Σkv)만 보고 op-time 은 보지 않는다. 실 트래픽 부재로 가정 분포 **B**(short 20% [1–16K] / mid 70% [16–256K] / long 10% [256K–1M], 평균 ≈ 116K) 사용 — README 정직 disclosure 와 동일 선상.
+
+### 7.1 동기: 센터링 없는 클러스터의 idle 폭발
+
+이 로직 없이 클러스터를 돌리면 노드별 in-flight 가 글로벌 평균(116K)을 따라가 한 노드에 긴 요청이 쌓인다. 30M 캡 하에서 상주 평균이 길면 디코더가 적게 fit 한다: 배치를 크게(수백 규모) 짜 보면 **개수가 123 밑으로 떨어지고 Σkv 가 12.3M 위로 올라** 두 제어 타깃이 동시에 깨지고, 세 자원(PIM / GPU-A / FFN) 균형이 무너져 **idle 지수가 폭발**한다. 동작점은 *노드별* 100K 센터링에서만 성립하므로(§6.4 — 100K 는 평균을 *강제* 하는 값이 아니라 12.3M / 123 으로 캡을 유도하는 중간값), 클러스터 레이어가 각 노드 풀을 그 조건에 앉혀야 한다.
+
+### 7.2 노드 HBM 30M 의 실제 구성
+
+라우팅의 타깃을 이해하려면 한 노드가 30M 을 어떻게 쓰는지부터 봐야 한다(평균 ctx 100K 기준):
+
+```
+HBM 30M = batch A 의 123 디코더 (12.3M, disjoint)
+        + batch B 의 123 디코더 (12.3M, disjoint)
+        + 잉여 54 디코더        (5.4M)
+        = 300 디코더, 전부 상주
+```
+
+2 배치가 "30M 을 다 쓴다"가 아니라 — **300 디코더 전체가 30M 을 채운다.** 2 배치는 그중 246 개를 *가리킬* 뿐. (30M ÷ 12.3M ≈ 2.4 슬롯 = 2 배치 + 잉여, 와 30M ÷ 100K = 300 디코더, 와 300 ÷ 123 ≈ 2.4 배치 — 다 같은 숫자.)
+
+**배치 만들기 = 메모리 할당 0.** warmup 후엔 새 배치가 안 생긴다. 활성 2 개 중 forward pass 끝난 *하나를 재구성* 할 뿐(`main_loop.py` `_recompose_mb`, §6.4-4):
+
+```
+batch A forward pass 끝남
+  → A 의 옛 123 디코더가 풀로 돌아옴 (여전히 상주! 메모리 그대로)
+  → candidate = (A 의 옛 123) + (잉여 54) = 177      ← 다 이미 상주
+  → 그중 123 재선택 → 새 batch A
+  → 메모리 할당 = 0
+```
+
+즉 노드 풀은 **300 디코더가 평균 100K** 로 상주하고, steering 이 매 iteration 그중 123 을 *골라* 배치를 만든다. 그래서 클러스터 라우팅의 노드별 타깃은 **count 246–300, 평균 ≈ 100K**(= 300 × 100K = 30M 캡 충만) — 이게 충족되면 steering 이 12.3M 짜리 배치 2 개를 disjoint 하게 뽑고, 재선택(177 → 123)도 성립한다.
+
+> **300-평균이 아니라 123-배치가 동작점.** 노드 300-평균 100K 는 *용량/개수* 보장(30M 캡에 246–300 fit)이지 배치 구성을 직접 보장하진 않는다. 123-배치가 12.3M 명중하는 건 steering composer + 풀 다양성의 몫(§6.4 길이분산 무관). sim 측정: 실제 뽑은 123-배치 평균 99,996–100,000 토큰, Σ 편차 < 0.2%(타깃 12.3M).
+
+### 7.3 Cold-start: 엣지 게이팅 + interleave greedy
+
+클러스터를 처음 채울 때:
+
+1. **센터링·게이팅(엣지 격리).** 각 요청 길이 L 을 편차 d = L − 100K 로 본다. 도착 풀에서 *긴 것부터* 떼어 남은 평균이 100K + E 이하가 될 때까지 **엣지 노드**로 보낸다. 엣지 노드 = 초반의 *비정상(과도하게 긴)* 디코드를 전담하는 노드 — 격리해야 정상 노드 풀이 100K 로 센터된다. 떼어내는 비율 = **edge% = f(E) 단독**(분포 B 의 임계 위 꼬리 = P(x > V(E))). 노드 수·풀 크기와 무관, 분포에만 의존.
+2. **interleave greedy 적재.** 남은 요청을 *도착 순(섞인 채)* 으로, 넣었을 때 그 노드 평균이 100K 에 가장 가까워지는 노드(min |추가후 mean − 100K|, 캡·count 한도 내)에 차례로 보낸다. 긴 거 + 짧은 거가 한 노드에 자연 interleave 되어 **count 300 · cap 30M · 평균 100K 가 동시에** 맞는다.
+
+> **왜 크기순 정렬이 아니라 interleave 인가.** 300 × 100K = 30M 이라 세 조건(cap · count · 평균)을 동시에 만족하려면 한 노드에 긴 것과 짧은 것이 섞여야 한다. 편차 크기순으로 적재하면(KK / LPT 류) 긴 것부터 쌓여 **count 가 적은데 cap 이 먼저 차** 짧은 요청이 들어갈 자리를 잃는다(sim 측정: 배치 실패 다수 · on-point 붕괴). over/under swap 도 즉시 수렴해 이득이 없다. → 정밀 분할·swap 폐기, 단순 interleave greedy 채택.
+
+### 7.4 Healing: 전략적 greedy refill (무축출)
+
+운영 중 한 노드에서 요청이 **완료**되면(decode 종료, KV release) 그 자리가 빈다 — 메모리 churn 은 이 *완료* 순간뿐이고 full reservation·무축출(§6.4 풀 모델, no-eviction)이다. 빈 만큼 count 와 상주 KV 합이 줄어 노드가 동작점에서 벗어난다. **힐링**은 타 노드와의 통신(swap) 없이 *풀에서만* 끌어와 복구한다:
+
+```
+완료로 N 개 빠짐 → 노드 (count, sum) 감소
+while count < 300 and 캡 여유:
+    slot  = 300 − count
+    ideal = (30M − sum) / slot          # 남은 목표 footprint ÷ 남은 빈자리
+    풀에서 ideal 에 가장 가까운 요청 1 개 admit
+→ count → 300, sum → 30M (평균 100K) 동시 복구
+```
+
+이 `ideal` 식이 핵심이다: ideal 이 클 때는 **굵직한 구멍 메우기**(긴 요청), 중간일 때는 **count 펌핑**, 작을 때는 **미세 조합으로 영점**(짧은 요청) — 세 국면이 한 루프에서 자동으로 일어난다(= 따로 짠 3-Phase 의 통합형). 풀이 사실상 무한(조·경 규모 도착)이라 매 admit 이 ideal 을 거의 명중 → 평균이 100K 에 정확히 붙는다. **inter-node swap 0, 엣지 0**(필요한 것만 당김; 안 당긴 긴 요청은 보존상 cold-start 비율 ≈ 엣지로 흡수).
+
+### 7.5 측정 결과 — E 스윕 · 안정성
+
+가정 분포 B, Z = 256 노드, 캡 30M, on-point = compose(123, 12.3M ± 10%).
+
+**Cold-start E 스윕** (edge% = 엣지로 격리된 비율, on2% = disjoint 2-배치 명중률 = floor 246 의 진짜 의미):
+
+| E | edge% | count ∈ 246–300 | \|평균 − 100K\| | on2% |
+|---|---|---|---|---|
+| 0 | 2.63 | 99.2% | 2.7K | 98.4 |
+| **1K** | **2.68** | **99.2%** | **2.95K** | **97.7** |
+| 5K | 2.47 | 97.7% | 6.1K | 93.4 |
+| 10K | 1.89 | 89.5% | 10.6K | 82.0 |
+| 20K | 1.22 | 68.4% | 17.3K | 61.3 |
+
+E ↓ → 센터링 빡빡하나 엣지 ↑; E ↑ → 엣지 ↓ but 평균 drift → count floor 미달. **E = 1K 채택** — edge 2.68% 로 거의 완벽 센터링(이산 분포 안전마진 확보; E = 0 은 정확 명중이 어려울 수 있음). cold-start 의 on2 < 100% 는 composition 실패가 아니라 1–2 노드의 *count floor 미스*(239–245 < 246)이며, 힐링이 메운다.
+
+**Healing 안정성** (완료확률 p, 마지막 150 라운드 평균):
+
+| p | count | ∈ 246–300 | \|평균 − 100K\| | on2% | 123-배치 평균 / Σ편차 |
+|---|---|---|---|---|---|
+| 1% | 300 | 100% | 7 토큰 | 100 | 99,997 토큰 / 0.19% |
+| 3% | 300 | 100% | 6 토큰 | 100 | 99,996 토큰 / 0.02% |
+| 5% | 300 | 100% | 6 토큰 | 100 | 100,000 토큰 / 0.01% |
+
+힐링 진입 후 **drift 0**(warmup 직후 ≈ 마지막 라운드), 모든 노드 count 300 · 평균 100K · on2 100%. 실제 123-배치 평균이 100K 에 ±4 토큰, Σ 편차 < 0.2%(proto_steering 의 ~1% 보다 tight). **초반 ~2.68% 엣지 비용만 감수하면, 그 뒤로는 greedy cold-start + 전략적 healing 으로 PIM 을 각 노드 평균 100K 동작점에서 무한정 쾌적하게 운용**한다.
+
+> **honest disclosure.** sim 가정: (a) 분포 B 는 가정값(실 트래픽 부재), (b) 무한 풀은 best-of-K 샘플로 모사, (c) churn 은 완료확률 p 의 추상화(실 decode-step 누적 아님), (d) steady-state 엣지는 따로 추적 안 함(보존상 ≈ cold-start 비율). 실 PULS 에선 steering 에 **age-cap**(§6.4)을 함께 둬 starvation 을 막는다 — 클러스터 sim 의 composability 체크엔 age-cap 영향이 < 1%(§6.4 sweep)라 생략했을 뿐, 운영에선 유지한다.
+
+---
+
+## 8. Orthogonality to Complementary Techniques
+
+### 8.1 Paged KV Memory Management
 
 - **계층 구분:** Paged KV 관리 기법은 KV 캐시를 비연속 메모리 페이지로 관리하는 *메모리 관리* 계층이다. PULS PIM 은 HBM 에 상주하는 KV 데이터 위에서 attention 연산을 실행하는 *컴퓨팅 오프로드* 계층이다.
 - **비간섭:** 양자는 서로 다른 추상화 수준에서 동작하며 인터페이스를 공유하지 않는다. PIM FSM 은 페이지 테이블 참조를 통해 비연속 KV 레이아웃을 투명하게 처리할 수 있으므로, 페이지 기반 물리적 배치 결정은 PIM 연산의 정확성에 영향을 주지 않는다.
 - **이득 누적:** 페이지 관리가 제거하는 단편화 손실과 PIM 이 제거하는 GPU-side attention 비용은 독립적으로 누적된다.
 
-### 7.2 Speculative Attention
+### 8.2 Speculative Attention
 
 - **기법 정의:** Speculative decoding 은 draft 토큰 생성 후 단일 forward pass 에서 병렬 검증을 수행한다. Speculative attention 은 이 검증 패스의 attention 비용을 최적화한다.
 - **PIM 적용 가능성:** PULS PIM 은 토큰 출처 (draft / verified / speculation tree 내 위치) 에 무관하게 attention 연산을 동일하게 처리하므로, speculative attention 패스에 대해서도 PIM offload 가 성립한다.
 - **이득 합산:** speculative decoding 이 forward pass 횟수를 줄이고, PIM 이 각 pass 의 attention 비용을 낮춘다. 두 최적화의 결합 처리량 향상은 곱셈적으로 작동한다.
 
-### 7.3 Prefix KV Caching
+### 8.3 Prefix KV Caching
 
 - **기법 정의:** Prefix 공유 KV 캐시 히트로 prefill 연산 자체를 생략하는 기법군.
 - **히트 구간:** PIM 의 prefill-side attention 부하도 비례하여 감소한다.
 - **미스 및 decode 구간:** PIM offload 이득이 그대로 유지된다.
 - **이득 누적:** Prefix caching 이 KV 재사용으로 전체 연산 규모를 축소하고, PULS 가 남은 연산의 attention 비용을 흡수한다. KV 히트율과 PIM offload 이득은 독립 변수로서 교차 항 없이 성능에 기여한다.
 
-## 8. Open Empirical Work
+## 9. Open Empirical Work
 
 *시뮬레이션 공통 가정: 모든 요청은 KV 캐시 히트 없이 처음 입력되는 신규 요청으로 처리한다 (prefix 중복 없음). KV 히트가 발생하는 실제 워크로드에서는 prefill-side attention 부하가 추가로 감소하므로 PULS 의 상대적 향상 폭은 본 시뮬 결과보다 더 커질 것으로 예상한다.*
 
