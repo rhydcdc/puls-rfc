@@ -637,25 +637,38 @@ So the node pool keeps **300 decoders resident at mean 100K**, and steering *sel
 
 Filling the cluster initially:
 
-1. **Centering / gating (edge isolation).** View each request length L as deviation d = L − 100K. From the arrival pool, peel off the *longest first* to **edge nodes** until the remaining mean drops to ≤ 100K + E. Edge nodes serve the initial *abnormal (excessively long)* decodes — isolating them is what centers the normal-node pools at 100K. The peeled fraction = **edge% = f(E) alone** (the tail above threshold V(E) of distribution B = P(x > V(E))). Independent of node count / pool size; depends only on the distribution.
+1. **Centering / gating (edge isolation).** View each request length L as deviation d = L − 100K. From the arrival pool, peel off the *longest first* to **edge nodes** until the remaining mean drops to ≤ 100K + E (the criterion is the *remaining mean* — `E` is a per-element mean band = Σd ≤ E × count; E = 1K → mean ≤ 101K, E = 0 → Σd → 0). Edge nodes serve the initial *abnormal (excessively long)* decodes — isolating them is what centers the normal-node pools at 100K. The peeled fraction = **edge% = f(E) alone** (the tail above threshold V(E) of distribution B = P(x > V(E))). Independent of node count / pool size; depends only on the distribution.
 2. **Interleave-greedy packing.** Place the remaining requests in *arrival order (shuffled)*, each into the node whose mean would land closest to 100K after insertion (min |post-add mean − 100K|, within cap / count limits). Long + short interleave naturally within a node, so **count 300 · cap 30M · mean 100K are satisfied simultaneously.**
 
 > **Why interleave, not magnitude sort.** Since 300 × 100K = 30M, satisfying all three (cap · count · mean) at once requires long and short mixed within a node. Packing by deviation magnitude (KK / LPT style) stacks the long ones first, so **count is low while the cap fills first** and short requests lose their slots (sim: many placement failures · on-point collapse). Over/under swap also converges immediately for no gain. → precise partition / swap dropped, plain interleave greedy adopted.
 
 ### 7.4 Healing: Strategic Greedy Refill (No Eviction)
 
-In operation, when a request on a node **completes** (decode ends, KV release) its slot frees — memory churn happens only at this *completion* instant, with full reservation and no eviction (§6.4 pool model). The drop in count and resident KV sum pulls the node off the operating point. **Healing** restores it by pulling *from the pool only*, with no inter-node communication (swap):
+In operation, when a request on a node **completes** (decode ends, KV release) its slot frees — memory churn happens only at this *completion* instant, with full reservation and no eviction (§6.4 pool model). After the departures the node carries two deficits:
+
+- **Count deficit** `C_req = max(0, target − count)` — the amount to refill back up to the cap (target = 300), never letting it fall below the 2 μ-batch floor (246).
+- **Deviation deficit** `D_req = target_footprint − sum` (= 30M − sum) — the total KV to inject to bring the mean back to 100K. Large `D_req` if a long request left (a long is needed), small if a short left.
+
+**Healing** restores both at once by pulling *from the pool only*, with no inter-node communication (swap). Each refill admits one request closest to `ideal = D_req / remaining slots`, and **the magnitude of `ideal` sets the recovery regime** — split into three cases:
+
+- **Case 1 — coarse hole-filling (`ideal` large, `|D_req|` large).** When a long request completes and leaves, `sum` drops sharply and `ideal` grows → pull the pool's *long (toxic) inventory* first to cut the big deficit in one shot (same-sign large deviation, no overshoot). Fixes count and mean together while burning down the toxic stock.
+- **Case 2 — count pumping (`ideal` ≈ 100K).** Once the deficit is partly filled, `ideal` lands near the target mean → fill the remaining empty slots (count floor) fast with ~100K requests that barely move the mean.
+- **Case 3 — fine zeroing (`ideal` small, last slot).** The last slot's `ideal` is *exactly the residual deficit* → zero the mean onto 100K with a short request (no node upper bound, so fine-tune with small data).
+
+The three cases are **traversed automatically in one loop as `ideal` shrinks**:
 
 ```
-N completions remove N → node (count, sum) drop
-while count < 300 and cap room:
-    slot  = 300 − count
-    ideal = (30M − sum) / slot           # remaining target footprint ÷ remaining slots
-    admit the pool request closest to ideal
+N completions → compute C_req, D_req
+while count < target(300) and cap room:
+    slot  = target − count
+    ideal = (target_footprint − sum) / slot      # = D_req / slot
+    admit the pool request closest to ideal       # large ideal→case1, ≈100K→case2, small ideal→case3
 → count → 300, sum → 30M (mean 100K) restored together
 ```
 
-The `ideal` formula is the crux: when ideal is large it does **coarse hole-filling** (long requests), mid-size **count pumping**, small **fine zeroing** (short requests) — all three regimes happen in one loop (= the unified form of a separately-written 3-phase scheme). Because the pool is effectively infinite (trillions-scale arrivals) each admit nearly hits its ideal, so the mean sticks tightly to 100K. **Inter-node swap 0, edge 0** (it pulls only what it needs; the long requests not pulled are, by conservation, absorbed to edge at ≈ the cold-start rate).
+> **Why unified into one formula (honest).** The separately-written 3-phase scheme described case 2 as opposite-sign *pairs* and case 3 as *multi-element combinations* — a generalization for when the pool is *finite/sparse* and no single element matches `ideal`. But the cluster has a trillions-scale infinite pool (§7), so best-of-K sampling almost always finds a single element at `ideal`, and **the pairs/combinations collapse to a single closest pull**. The implementation (`heal`, [cluster_balance.cpp](implementation/analysis/cluster_balance.cpp) / [cluster_routing.py](implementation/src/cluster_routing.py)) therefore folds the three phases into the single `ideal` formula and still traverses the three cases above. Intent preserved, structure unified (over-engineering removed).
+
+Because the pool is effectively infinite, each admit nearly hits its `ideal`, so the mean sticks tightly to 100K. **Inter-node swap 0, edge 0** (it pulls only what it needs; the long requests not pulled are, by conservation, absorbed to edge at ≈ the cold-start rate).
 
 ### 7.5 Measurement — E Sweep · Stability
 
