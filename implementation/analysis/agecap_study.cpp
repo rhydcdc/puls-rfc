@@ -27,10 +27,10 @@ static int sampleDtot(int p){ return max(1000,(int)(p*(123.0/256.0)*(0.6+0.8*U()
 // gate: prompt 가 너무 길면(센터링 깨면) 버리고 다시 — 풀을 100K 센터 다양 풀로(엣지 격리 모사)
 static int gatedPrompt(){ for(int t=0;t<1000;t++){ int p=sampleB(); if(p<=200000) return p; } return 100000; }
 
-struct WaitStat { double hit, devPct, meanWait, p99Wait; int maxWait, starve; };
+struct WaitStat { double hit, devPct, meanWait, p99Wait, forcedPct; int maxWait, starve; };
 static void report(const char* tag,int agecap,const WaitStat&w){
-  printf("%-8s age-cap %-3s | 명중 %5.1f%% Σ편차 %5.2f%% | wait 평균 %7.2f p99 %4d 최대 %5d | starve(>50) %7d\n",
-    tag, agecap>1000000?"OFF":"ON", w.hit, w.devPct, w.meanWait, (int)w.p99Wait, w.maxWait, w.starve);
+  printf("%-8s age-cap %-3s | 명중 %5.1f%% Σ편차 %5.2f%% | wait 평균 %7.2f 최대 %5d | starve %7d | age-cap강제 %5.1f%%\n",
+    tag, agecap>1000000?"OFF":"ON", w.hit, w.devPct, w.meanWait, w.maxWait, w.starve, w.forcedPct);
 }
 
 // ── DECODE: 풀 POOL, 매 라운드 steering 으로 123 선택(±age-cap). 선택분 dec++, 완료 retire→fresh.
@@ -40,18 +40,20 @@ static WaitStat studyDecode(int AGE_CAP){
   vector<R> p(POOL);
   for(auto&r:p){ r.prompt=gatedPrompt(); r.dtot=sampleDtot(r.prompt); r.dec=(int)(U()*r.dtot); r.wait=0; r.life=0; }
   long long hitN=0,rounds=0; double devSum=0; long long waitObs=0,waitCnt=0; int maxWait=0,starve=0;
+  long long forcedSum=0,pickSum=0;
   vector<int> waitHist;
   const int ROUNDS=4000, WARM=1000;
   for(int it=0; it<ROUNDS; it++){
     // steering: ideal=(TGT-S)/(BATCH-n) 최근접 + age-cap
-    vector<char> used(POOL,0); long long S=0; int n=0;
+    vector<char> used(POOL,0); long long S=0; int n=0; int forced=0;
     while(n<BATCH && S<TGT){
-      int sel=-1;
-      for(int i=0;i<POOL;i++) if(!used[i] && p[i].wait>=AGE_CAP){ sel=i; break; }   // age-cap 강제
+      int sel=-1; bool wasForced=false;
+      for(int i=0;i<POOL;i++) if(!used[i] && p[i].wait>=AGE_CAP){ sel=i; wasForced=true; break; }   // age-cap 강제
       if(sel<0){ long long ideal=(long long)llround((double)(TGT-S)/(BATCH-n)); double bd=1e18;
         for(int i=0;i<POOL;i++) if(!used[i]){ double d=fabs((double)(p[i].prompt+p[i].dec)-ideal); if(d<bd){bd=d;sel=i;} } }
-      if(sel<0) break; used[sel]=1; S+=p[sel].prompt+p[sel].dec; n++;
+      if(sel<0) break; used[sel]=1; S+=p[sel].prompt+p[sel].dec; n++; if(wasForced)forced++;
     }
+    if(it>=WARM){ forcedSum+=forced; pickSum+=n; }
     bool hit = (n==BATCH && fabs((double)S-(double)TGT)/TGT<=0.10);
     if(it>=WARM){ hitN+=hit; devSum+=fabs((double)S-(double)TGT)/TGT; rounds++; }
     // advance: 선택분 dec++, wait=0; 미선택 wait++; 완료 retire→fresh
@@ -67,6 +69,7 @@ static WaitStat studyDecode(int AGE_CAP){
   double p99 = waitHist.empty()?0:waitHist[(int)(waitHist.size()*0.99)];
   WaitStat w; w.hit=100.0*hitN/rounds; w.devPct=100.0*devSum/rounds;
   w.meanWait=waitCnt?(double)waitObs/waitCnt:0; w.p99Wait=p99; w.maxWait=maxWait; w.starve=starve;
+  w.forcedPct = pickSum? 100.0*forcedSum/pickSum : 0;
   return w;
 }
 
@@ -77,18 +80,20 @@ static WaitStat studyPrefill(int AGE_CAP){
   vector<R> p(POOL);
   for(auto&r:p){ r.prompt=sampleB(); r.pf=(int)(U()*r.prompt); r.wait=0; r.life=0; }   // 다양 prompt·depth
   long long hitN=0,rounds=0; double devSum=0; long long waitObs=0,waitCnt=0; int maxWait=0,starve=0;
+  long long forcedSum=0,pickSum=0;
   vector<int> waitHist;
   const int ROUNDS=4000, WARM=1000;
   for(int it=0; it<ROUNDS; it++){
-    vector<int> chunk(POOL,0); long long W=0; int T=0;
+    vector<int> chunk(POOL,0); long long W=0; int T=0; int forced=0;
     while(T<TOK){
-      int sel=-1;
-      for(int i=0;i<POOL;i++) if(p[i].wait>=AGE_CAP && p[i].pf+chunk[i]<p[i].prompt){ sel=i; break; }
+      int sel=-1; bool wasForced=false;
+      for(int i=0;i<POOL;i++) if(p[i].wait>=AGE_CAP && chunk[i]==0 && p[i].pf<p[i].prompt){ sel=i; wasForced=true; break; }  // spread: 요청당 1회
       if(sel<0){ double ideal=(double)(WORK-W)/(TOK-T); double bd=1e18;
         for(int i=0;i<POOL;i++){ if(p[i].pf+chunk[i]>=p[i].prompt)continue; double depth=p[i].pf+chunk[i]+1;
           double d=fabs(depth-ideal); if(d<bd){bd=d;sel=i;} } }
-      if(sel<0) break; chunk[sel]++; T++; W+=p[sel].pf+chunk[sel];
+      if(sel<0) break; chunk[sel]++; T++; W+=p[sel].pf+chunk[sel]; if(wasForced)forced++;
     }
+    if(it>=WARM){ forcedSum+=forced; pickSum+=T; }
     bool hit = (T==TOK && fabs((double)W-(double)WORK)/WORK<=0.10);
     if(it>=WARM){ hitN+=hit; devSum+=fabs((double)W-(double)WORK)/WORK; rounds++; }
     for(int i=0;i<POOL;i++){
@@ -102,6 +107,7 @@ static WaitStat studyPrefill(int AGE_CAP){
   double p99 = waitHist.empty()?0:waitHist[(int)(waitHist.size()*0.99)];
   WaitStat w; w.hit=100.0*hitN/rounds; w.devPct=100.0*devSum/rounds;
   w.meanWait=waitCnt?(double)waitObs/waitCnt:0; w.p99Wait=p99; w.maxWait=maxWait; w.starve=starve;
+  w.forcedPct = pickSum? 100.0*forcedSum/pickSum : 0;
   return w;
 }
 
