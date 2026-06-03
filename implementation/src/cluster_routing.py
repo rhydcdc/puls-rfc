@@ -135,12 +135,15 @@ def _pull_best(ideal: float, cap_room: int, rng: random.Random, k: int = 200) ->
 def heal(node: Node, rng: random.Random, target: int = NODE_MAX) -> int:
     """완료로 빈 자리를 풀에서 보충해 count→target, mean→100K 동시 복구.
 
-    매 admit 의 ideal = (목표 footprint - 현재 sum) / 남은 빈자리:
-      ideal 큼   → 굵직한 구멍 메우기 (긴 요청)
-      ideal 중간 → count 펌핑
-      ideal 작음 → 미세 조합으로 영점 (짧은 요청)
-    세 국면이 한 루프에서 자동 — 따로 짠 3-Phase 의 통합형(ARCH §7.4). pulls 수 반환.
-    inter-node swap 없음; 풀에서만 끌어온다.
+    매 admit 의 ideal = (목표 footprint - 현재 sum) / 남은 빈자리 = 빈 slot 하나당
+    평균적으로 채워야 할 KV(= 이번에 떠난 것들의 평균 크기). 한 호출 안에서 ideal 은
+    거의 일정하다 — "큰 것 먼저"가 아니라 평균 크기로 slot 을 균등히 채우고 마지막
+    pull 이 잔차를 미세 보정한다(ARCH §7.4 측정). 무엇이 빠졌느냐는 그 에피소드의
+    ideal 값만 바꾼다(긴 게 빠짐→ideal↑, 짧은 게 빠짐→ideal↓).
+
+    원안 3-Phase(굵직 먼저→쌍→다중조합)는 유한·희소 풀용 조합 메커니즘이고, 무한
+    풀에선 조합·순서 불필요라 이 단일 수식으로 대체했다(쌍·다중조합·"큰 것 우선" 없음).
+    pulls 수 반환. inter-node swap 없음; 풀에서만 끌어온다.
     """
     pulls = 0
     while node.count < target:

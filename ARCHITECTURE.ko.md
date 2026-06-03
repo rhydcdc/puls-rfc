@@ -649,24 +649,24 @@ batch A forward pass 끝남
 - **개수 결손** `C_req = max(0, target − count)` — 2 μ-batch floor(246) 아래로는 안 떨어지게, 캡까지(target = 300) 다시 채울 양.
 - **편차 결손** `D_req = target_footprint − sum` (= 30M − sum) — 평균을 100K 로 되돌리려 새로 넣을 KV 의 총량. 긴 요청이 빠졌으면 `D_req` 큼(긴 게 필요), 짧은 게 빠졌으면 작음.
 
-**힐링**은 타 노드와의 통신(swap) 없이 *풀에서만* 끌어와 이 둘을 동시에 복구한다. 매 보충 1 개를 `ideal = D_req / 남은 slot` 에 최근접으로 당기는데, **`ideal` 의 크기가 복구 국면을 정한다** — 셋으로 나눠 보면:
-
-- **경우 1 — 굵직한 구멍 메우기 (`ideal` 큼, `|D_req|` 큼).** 긴 요청이 완료돼 빠지면 `sum` 이 크게 줄어 `ideal` 이 커진다 → 풀의 *긴(독성) 재고* 를 우선 당겨 큰 결손을 단번에 줄인다(부호 같은 큰 편차, 오버슈트 없이). 개수·평균을 동시에 잡으며 풀의 악성 재고를 소각.
-- **경우 2 — 개수 펌핑 (`ideal` ≈ 100K).** 결손이 어느 정도 메워지면 `ideal` 이 타깃 평균 근처로 → 평균을 거의 흔들지 않는 ~100K 요청으로 남은 빈 slot(개수 하한)을 빠르게 채운다.
-- **경우 3 — 미세 영점 (`ideal` 작음, 마지막 slot).** 마지막 자리의 `ideal` 은 *정확히 남은 결손* → 그만큼의 짧은 요청으로 평균을 100K 에 영점 맞춘다(노드 상한이 없으니 작은 데이터로 미세 조정).
-
-세 경우가 **한 루프에서 `ideal` 이 줄며 자동으로 순회**한다:
+**힐링**은 타 노드와의 통신(swap) 없이 *풀에서만* 끌어와 이 둘을 동시에 복구한다. 매 보충 1 개를 `ideal = D_req / 남은 slot` 에 최근접으로 당긴다 — 즉 **`ideal` = 빈 slot 하나당 평균적으로 채워야 할 KV**(= 이번에 떠난 것들의 평균 크기).
 
 ```
-완료로 N 개 빠짐 → C_req, D_req 산출
+완료로 N 개 빠짐 → C_req, D_req(= 30M − sum) 산출
 while count < target(300) and 캡 여유:
     slot  = target − count
-    ideal = (target_footprint − sum) / slot      # = D_req / slot
-    풀에서 ideal 에 가장 가까운 요청 1 개 admit   # 큰 ideal→경우1, ≈100K→경우2, 작은 ideal→경우3
+    ideal = D_req_현재 / slot              # = (30M − sum)/slot
+    풀에서 ideal 에 가장 가까운 요청 1 개 admit
 → count → 300, sum → 30M (평균 100K) 동시 복구
 ```
 
-> **왜 한 식으로 통합했나 (정직).** 분리해 적은 3-Phase 는 경우 2 를 "부호 반대 *쌍*", 경우 3 을 "작은 원소 *여러 개 조합*" 으로 기술했다 — 이는 풀이 *유한·희소* 해 `ideal` 에 맞는 단일 원소가 없을 때를 대비한 일반화다. 그러나 클러스터는 조·경 규모 무한 풀(§7) 이라 best-of-K 샘플이 `ideal` 에 맞는 단일 원소를 거의 항상 찾아 **쌍·조합이 단일 최근접 pull 로 collapse** 한다. 그래서 구현(`heal`, [cluster_balance.cpp](implementation/analysis/cluster_balance.cpp) / [cluster_routing.py](implementation/src/cluster_routing.py))은 세 Phase 를 명시 분기하지 않고 `ideal` 한 식으로 합쳤고, 그래도 위 세 경우를 그대로 거친다. 의도는 보존, 구조만 통합(over-engineering 제거).
+**한 heal 호출 안에서 `ideal` 은 거의 일정하다** — 큰 것부터 먹는 게 *아니다.* `ideal` 은 매 step 재계산되지만 (잔여 결손 ÷ 잔여 slot)이라 평균값 근처로 머문다. 측정(긴 1 개 + 짧은 5 개 이탈, D_req≈585K): step 0–5 의 `ideal` 이 96.7K\~98.0K 로 *일정*, pull 도 96K\~98K — 빠진 게 길든 짧든 그 에피소드의 *평균 크기* 요청으로 slot 을 균등히 채우고, **마지막 slot 이 잔차를 미세 보정**해 평균을 100K 에 영점 맞춘다. 무엇이 빠졌느냐는 *그 에피소드의 `ideal` 값* 만 바꾼다:
+
+- **균형 이탈(대부분)** → `ideal` ≈ 100K → ~100K 요청으로 채움.
+- **긴 요청 이탈** → 결손 큼 → 그 에피소드 `ideal` 상승 → 더 큰 요청들로 채움(에피소드 내에선 여전히 ~일정).
+- **짧은 요청 이탈** → `ideal` 하락 → 더 작은 요청들로.
+
+> **3-Phase 와의 관계 (정직).** 원안의 3-Phase(굵직한 독성 *먼저* → 부호반대 *쌍* → 작은 원소 *다중 조합*)는 *유한·희소* 풀에서 D_req 를 특정 원소들을 **조합**해 맞추는 메커니즘이고, "큰 것 먼저"라는 *순서* 가 핵심이었다. 그러나 클러스터는 조·경 규모 무한 풀(§7) 이라 조합도 순서도 불필요 — slot 수만큼 *평균 크기* 를 당기고 best-of-K + 마지막 보정으로 착지시키면 된다. 그래서 구현(`heal`, [cluster_balance.cpp](implementation/analysis/cluster_balance.cpp) / [cluster_routing.py](implementation/src/cluster_routing.py))은 3-Phase 를 *그대로 거치지 않고*, 같은 종착점(count 300·평균 100K)에 닿는 **더 단순한 단일 수식으로 대체**했다 — 쌍·다중조합 없음, "큰 것 우선" 없음, `ideal` 단일 수식뿐. 의도(개수·평균 동시 복구)는 같고 메커니즘은 단순화(over-engineering 제거).
 
 풀이 사실상 무한이라 매 admit 이 `ideal` 을 거의 명중 → 평균이 100K 에 정확히 붙는다. **inter-node swap 0, 엣지 0**(필요한 것만 당김; 안 당긴 긴 요청은 보존상 cold-start 비율 ≈ 엣지로 흡수).
 

@@ -649,24 +649,24 @@ In operation, when a request on a node **completes** (decode ends, KV release) i
 - **Count deficit** `C_req = max(0, target − count)` — the amount to refill back up to the cap (target = 300), never letting it fall below the 2 μ-batch floor (246).
 - **Deviation deficit** `D_req = target_footprint − sum` (= 30M − sum) — the total KV to inject to bring the mean back to 100K. Large `D_req` if a long request left (a long is needed), small if a short left.
 
-**Healing** restores both at once by pulling *from the pool only*, with no inter-node communication (swap). Each refill admits one request closest to `ideal = D_req / remaining slots`, and **the magnitude of `ideal` sets the recovery regime** — split into three cases:
-
-- **Case 1 — coarse hole-filling (`ideal` large, `|D_req|` large).** When a long request completes and leaves, `sum` drops sharply and `ideal` grows → pull the pool's *long (toxic) inventory* first to cut the big deficit in one shot (same-sign large deviation, no overshoot). Fixes count and mean together while burning down the toxic stock.
-- **Case 2 — count pumping (`ideal` ≈ 100K).** Once the deficit is partly filled, `ideal` lands near the target mean → fill the remaining empty slots (count floor) fast with ~100K requests that barely move the mean.
-- **Case 3 — fine zeroing (`ideal` small, last slot).** The last slot's `ideal` is *exactly the residual deficit* → zero the mean onto 100K with a short request (no node upper bound, so fine-tune with small data).
-
-The three cases are **traversed automatically in one loop as `ideal` shrinks**:
+**Healing** restores both at once by pulling *from the pool only*, with no inter-node communication (swap). Each refill admits one request closest to `ideal = D_req / remaining slots` — i.e. **`ideal` = the average KV each empty slot should receive** (= the mean size of what just departed).
 
 ```
-N completions → compute C_req, D_req
+N completions → compute C_req, D_req(= 30M − sum)
 while count < target(300) and cap room:
     slot  = target − count
-    ideal = (target_footprint − sum) / slot      # = D_req / slot
-    admit the pool request closest to ideal       # large ideal→case1, ≈100K→case2, small ideal→case3
+    ideal = current_D_req / slot          # = (30M − sum)/slot
+    admit the pool request closest to ideal
 → count → 300, sum → 30M (mean 100K) restored together
 ```
 
-> **Why unified into one formula (honest).** The separately-written 3-phase scheme described case 2 as opposite-sign *pairs* and case 3 as *multi-element combinations* — a generalization for when the pool is *finite/sparse* and no single element matches `ideal`. But the cluster has a trillions-scale infinite pool (§7), so best-of-K sampling almost always finds a single element at `ideal`, and **the pairs/combinations collapse to a single closest pull**. The implementation (`heal`, [cluster_balance.cpp](implementation/analysis/cluster_balance.cpp) / [cluster_routing.py](implementation/src/cluster_routing.py)) therefore folds the three phases into the single `ideal` formula and still traverses the three cases above. Intent preserved, structure unified (over-engineering removed).
+**Within one heal call `ideal` is nearly constant** — it does *not* eat the biggest first. `ideal` is recomputed each step, but being (residual deficit ÷ residual slots) it stays near the average. Measured (1 long + 5 short departed, D_req ≈ 585K): `ideal` across steps 0–5 stays 96.7K–98.0K and the pulls are 96K–98K — whatever departed, long or short, the slots are filled evenly with that episode's *average size*, and **the last slot fine-corrects the residual** to zero the mean onto 100K. What departed only changes *that episode's `ideal` value*:
+
+- **Balanced departure (the common case)** → `ideal` ≈ 100K → fill with ~100K requests.
+- **A long departed** → larger deficit → that episode's `ideal` rises → fill with larger requests (still ~constant within the episode).
+- **A short departed** → `ideal` falls → fill with smaller requests.
+
+> **Relation to the 3-phase scheme (honest).** The original 3-phase (coarse toxic *first* → opposite-sign *pairs* → small-element *multi-combination*) was a mechanism to hit D_req by **composing** specific elements on a *finite/sparse* pool, where the *order* "biggest first" mattered. The cluster's trillions-scale infinite pool (§7) makes both composition and ordering unnecessary — just pull `slot`-many requests at the *average* size and let best-of-K plus the final correction land it. So the implementation (`heal`, [cluster_balance.cpp](implementation/analysis/cluster_balance.cpp) / [cluster_routing.py](implementation/src/cluster_routing.py)) does *not* traverse the 3 phases; it **replaces them with a simpler single formula** reaching the same endpoint (count 300 · mean 100K) — no pairs, no multi-combination, no "biggest first," just the single `ideal` formula. Same intent (restore count and mean together), simplified mechanism (over-engineering removed).
 
 Because the pool is effectively infinite, each admit nearly hits its `ideal`, so the mean sticks tightly to 100K. **Inter-node swap 0, edge 0** (it pulls only what it needs; the long requests not pulled are, by conservation, absorbed to edge at ≈ the cold-start rate).
 
