@@ -172,16 +172,16 @@ int main(){
       E/1000,S.edgeN,S.edge,C,S.cntMin,S.inRange,S.devAvg,S.devMax,S.onp1,S.onp2);
   }
 
-  // ── sim3: steady-state churn + 전략적 greedy healing ──────────────────────
-  // cold-start(E=0) 후, 매 라운드 각 상주가 완료확률 p 로 retire → heal(풀에서 복구).
-  // edge 0(healing 은 필요한 것만 당김). 시간에 따라 안정(drift 없음) 확인 = early vs late.
-  printf("\n===== sim3: churn + healing (E=0 cold-start, 완료확률 p, ROUNDS 라운드) =====\n");
+  // ── sim3: steady-state churn + per-completion 힐링 ────────────────────────
+  // cold-start(E=1K) 후, 매 라운드 각 상주가 완료확률 p 로 retire → 각 완료를 그 크기(ideal=hole)로
+  // 보충(toxic-fit). edge 0(필요한 것만 당김). 시간에 따라 안정(drift 없음) 확인 = early vs late.
+  printf("\n===== sim3: churn + per-completion 힐링 (E=1K cold-start, 완료확률 p, ROUNDS 라운드) =====\n");
   printf("%5s %6s | %6s %7s %9s | %8s %8s | %6s %6s %8s\n",
     "p%","window","cntMin","cntMean","∈246-300","|dev|avg","|dev|max","on1%","on2%","pulls/rd");
   vector<double> Ps={0.01,0.03,0.05};
   const int ROUNDS=300, WARM=150;
   for(double p:Ps){
-    int shed; double mu; vector<int> kept=gate(P,0.0,shed,mu);
+    int shed; double mu; vector<int> kept=gate(P,1000.0,shed,mu);   // E=1K
     int C=min(NODE_MAX,(int)(CAP/mu)); vector<int> use=trim(kept,Z*C);
     vector<Node> nodes(Z); place_greedy(use,C,nodes);
     // 측정 누적: early(WARM 직후 1라운드) / late(마지막 WARM 라운드 평균)
@@ -190,11 +190,15 @@ int main(){
     Stat earlyS{};
     for(int rd=0; rd<ROUNDS; rd++){
       long long pulls=0;
-      for(auto&nd:nodes){
-        vector<int> keep; long long s=0;                 // churn: 완료(p) retire
-        for(int L:nd.v){ if(U()>=p){ keep.push_back(L); s+=L; } }
+      for(auto&nd:nodes){                                 // churn + per-completion 힐링
+        vector<int> keep; long long s=0; vector<int> done;
+        for(int L:nd.v){ if(U()>=p){keep.push_back(L);s+=L;} else done.push_back(L); }
         nd.v.swap(keep); nd.sum=s;
-        pulls += heal(nd, NODE_MAX);                      // 전략적 greedy 복구
+        for(int hole:done){                              // 각 완료를 그 크기(ideal=hole)로 보충 → toxic-fit
+          long long cr=CAP-nd.sum; if(cr<=0)break;
+          int L=pull_best((double)hole,cr); if(L<0)break;
+          nd.v.push_back(L); nd.sum+=L; pulls++;
+        }
       }
       if(rd==WARM){ earlyS=measure(nodes,0,0); }
       if(rd>=WARM){ Stat S=measure(nodes,0,0);
@@ -217,6 +221,43 @@ int main(){
       "", "batch", bMean/bN, 100.0*bSumDev/bN);
   }
   printf("(early=warmup 직후 1라운드, late=마지막 %d라운드 평균. drift 없으면 early≈late.)\n", ROUNDS-WARM);
+
+  // ── sim3b: batched(평균) vs per-completion(hole 단위) — 긴 요청 starve 측정 ──
+  // batched: 한 라운드 완료분 한꺼번에 빼고 ideal=평균 으로 보충 → toxic-fit 불가(평균에 뭉갬).
+  // per-completion: 각 완료를 그 크기(ideal=hole)로 like-for-like 보충 → 긴 거 빠지면 긴 거 들어옴.
+  printf("\n===== sim3b: healing 방식 — 긴 요청(≥256K) 보존 (E=1K, p=3%%, 300rd) =====\n");
+  printf("%16s | %10s %10s | %10s | %6s %9s\n",
+    "mode","long%cold","long%late","pull-long%","on2%","|dev|avg");
+  const long long LONGTH=256000;
+  for(int mode=0; mode<2; mode++){
+    int shed; double mu; vector<int> kept=gate(P,1000.0,shed,mu);
+    int C=min(NODE_MAX,(int)(CAP/mu)); vector<int> use=trim(kept,Z*C);
+    vector<Node> nodes(Z); place_greedy(use,C,nodes);
+    long long rc=0,rt=0; for(auto&nd:nodes) for(int L:nd.v){ rt++; if(L>=LONGTH)rc++; }
+    double longCold=100.0*rc/rt;
+    long long pullLong=0,pullTot=0; double p=0.03;
+    for(int rd=0; rd<300; rd++) for(auto&nd:nodes){
+      vector<int> keep; long long s=0; vector<int> done;
+      for(int L:nd.v){ if(U()>=p){keep.push_back(L);s+=L;} else done.push_back(L); }
+      nd.v.swap(keep); nd.sum=s;
+      if(mode==0){                                          // batched: ideal=평균
+        while(nd.cnt()<NODE_MAX){ int slots=NODE_MAX-nd.cnt();
+          double ideal=(TGT_AVG*NODE_MAX-(double)nd.sum)/slots; if(ideal<1)ideal=1;
+          long long cr=CAP-nd.sum; if(cr<=0)break; int L=pull_best(ideal,cr); if(L<0)break;
+          nd.v.push_back(L); nd.sum+=L; pullTot++; if(L>=LONGTH)pullLong++; }
+      } else {                                              // per-completion: ideal=hole
+        for(int hole:done){ long long cr=CAP-nd.sum; if(cr<=0)break;
+          int L=pull_best((double)hole,cr); if(L<0)break;
+          nd.v.push_back(L); nd.sum+=L; pullTot++; if(L>=LONGTH)pullLong++; }
+      }
+    }
+    long long rc2=0,rt2=0; for(auto&nd:nodes) for(int L:nd.v){ rt2++; if(L>=LONGTH)rc2++; }
+    Stat S=measure(nodes,0,0);
+    printf("%16s | %9.2f%% %9.2f%% | %9.2f%% | %5.1f %9.0f\n",
+      mode==0?"batched(avg)":"per-completion", longCold, 100.0*rc2/rt2,
+      100.0*pullLong/(pullTot>0?pullTot:1), S.onp2, S.devAvg);
+  }
+  printf("(long%%cold=cold-start 상주 긴요청 비율, long%%late=300rd 후. per-completion 이 보존하면 toxic-fit ✓)\n");
   printf("batch 줄 = 노드 상주 풀에서 실제 뽑은 123개 배치의 평균/Σ편차 — 300-평균이 아니라 이게 동작점.\n");
   return 0;
 }

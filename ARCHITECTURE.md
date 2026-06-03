@@ -631,7 +631,7 @@ batch A's forward pass finishes
 
 So the node pool keeps **300 decoders resident at mean 100K**, and steering *selects* 123 of them each iteration to form a batch. The per-node routing target is therefore **count 246–300, mean ≈ 100K** (= 300 × 100K = 30M cap full) — once met, steering pulls two disjoint 12.3M batches and the reselection (177 → 123) also holds.
 
-> **The operating point is the 123-batch, not the 300-mean.** A node's 300-mean of 100K guarantees *capacity/count* (fit 246–300 under the 30M cap), not batch composition directly. That a 123-batch hits 12.3M is the job of the steering composer + pool diversity (§6.4, length-variance-agnostic). Sim measurement: the actually-composed 123-batch averages 99,996–100,000 tokens, Σ deviation < 0.2% (target 12.3M).
+> **The operating point is the 123-batch, not the 300-mean.** A node's 300-mean of 100K guarantees *capacity/count* (fit 246–300 under the 30M cap), not batch composition directly. That a 123-batch hits 12.3M is the job of the steering composer + pool diversity (§6.4, length-variance-agnostic). Sim measurement: the actually-composed 123-batch averages 99,971–100,030 tokens, Σ deviation < 0.75% (target 12.3M, per-completion).
 
 ### 7.3 Cold-start: Edge Gating + Interleave Greedy
 
@@ -649,24 +649,24 @@ In operation, when a request on a node **completes** (decode ends, KV release) i
 - **Count deficit** `C_req = max(0, target − count)` — the amount to refill back up to the cap (target = 300), never letting it fall below the 2 μ-batch floor (246).
 - **Deviation deficit** `D_req = target_footprint − sum` (= 30M − sum) — the total KV to inject to bring the mean back to 100K. Large `D_req` if a long request left (a long is needed), small if a short left.
 
-**Healing** restores both at once by pulling *from the pool only*, with no inter-node communication (swap). Each refill admits one request closest to `ideal = D_req / remaining slots` — i.e. **`ideal` = the average KV each empty slot should receive** (= the mean size of what just departed).
+**Healing is per-completion — this is the crux.** Real-server admission (§6.4) *admits one request the moment one completes* (backpressure). So recovery happens per freed hole, and that single slot's `ideal` is:
 
 ```
-N completions → compute C_req, D_req(= 30M − sum)
-while count < target(300) and cap room:
-    slot  = target − count
-    ideal = current_D_req / slot          # = (30M − sum)/slot
-    admit the pool request closest to ideal
-→ count → 300, sum → 30M (mean 100K) restored together
+one request (size hole) completes → count−1, sum−hole
+ideal = (target_footprint − sum) / remaining slots
+      = hole               (slot = 1, only one seat freed)
+→ admit the pool request closest to ideal (≈ hole)  → refill the same size that left
 ```
 
-**Within one heal call `ideal` is nearly constant** — it does *not* eat the biggest first. `ideal` is recomputed each step, but being (residual deficit ÷ residual slots) it stays near the average. Measured (1 long + 5 short departed, D_req ≈ 585K): `ideal` across steps 0–5 stays 96.7K–98.0K and the pulls are 96K–98K — whatever departed, long or short, the slots are filled evenly with that episode's *average size*, and **the last slot fine-corrects the residual** to zero the mean onto 100K. What departed only changes *that episode's `ideal` value*:
+That is, **it refills the departed size with the same size (like-for-like). A long leaves, a long comes back** — exactly Phase-1's "fill the coarse (toxic) hole first." Because `ideal = hole` targets the hole's exact size: big hole → big admit, small hole → small admit, automatically. As a result:
 
-- **Balanced departure (the common case)** → `ideal` ≈ 100K → fill with ~100K requests.
-- **A long departed** → larger deficit → that episode's `ideal` rises → fill with larger requests (still ~constant within the episode).
-- **A short departed** → `ideal` falls → fill with smaller requests.
+- **Resident length distribution is preserved** — each departed class is refilled with the same class, so it does not narrow (measured: resident long-request (≥256K) fraction 8.15% → **7.34%**, held).
+- **Each length class consumed at its arrival rate** — longs flow into normal nodes at their arrival rate (≈7.6%) and never pile up → **edge stays at the cold-start rate (~2.68%)**.
+- **Inter-node swap 0** — it pulls from the pool only.
 
-> **Relation to the 3-phase scheme (honest).** The original 3-phase (coarse toxic *first* → opposite-sign *pairs* → small-element *multi-combination*) was a mechanism to hit D_req by **composing** specific elements on a *finite/sparse* pool, where the *order* "biggest first" mattered. The cluster's trillions-scale infinite pool (§7) makes both composition and ordering unnecessary — just pull `slot`-many requests at the *average* size and let best-of-K plus the final correction land it. So the implementation (`heal`, [cluster_balance.cpp](implementation/analysis/cluster_balance.cpp) / [cluster_routing.py](implementation/src/cluster_routing.py)) does *not* traverse the 3 phases; it **replaces them with a simpler single formula** reaching the same endpoint (count 300 · mean 100K) — no pairs, no multi-combination, no "biggest first," just the single `ideal` formula. Same intent (restore count and mean together), simplified mechanism (over-engineering removed).
+> **⚠ Batched refill breaks toxic-fit.** If you pool many completions and refill at once, `ideal = D_req/slot` collapses to the *average* (e.g. one long + many short → ideal ≈ 100K) and never pulls a long. Measured, batched starves longs entirely (resident long 8.15% → **0%**, distribution narrows to ~100K) and shunts those longs to edge. **So always refill per-completion (slot=1)** — then `ideal = hole` and toxic-fit holds. (Per-completion is also the actual §6.4 admission mechanism.)
+
+> **Relation to Phases 2 & 3.** The original Phase 2 (opposite-sign *pairs*) and Phase 3 (small-element *multi-combination*) generalize for a *finite/sparse* pool where no single element matches the hole; they *compose* one. The infinite pool (§7) makes best-of-K almost always find a single element at the hole, so **pairs/combinations collapse to a single pull**. Phase 1 (toxic-fit, biggest first), by contrast, stays alive exactly via `ideal = hole`. Implementation: `heal` ([cluster_balance.cpp](implementation/analysis/cluster_balance.cpp) / [cluster_routing.py](implementation/src/cluster_routing.py)).
 
 Because the pool is effectively infinite, each admit nearly hits its `ideal`, so the mean sticks tightly to 100K. **Inter-node swap 0, edge 0** (it pulls only what it needs; the long requests not pulled are, by conservation, absorbed to edge at ≈ the cold-start rate).
 
@@ -686,17 +686,26 @@ Assumed distribution B, Z = 256 nodes, cap 30M, on-point = compose(123, 12.3M ±
 
 E ↓ → tighter centering but more edge; E ↑ → less edge but mean drifts → count floor missed. **E = 1K adopted** — edge 2.68% for near-perfect centering (a safety margin for a discrete distribution; E = 0 may be unattainable exactly). The cold-start on2 < 100% is not a composition failure but a *count-floor miss* on 1–2 nodes (239–245 < 246), which healing fills.
 
-**Healing stability** (completion probability p, last 150 rounds averaged):
+**Healing stability** (per-completion, completion probability p, last 150 rounds averaged):
 
 | p | count | ∈ 246–300 | \|mean − 100K\| | on2% | 123-batch mean / Σ-dev |
 |---|---|---|---|---|---|
-| 1% | 300 | 100% | 7 tokens | 100 | 99,997 tokens / 0.19% |
-| 3% | 300 | 100% | 6 tokens | 100 | 99,996 tokens / 0.02% |
-| 5% | 300 | 100% | 6 tokens | 100 | 100,000 tokens / 0.01% |
+| 1% | 293 | 99.6% | 2.5K | 98.4 | 99,980 tokens / 0.67% |
+| 3% | 291 | 98.8% | 3.6K | 97.4 | 100,030 tokens / 0.73% |
+| 5% | 292 | 100% | 3.2K | 98.7 | 99,971 tokens / 0.70% |
 
-After healing engages, **drift is 0** (just-post-warmup ≈ last round), every node at count 300 · mean 100K · on2 100%. The actually-composed 123-batch mean is within ±4 tokens of 100K, Σ deviation < 0.2% (tighter than proto_steering's ~1%). **Pay only the ~2.68% initial edge cost, and thereafter greedy cold-start + strategic healing run the PIM indefinitely and comfortably at the per-node 100K operating point.**
+After healing engages, **drift is 0** (just-post-warmup ≈ last round). Per-completion **preserves the cold-start state (diverse, mean 100K)** — mean within ±2.5–3.6K of 100K, on2 ~98%, the actually-composed 123-batch mean within ±30 tokens of 100K with Σ deviation < 0.75% (operating point hit). Count sits at ~291 (not 300) by design — only the freed seats are refilled, staying within 246–300.
 
-> **Honest disclosure.** Sim assumptions: (a) distribution B is assumed (no real traffic), (b) the infinite pool is emulated by best-of-K sampling, (c) churn is abstracted as completion probability p (not real decode-step accumulation), (d) steady-state edge is not separately tracked (by conservation ≈ the cold-start rate). Real PULS pairs steering with the **age-cap** (§6.4) to prevent starvation — it is omitted in the cluster sim's composability check only because its effect there is < 1% (§6.4 sweep); it is retained in operation.
+**Toxic-fit validation — long-request (≥256K) preservation** (E = 1K, p = 3%, 300 rounds):
+
+| healing mode | resident long%(cold) | resident long%(late) | pull-long% | on2% | \|mean−100K\| |
+|---|---|---|---|---|---|
+| batched (avg) | 8.15% | **0.00%** | 0.03% | 100.0 | 7 tokens |
+| **per-completion** | 8.15% | **7.34%** | 7.58% | 97.7 | 2.9K |
+
+Batched starves longs entirely (8.15% → 0%), narrowing the distribution to ~100K (hence the *too*-clean dev 7 · on2 100%) and shunting longs to edge. **Per-completion preserves longs** (8.15% → 7.34%; pull-long 7.58% = consumed at arrival rate), realizing toxic-fit → edge stays at the cold-start rate. **Pay only the ~2.68% initial edge cost, and thereafter greedy cold-start + per-completion healing run the PIM indefinitely at the per-node 100K operating point.**
+
+> **Honest disclosure.** Sim assumptions: (a) distribution B is assumed (no real traffic), (b) the infinite pool is emulated by best-of-K sampling, (c) churn is abstracted as completion probability p (not real decode-step accumulation), (d) steady-state edge is checked indirectly via the pull-long rate (≈ arrival rate) rather than tracked directly, (e) the **prefill→decode dependency and prefill's dual target (256 tokens ∧ depth-work 25.6M) are not modeled here** — prefill balance is a node-level steering concern (§6.4, validated by proto_steering); the cluster routing covers only decode-pool centering. Real PULS pairs steering with the **age-cap** (§6.4) to prevent starvation — omitted in the cluster sim's composability check only because its effect there is < 1% (§6.4 sweep); retained in operation.
 
 ---
 

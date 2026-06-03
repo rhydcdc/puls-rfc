@@ -132,28 +132,26 @@ def _pull_best(ideal: float, cap_room: int, rng: random.Random, k: int = 200) ->
     return best
 
 
-def heal(node: Node, rng: random.Random, target: int = NODE_MAX) -> int:
-    """완료로 빈 자리를 풀에서 보충해 count→target, mean→100K 동시 복구.
+def heal(node: Node, departed: list[int], rng: random.Random) -> int:
+    """per-completion 힐링: 완료로 빠진 각 hole 을 그 크기(ideal=hole)로 되채움.
 
-    매 admit 의 ideal = (목표 footprint - 현재 sum) / 남은 빈자리 = 빈 slot 하나당
-    평균적으로 채워야 할 KV(= 이번에 떠난 것들의 평균 크기). 한 호출 안에서 ideal 은
-    거의 일정하다 — "큰 것 먼저"가 아니라 평균 크기로 slot 을 균등히 채우고 마지막
-    pull 이 잔차를 미세 보정한다(ARCH §7.4 측정). 무엇이 빠졌느냐는 그 에피소드의
-    ideal 값만 바꾼다(긴 게 빠짐→ideal↑, 짧은 게 빠짐→ideal↓).
+    실서버 admission(§6.4)은 완료 1개마다 즉시 1개 admit(backpressure). 그러니 slot=1,
+    ideal = (목표 footprint - sum)/1 = hole(빠진 그 크기) → 풀에서 ≈hole 을 당김 =
+    like-for-like. **긴 게 빠지면 긴 게 들어온다 = Phase-1 toxic-fit**(ARCH §7.4).
 
-    원안 3-Phase(굵직 먼저→쌍→다중조합)는 유한·희소 풀용 조합 메커니즘이고, 무한
-    풀에선 조합·순서 불필요라 이 단일 수식으로 대체했다(쌍·다중조합·"큰 것 우선" 없음).
-    pulls 수 반환. inter-node swap 없음; 풀에서만 끌어온다.
+    효과: 상주 길이분포 보존(긴 요청 안 굶음, 측정 8.15%→7.34%) · 각 클래스 도착률대로
+    소비 → 엣지 cold-start 비율 유지. inter-node swap 없음.
+
+    ⚠ 여러 완료를 모아 ideal=평균 으로 한꺼번에 채우면(batched) toxic-fit 깨져 긴 게
+    0% 로 굶는다(§7.4). 그래서 반드시 완료-단위. pulls 수 반환.
     """
     pulls = 0
-    while node.count < target:
-        slots = target - node.count
-        ideal = (TGT_AVG * target - node.total) / slots
+    for hole in departed:
         cap_room = CAP - node.total
         if cap_room <= 0:
             break
-        length = _pull_best(max(ideal, 1.0), cap_room, rng)
-        if length is None:                               # 캡상 못 넣음
+        length = _pull_best(float(hole), cap_room, rng)   # ideal = hole(빠진 크기)
+        if length is None:
             break
         node.admit(length)
         pulls += 1
@@ -214,17 +212,25 @@ def _demo() -> None:
         EDGE_BAND // 1000, 100 * len(edged) / len(draw),
         100 * in_range / Z, 100 * on2 / Z, leftover))
 
+    long_cold = sum(L >= 256_000 for nd in nodes for L in nd.lengths)
+    long_tot = sum(nd.count for nd in nodes)
     p = 0.03                                             # 라운드당 완료확률
     for rd in range(200):
-        for nd in nodes:                                 # churn: 완료분 retire → heal
-            keep = [L for L in nd.lengths if rng.random() >= p]
+        for nd in nodes:                                 # churn: 완료분 retire → per-completion heal
+            keep, departed = [], []
+            for L in nd.lengths:
+                (keep if rng.random() >= p else departed).append(L)
             nd.lengths, nd.total = keep, sum(keep)
-            heal(nd, rng)
+            heal(nd, departed, rng)                       # 각 hole 을 그 크기로 되채움(toxic-fit)
     means = [nd.mean for nd in nodes]
     on2 = sum(disjoint_onpoint_batches(nd, 2) >= 2 for nd in nodes)
+    long_late = sum(L >= 256_000 for nd in nodes for L in nd.lengths)
+    long_tot2 = sum(nd.count for nd in nodes)
     print("[healing 200rd]  count∈246-300=%.0f%%  |mean-100K|avg=%.0f토큰  on2=%.0f%%" % (
         100 * sum(NODE_MIN <= nd.count <= NODE_MAX for nd in nodes) / Z,
         sum(abs(m - TGT_AVG) for m in means) / Z, 100 * on2 / Z))
+    print("[toxic-fit]  상주 긴요청(≥256K)  cold=%.2f%% → late=%.2f%%  (보존되면 긴 게 안 굶음)" % (
+        100 * long_cold / long_tot, 100 * long_late / long_tot2))
 
 
 if __name__ == "__main__":

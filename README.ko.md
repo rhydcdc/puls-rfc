@@ -190,7 +190,7 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (F5 포함)**.
 - **각 배치가 동작점 명중** — Σkv 12.3M / prefill 256 / depth-work 25.6M 을 세 배치 모두 공유 풀에서 *독립적으로* 충족(길이분산 무관). 앞 둘은 decode 개수 123 도 정확, 배치별 spread <0.8% — 세 per-cycle 자원 시간 일치, **F2(projection ‖ PIM double-buffering)·F3(inter-instance pipeline) 발현의 정량 증거**.
 - **마지막 배치가 튐 (mb#2: 개수 108, spread 3.74%) — age-cap 때문.** 세 번째 배치 구성 시점엔 warm-start 가 풀 멤버 대부분을 "대기" 상태로 만들어, age-cap 이 steering 을 누르고 *이미 오래 기다린* 요청을 강제 포함 — *의도된 공정성 메커니즘*(대기 상한, starvation 0)이지 dispatch 결함이 아님. 실서버 연속 도착에선 요청이 fresh 라 age-cap 이 산발적으로만 발동 → 꼬리 소멸(순수 steering → 셋 다 123). 전체 스펙트럼 + floor 증명(측정 ≈ 이론 floor) — [`ARCHITECTURE.md`](ARCHITECTURE.md) §6.8.
 - **throughput 은 설계상 지속** — per-cycle decode 예산이 동작점에 고정(123, KV 캡에 먼저 닿으면 그 이하)이라 풀이 풍부한 한 매 cycle 이 고정된 토큰 양을 처리 → 지속성은 *별개로 열린 축이 아니라 동작점 고정의 구조적 귀결*. 본 검증 대상은 per-cycle 균형(idle); 드레인·완료·KV 누수 0 은 합성 acceptance(전부 완료·KV remaining=initial·정상 종료)로 별도 검증. 절대 tok/s 는 silicon 보정 cycle 시간 필요(Honest Disclosure 참조).
-- **클러스터 스케일 — 노드 풀 100K 센터링.** 서버스케일(노드 수백–수천)에선 글로벌 도착 평균이 100K 보다 높아 노드별 풀이 drift → count/Σkv 동시 이탈로 idle 폭발. **greedy cold-start + 전략적 healing**(완료로 빈 자리를 풀에서 `ideal` 최근접 보충, inter-node swap 0)으로 **초반 ~2.68% 엣지 비용만 감수하면 그 뒤로 각 노드를 평균 100K 동작점에 무한정 유지**(drift 0, 실 123-배치 평균 100K±4 토큰). 원리·E 스윕·측정은 [`ARCHITECTURE.md`](ARCHITECTURE.md) §7.
+- **클러스터 스케일 — 노드 풀 100K 센터링.** 서버스케일(노드 수백–수천)에선 글로벌 도착 평균이 100K 보다 높아 노드별 풀이 drift → count/Σkv 동시 이탈로 idle 폭발. **greedy cold-start + 전략적 healing**(완료로 빈 자리를 풀에서 `ideal` 최근접 보충, inter-node swap 0)으로 **초반 ~2.68% 엣지 비용만 감수하면 그 뒤로 각 노드를 평균 100K 동작점에 무한정 유지**(per-completion healing = toxic-fit 라 긴 요청도 보존, drift 0, 123-배치 Σ편차 <0.75%). 원리·E 스윕·측정은 [`ARCHITECTURE.md`](ARCHITECTURE.md) §7.
 
 ### Honest Disclosure
 

@@ -631,7 +631,7 @@ batch A forward pass 끝남
 
 즉 노드 풀은 **300 디코더가 평균 100K** 로 상주하고, steering 이 매 iteration 그중 123 을 *골라* 배치를 만든다. 그래서 클러스터 라우팅의 노드별 타깃은 **count 246–300, 평균 ≈ 100K**(= 300 × 100K = 30M 캡 충만) — 이게 충족되면 steering 이 12.3M 짜리 배치 2 개를 disjoint 하게 뽑고, 재선택(177 → 123)도 성립한다.
 
-> **300-평균이 아니라 123-배치가 동작점.** 노드 300-평균 100K 는 *용량/개수* 보장(30M 캡에 246–300 fit)이지 배치 구성을 직접 보장하진 않는다. 123-배치가 12.3M 명중하는 건 steering composer + 풀 다양성의 몫(§6.4 길이분산 무관). sim 측정: 실제 뽑은 123-배치 평균 99,996–100,000 토큰, Σ 편차 < 0.2%(타깃 12.3M).
+> **300-평균이 아니라 123-배치가 동작점.** 노드 300-평균 100K 는 *용량/개수* 보장(30M 캡에 246–300 fit)이지 배치 구성을 직접 보장하진 않는다. 123-배치가 12.3M 명중하는 건 steering composer + 풀 다양성의 몫(§6.4 길이분산 무관). sim 측정: 실제 뽑은 123-배치 평균 99,971–100,030 토큰, Σ 편차 < 0.75%(타깃 12.3M, per-completion).
 
 ### 7.3 Cold-start: 엣지 게이팅 + interleave greedy
 
@@ -649,26 +649,24 @@ batch A forward pass 끝남
 - **개수 결손** `C_req = max(0, target − count)` — 2 μ-batch floor(246) 아래로는 안 떨어지게, 캡까지(target = 300) 다시 채울 양.
 - **편차 결손** `D_req = target_footprint − sum` (= 30M − sum) — 평균을 100K 로 되돌리려 새로 넣을 KV 의 총량. 긴 요청이 빠졌으면 `D_req` 큼(긴 게 필요), 짧은 게 빠졌으면 작음.
 
-**힐링**은 타 노드와의 통신(swap) 없이 *풀에서만* 끌어와 이 둘을 동시에 복구한다. 매 보충 1 개를 `ideal = D_req / 남은 slot` 에 최근접으로 당긴다 — 즉 **`ideal` = 빈 slot 하나당 평균적으로 채워야 할 KV**(= 이번에 떠난 것들의 평균 크기).
+**힐링은 완료-단위(per-completion)다 — 이게 핵심.** 실서버 admission(§6.4)은 *한 요청이 완료될 때마다 즉시 한 개를 admit*한다(backpressure). 그러니 복구는 빠진 hole 하나하나에 대해 일어나고, 그 한 자리의 `ideal` 은:
 
 ```
-완료로 N 개 빠짐 → C_req, D_req(= 30M − sum) 산출
-while count < target(300) and 캡 여유:
-    slot  = target − count
-    ideal = D_req_현재 / slot              # = (30M − sum)/slot
-    풀에서 ideal 에 가장 가까운 요청 1 개 admit
-→ count → 300, sum → 30M (평균 100K) 동시 복구
+한 요청(크기 hole) 완료 → count−1, sum−hole
+ideal = (target_footprint − sum) / 남은 slot
+      = hole               (slot = 1, 한 자리만 비었으므로)
+→ 풀에서 ideal(≈hole) 에 가장 가까운 요청 1 개 admit  → 빠진 그 크기를 그대로 채움
 ```
 
-**한 heal 호출 안에서 `ideal` 은 거의 일정하다** — 큰 것부터 먹는 게 *아니다.* `ideal` 은 매 step 재계산되지만 (잔여 결손 ÷ 잔여 slot)이라 평균값 근처로 머문다. 측정(긴 1 개 + 짧은 5 개 이탈, D_req≈585K): step 0–5 의 `ideal` 이 96.7K\~98.0K 로 *일정*, pull 도 96K\~98K — 빠진 게 길든 짧든 그 에피소드의 *평균 크기* 요청으로 slot 을 균등히 채우고, **마지막 slot 이 잔차를 미세 보정**해 평균을 100K 에 영점 맞춘다. 무엇이 빠졌느냐는 *그 에피소드의 `ideal` 값* 만 바꾼다:
+즉 **빠진 크기를 같은 크기로 되채운다(like-for-like). 긴 요청이 빠지면 긴 요청이 들어온다** — 이것이 바로 Phase-1 의 "굵직한 구멍(독성) 우선 메우기(toxic-fit)"다. `ideal = hole` 이 hole 의 크기를 그대로 타깃하므로 큰 hole → 큰 admit, 작은 hole → 작은 admit 으로 자동. 그 결과:
 
-- **균형 이탈(대부분)** → `ideal` ≈ 100K → ~100K 요청으로 채움.
-- **긴 요청 이탈** → 결손 큼 → 그 에피소드 `ideal` 상승 → 더 큰 요청들로 채움(에피소드 내에선 여전히 ~일정).
-- **짧은 요청 이탈** → `ideal` 하락 → 더 작은 요청들로.
+- **상주 길이분포 보존** — 빠진 클래스를 같은 클래스로 채워 분포가 안 좁아진다(측정: 상주 긴요청(≥256K) 비율 8.15% → **7.34%** 유지).
+- **각 길이 클래스를 도착률대로 소비** — 긴 요청이 도착률(≈7.6%)대로 정상 노드로 흘러 들어가 쌓이지 않음 → **엣지가 cold-start 비율(~2.68%)로 유지**.
+- **inter-node swap 0** — 풀에서만 당긴다.
 
-> **3-Phase 와의 관계 (정직).** 원안의 3-Phase(굵직한 독성 *먼저* → 부호반대 *쌍* → 작은 원소 *다중 조합*)는 *유한·희소* 풀에서 D_req 를 특정 원소들을 **조합**해 맞추는 메커니즘이고, "큰 것 먼저"라는 *순서* 가 핵심이었다. 그러나 클러스터는 조·경 규모 무한 풀(§7) 이라 조합도 순서도 불필요 — slot 수만큼 *평균 크기* 를 당기고 best-of-K + 마지막 보정으로 착지시키면 된다. 그래서 구현(`heal`, [cluster_balance.cpp](implementation/analysis/cluster_balance.cpp) / [cluster_routing.py](implementation/src/cluster_routing.py))은 3-Phase 를 *그대로 거치지 않고*, 같은 종착점(count 300·평균 100K)에 닿는 **더 단순한 단일 수식으로 대체**했다 — 쌍·다중조합 없음, "큰 것 우선" 없음, `ideal` 단일 수식뿐. 의도(개수·평균 동시 복구)는 같고 메커니즘은 단순화(over-engineering 제거).
+> **⚠ 한꺼번에(batched) 복구하면 toxic-fit 이 깨진다.** 여러 완료를 모아 한 번에 채우면 `ideal = D_req/slot` 이 *평균* 으로 뭉개져(예: 긴 1 + 짧은 다수 → ideal ≈ 100K) 긴 요청을 안 당긴다. 측정상 batched 는 상주 긴요청 8.15% → **0%** 로 완전히 굶기고(분포가 ~100K 로 좁아짐), 그만큼 긴 요청이 엣지로 쏠린다. **그래서 반드시 완료-단위(slot=1)로 복구** — 그러면 `ideal = hole` 이 되어 toxic-fit 이 성립한다. (per-completion 이 §6.4 의 실제 admission 메커니즘이기도 하다.)
 
-풀이 사실상 무한이라 매 admit 이 `ideal` 을 거의 명중 → 평균이 100K 에 정확히 붙는다. **inter-node swap 0, 엣지 0**(필요한 것만 당김; 안 당긴 긴 요청은 보존상 cold-start 비율 ≈ 엣지로 흡수).
+> **Phase 2·3 과의 관계.** 원안 3-Phase 의 Phase 2(부호반대 *쌍*)·Phase 3(작은 원소 *다중 조합*)는 *유한·희소* 풀에서 hole 에 맞는 단일 원소가 없을 때 *조합* 으로 맞추는 일반화다. 무한 풀(§7)에선 best-of-K 가 hole 에 맞는 단일 원소를 거의 항상 찾아 **쌍·다중조합이 단일 pull 로 collapse** 한다. 반면 Phase 1(toxic-fit, 큰 것 우선)은 위처럼 `ideal = hole` 로 *그대로 살아있다*. 구현: `heal`([cluster_balance.cpp](implementation/analysis/cluster_balance.cpp) / [cluster_routing.py](implementation/src/cluster_routing.py)).
 
 ### 7.5 측정 결과 — E 스윕 · 안정성
 
@@ -686,17 +684,26 @@ while count < target(300) and 캡 여유:
 
 E ↓ → 센터링 빡빡하나 엣지 ↑; E ↑ → 엣지 ↓ but 평균 drift → count floor 미달. **E = 1K 채택** — edge 2.68% 로 거의 완벽 센터링(이산 분포 안전마진 확보; E = 0 은 정확 명중이 어려울 수 있음). cold-start 의 on2 < 100% 는 composition 실패가 아니라 1–2 노드의 *count floor 미스*(239–245 < 246)이며, 힐링이 메운다.
 
-**Healing 안정성** (완료확률 p, 마지막 150 라운드 평균):
+**Healing 안정성** (per-completion, 완료확률 p, 마지막 150 라운드 평균):
 
 | p | count | ∈ 246–300 | \|평균 − 100K\| | on2% | 123-배치 평균 / Σ편차 |
 |---|---|---|---|---|---|
-| 1% | 300 | 100% | 7 토큰 | 100 | 99,997 토큰 / 0.19% |
-| 3% | 300 | 100% | 6 토큰 | 100 | 99,996 토큰 / 0.02% |
-| 5% | 300 | 100% | 6 토큰 | 100 | 100,000 토큰 / 0.01% |
+| 1% | 293 | 99.6% | 2.5K | 98.4 | 99,980 토큰 / 0.67% |
+| 3% | 291 | 98.8% | 3.6K | 97.4 | 100,030 토큰 / 0.73% |
+| 5% | 292 | 100% | 3.2K | 98.7 | 99,971 토큰 / 0.70% |
 
-힐링 진입 후 **drift 0**(warmup 직후 ≈ 마지막 라운드), 모든 노드 count 300 · 평균 100K · on2 100%. 실제 123-배치 평균이 100K 에 ±4 토큰, Σ 편차 < 0.2%(proto_steering 의 ~1% 보다 tight). **초반 ~2.68% 엣지 비용만 감수하면, 그 뒤로는 greedy cold-start + 전략적 healing 으로 PIM 을 각 노드 평균 100K 동작점에서 무한정 쾌적하게 운용**한다.
+힐링 진입 후 **drift 0**(warmup 직후 ≈ 마지막 라운드). per-completion 은 **cold-start 의 상태(다양·평균 100K)를 그대로 유지** — 평균이 100K 에서 ±2.5\~3.6K(센터링 유지), on2 ~98%, 실제 123-배치 평균 100K ± 30 토큰·Σ편차 < 0.75%(동작점 명중). count 가 300 이 아닌 ~291 인 건 정상(완료 자리만 채워 246–300 안에서 운용).
 
-> **honest disclosure.** sim 가정: (a) 분포 B 는 가정값(실 트래픽 부재), (b) 무한 풀은 best-of-K 샘플로 모사, (c) churn 은 완료확률 p 의 추상화(실 decode-step 누적 아님), (d) steady-state 엣지는 따로 추적 안 함(보존상 ≈ cold-start 비율). 실 PULS 에선 steering 에 **age-cap**(§6.4)을 함께 둬 starvation 을 막는다 — 클러스터 sim 의 composability 체크엔 age-cap 영향이 < 1%(§6.4 sweep)라 생략했을 뿐, 운영에선 유지한다.
+**toxic-fit 검증 — 긴 요청(≥256K) 보존** (E = 1K, p = 3%, 300 라운드):
+
+| healing 방식 | 상주 긴요청%(cold) | 상주 긴요청%(late) | pull-긴요청% | on2% | \|평균−100K\| |
+|---|---|---|---|---|---|
+| batched (평균) | 8.15% | **0.00%** | 0.03% | 100.0 | 7 토큰 |
+| **per-completion** | 8.15% | **7.34%** | 7.58% | 97.7 | 2.9K |
+
+batched 는 긴 요청을 완전히 굶겨(8.15% → 0%) 분포를 ~100K 로 좁히고(그래서 dev 7·on2 100% 로 *과도하게* 깨끗) 긴 요청을 엣지로 쏠리게 한다. **per-completion 은 긴 요청을 보존**(8.15% → 7.34%, pull-긴요청 7.58% = 도착률대로 소비)해 toxic-fit 을 실현 → 엣지가 cold-start 비율 유지. **초반 ~2.68% 엣지 비용만 감수하면, 그 뒤로는 greedy cold-start + per-completion healing 으로 PIM 을 각 노드 평균 100K 동작점에서 무한정 운용**한다.
+
+> **honest disclosure.** sim 가정: (a) 분포 B 는 가정값(실 트래픽 부재), (b) 무한 풀은 best-of-K 샘플로 모사, (c) churn 은 완료확률 p 의 추상화(실 decode-step 누적 아님), (d) steady-state 엣지는 직접 추적 대신 pull-긴요청률(≈ 도착률)로 간접 확인, (e) **프리필→디코드 종속성·프리필 dual-target(256 토큰 ∧ depth-work 25.6M)은 본 sim 미반영** — 프리필 균형은 노드 steering(§6.4)·proto_steering 검증이고, 클러스터 라우팅은 디코드 풀 센터링만 다룬다. 실 PULS 에선 steering 에 **age-cap**(§6.4)을 함께 둬 starvation 을 막는다 — 클러스터 sim 의 composability 체크엔 age-cap 영향이 < 1%(§6.4 sweep)라 생략했을 뿐, 운영에선 유지한다.
 
 ---
 
