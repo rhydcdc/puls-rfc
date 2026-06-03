@@ -1891,8 +1891,9 @@ pre.code-block .var { color: #f9a8d4; }
           <li><b>Admission = pool refill only.</b> <code class="inline">request_queue &rarr; in-flight (PREFILL)</code>, gated solely by the aggregate KV budget. It does not look at the decode/prefill targets. A request with <code class="inline">prompt_len = 0</code>, or whose prefill is already done, transitions straight to DECODE.</li>
           <li><b>Decode-set steering.</b> From the in-flight DECODE pool, select a set hitting two targets at once &mdash; <b>count 62 ∧ Σkv 6.15M</b> &mdash; by local-greedy steering + age-cap. Pure <i>selection</i> (KV is reserved at pool entry).</li>
           <li><b>Prefill steering.</b> From the in-flight PREFILL pool, distribute <b>128 tokens</b> (the fixed FFN-batch knob) so the PREFILL_ATTN depth-sum hits <b>12.8M</b>, by the same per-token steering + age-cap. A member that receives 0 tokens stays in the pool.</li>
-          <li><b>Per-iteration recomposition.</b> After every forward pass the μ-batch is re-selected from the pool, disjoint from the other active μ-batch. The window holds 2 active μ-batches (capacity 3 = 2 active + 1 transition slack) — the staggering precondition for F2/F3 overlap. <i>This is the real continuous-batching paradigm: a standing pool mixing decode / prefill / just-finished-prefill, recomposed every iteration — not a fixed cohort.</i></li>
         </ul>
+
+        <p>These three concerns run every iteration. <b>Per-iteration recomposition:</b> after each forward pass the μ-batch is re-selected from the pool, disjoint from the other active μ-batch. The window holds 2 active μ-batches (capacity 3 = 2 active + 1 transition slack) — the staggering precondition for F2/F3 overlap. <i>This is the real continuous-batching paradigm: a standing pool mixing decode / prefill / just-finished-prefill, recomposed every iteration — not a fixed cohort.</i></p>
 
         <h2 class="h-sub">The operating point — causal chain ① → ⑤</h2>
 
