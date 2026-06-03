@@ -50,6 +50,9 @@ dist/
 venv/
 
 # --- Phase-2 measurement scratch & regenerable artifacts (reproduction-only) ---
+# floor_proof.py (idle measurer) — removed from docs; idle≈0 is by-construction
+# (삼중균형 정의, §6.8 cpp 구성검증으로 충분). source 더 이상 추적 안 함.
+implementation/analysis/floor_proof.py
 # floor_proof.py / measure_steady.py console-dump outputs (regenerate by re-running)
 implementation/analysis/floor_*.txt
 implementation/debug_phase2/steady_*.txt
