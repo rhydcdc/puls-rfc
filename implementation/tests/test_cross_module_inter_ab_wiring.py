@@ -148,7 +148,7 @@ def test_scheduler_core_without_instance_pipeline_still_works(tmp_path):
     disp = Dispatcher(config=cfg, clock=clock, queue=queue, dag=dag, pim_executor=pim)
     rq = RequestQueue(capacity=cfg.admission.request_queue_capacity)
     kv = KVAccountant(capacity=cfg.admission.kv_capacity_aggregate)
-    adm = Admission(admission_cfg=cfg.admission, request_queue=rq,
+    adm = Admission(admission_cfg=cfg.admission, 
                     kv_accountant=kv, idle_telemetry=tel)
     ls = LayerState(num_layers=cfg.model.num_layers)
     comp = Completion(clock=clock, kv_accountant=kv)

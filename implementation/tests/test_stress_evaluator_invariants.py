@@ -47,7 +47,7 @@ def _build_stress_core(config=None):
     kva = KVAccountant(capacity=config.admission.kv_capacity_aggregate)
     idle = IdleTelemetry()
     admission = Admission(
-        admission_cfg=config.admission, request_queue=rq,
+        admission_cfg=config.admission, 
         kv_accountant=kva, idle_telemetry=idle,
     )
     core = SchedulerCore(

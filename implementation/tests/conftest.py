@@ -94,7 +94,7 @@ def idle_telemetry():
 def admission(admission_config, request_queue, kv_accountant, idle_telemetry):
     return Admission(
         admission_cfg=admission_config,
-        request_queue=request_queue,
+        
         kv_accountant=kv_accountant,
         idle_telemetry=idle_telemetry,
     )

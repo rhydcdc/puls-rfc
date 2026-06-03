@@ -127,8 +127,7 @@ class CalibrationConfig:
 
     # Model spec derived (Llama-3 70B)
     weight_bytes_per_layer_fp16: int = 1_712_000_000
-    kv_bytes_per_token_per_layer_fp8: int = 2048       # 2 (K,V) × 8 kv_heads × 128 head_dim × 1B
-    kv_bytes_per_token_aggregate_fp8: int = 163_840    # × 80 layer
+    kv_bytes_per_token_aggregate_fp8: int = 163_840    # 2 (K,V) × 8 kv_heads × 128 head_dim × 1B × 80 layer
 
     # Trace
     trace_path: str = "data/longctx_longbench_lambda_3_40.csv"

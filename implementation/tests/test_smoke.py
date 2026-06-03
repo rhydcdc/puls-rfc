@@ -37,7 +37,7 @@ def scheduler_core_l1():
     request_queue = RequestQueue(capacity=config.admission.request_queue_capacity)
     kv_accountant = KVAccountant(capacity=config.admission.kv_capacity_aggregate)
     admission = Admission(
-        admission_cfg=config.admission, request_queue=request_queue,
+        admission_cfg=config.admission, 
         kv_accountant=kv_accountant, idle_telemetry=IdleTelemetry(),
     )
     return SchedulerCore(

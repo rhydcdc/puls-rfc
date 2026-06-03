@@ -49,7 +49,7 @@ def _make_scheduler_core(kv_capacity: int = 1_000_000):
     rq = RequestQueue(capacity=config.admission.request_queue_capacity)
     kv = KVAccountant(capacity=config.admission.kv_capacity_aggregate)
     telemetry = IdleTelemetry()
-    admission = Admission(admission_cfg=config.admission, request_queue=rq,
+    admission = Admission(admission_cfg=config.admission, 
                           kv_accountant=kv, idle_telemetry=telemetry)
     layer_state = LayerState(num_layers=config.model.num_layers)
     completion = Completion(clock=clock, kv_accountant=kv)

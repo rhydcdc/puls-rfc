@@ -4,13 +4,11 @@ from puls_sched.config import AdmissionConfig
 from puls_sched.idle_telemetry import IdleTelemetry
 from puls_sched.kv_accountant import KVAccountant
 from puls_sched.request import Request
-from puls_sched.request_queue import RequestQueue
 
 
 @dataclass
 class Admission:
     admission_cfg: AdmissionConfig
-    request_queue: RequestQueue
     kv_accountant: KVAccountant
     idle_telemetry: IdleTelemetry
 
@@ -18,12 +16,13 @@ class Admission:
         """Phase-2 former-v2 (풀 모델) — decode 풀에서 로컬 그리디 steering+age-cap 으로 decode-set 선택.
 
         한 μ-batch 의 decode-set 을 *인플라이트 DECODE 풀*(candidates)에서 두 타깃에 맞춰 고른다
-        (OPERATING_POINT §3): 개수 123(decode_count_target) AND Σkv 12.3M(kv_operating_target).
-        이건 prefill 구성(256 토큰, main_loop)과 *완전히 별개* — decode 축만.
+        (OPERATING_POINT §3): 개수 62(decode_count_target) AND Σkv 6.15M(kv_operating_target).
+        (도출 기준 256-basis 는 123 / 12.3M — 배포 동작점은 62 / 6.15M.)
+        이건 prefill 구성(128 토큰, main_loop)과 *완전히 별개* — decode 축만.
 
         ```
         n=0, S=0
-        while n < target_count(123) and S < target_kv(12.3M) and pool:
+        while n < target_count(62) and S < target_kv(6.15M) and pool:
           if (wait ≥ age_cap 인 디코더 있음): 가장 오래 기다린 것 선택   # 공정성(강제)
           else: ideal=(target_kv−S)/(target_count−n) 에 가장 가까운 디코더 선택  # steering
         미선택 디코더 wait += 1   # 다음 μ-batch 후보(풀에 잔류)

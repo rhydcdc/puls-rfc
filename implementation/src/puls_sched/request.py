@@ -37,8 +37,8 @@ class Request:
     # ---- Impl-10-pre-2 (O9.1) — prefill chunking position tracker ----
     prefill_processed: int = 0
     # ---- Phase-2 former-v2 — age-cap 공정성 추적 (OPERATING_POINT §3) ----
-    # wait: decode admission(request_queue) 대기. former 가 이 요청을 batch 에 안 넣으면 +1,
-    #       admit 되면 종료. wait ≥ age_cap → steering 무시 강제 포함.
+    # wait: in-flight DECODE 풀 대기. steer_decode_set 이 이 요청을 in-flight decode-set 에
+    #       안 넣으면 +1, 선택되면 종료. wait ≥ age_cap → steering 무시 강제 포함.
     # prefill_wait: prefill 토큰 분배 대기(in-flight). 한 사이클서 토큰 0개 받으면 +1, 받으면
     #       0 리셋. prefill_wait ≥ age_cap → 강제 토큰 배정 (prefill starvation 0).
     wait: int = 0

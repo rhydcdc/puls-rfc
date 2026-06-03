@@ -50,7 +50,7 @@ def _make_trace_fixture_with_evaluator():
     kv_accountant = KVAccountant(capacity=config.admission.kv_capacity_aggregate)
     idle_telemetry = IdleTelemetry()
     admission = Admission(
-        admission_cfg=config.admission, request_queue=request_queue,
+        admission_cfg=config.admission, 
         kv_accountant=kv_accountant, idle_telemetry=idle_telemetry,
     )
     core = SchedulerCore(

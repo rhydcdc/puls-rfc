@@ -49,7 +49,7 @@ def _fresh_core(seed: int | None = None):
     rq = RequestQueue(capacity=config.admission.request_queue_capacity)
     kv = KVAccountant(capacity=config.admission.kv_capacity_aggregate)
     admission = Admission(
-        admission_cfg=config.admission, request_queue=rq,
+        admission_cfg=config.admission, 
         kv_accountant=kv, idle_telemetry=IdleTelemetry(),
     )
     return SchedulerCore(

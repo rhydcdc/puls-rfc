@@ -1,6 +1,6 @@
 """Cluster E — C2 acceptance: structural output schema + substantive ordering (R12).
 
-§6.5 dispatch trace + admission deadband convergence + F1~F5 schema +
+§6.5 dispatch trace + F1~F5 schema +
 ARCH §6.3 priority literal substantive ordering + comparative baseline 부재 lock-in.
 """
 

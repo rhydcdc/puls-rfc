@@ -101,8 +101,9 @@ class SchedulerCore:
             case EventType.ADMISSION_PASS:
                 # Phase-2 풀 모델 (OPERATING_POINT §3) — 세 관심사 분리:
                 #  (1) admission = 풀 보충: request_queue → in_flight(PREFILL), KV 게이트만.
-                #  (2)+(3) μ-batch 구성: decode-set(123/12.3M) ∥ prefill(256/25.6M) 을 풀에서
+                #  (2)+(3) μ-batch 구성: decode-set(62/6.15M) ∥ prefill(128/12.8M) 을 풀에서
                 #      *독립적으로* steering+age-cap 으로 구성 → window 를 활성 목표(2)까지 채움.
+                #      (도출 기준 256 은 123/12.3M ∥ 256/25.6M.)
                 self._refill_pool()
                 self._fill_window()
                 # 고정 타이머 self-push 폐기. 다음 admission 은 완료/신규도착 시 재기동.
@@ -113,8 +114,8 @@ class SchedulerCore:
         STEP 2.5 — 고정 타이머 self-push 폐기 후 admission 의 유일한 재기동 경로. 이벤트
         기반: 자원이 비는 시점(완료)과 새 일감 도착 시점에만 admission pass push.
 
-        Phase-2 S2 (§2.5) — 동작점 고정으로 payload trivial(빈 dict). former 는 KV 합·prefill
-        512 만 보므로 cycle 측정 payload 산출(`_compose_admission_payload`) 삭제.
+        Phase-2 S2 (§2.5) — 동작점 고정으로 payload trivial(빈 dict). former 는 reads count·Σkv
+        타깃만 보므로 cycle 측정 payload 산출(`_compose_admission_payload`) 삭제.
         """
         if len(self.request_queue) == 0 and len(self.in_flight_requests) == 0:
             return
@@ -232,7 +233,7 @@ class SchedulerCore:
 
     def _select_decoders(self, exclude: set[int]) -> list[Request]:
         """decode-set 구성 (§3) — in_flight DECODE 풀(exclude 제외)서 steering+age-cap 으로
-        123/12.3M 선택. prefill 과 *완전 별개* 축."""
+        62/6.15M (도출 기준 256 은 123/12.3M) 선택. prefill 과 *완전 별개* 축."""
         pool = [r for r in self.in_flight_requests.values()
                 if r.state == RequestState.DECODE and r.id not in exclude]
         return self.admission.steer_decode_set(pool)
@@ -254,7 +255,7 @@ class SchedulerCore:
         )
 
     def _compose_microbatch(self) -> "MicroBatch | None":
-        """풀에서 새 μ-batch 1개 구성 — decode-set(§3) ∥ prefill(256) *독립* 구성, disjoint.
+        """풀에서 새 μ-batch 1개 구성 — decode-set(§3) ∥ prefill(128) *독립* 구성, disjoint.
         둘 다 비면 None (풀에 줄 게 없음)."""
         exclude = self._assigned_ids()
         decoders = self._select_decoders(exclude)
@@ -302,9 +303,10 @@ class SchedulerCore:
     ) -> tuple[dict[int, list[int]], dict[int, int], dict[int, int]]:
         """Phase-2 former-v2 — mb phase 분리 + prefill steering (OPERATING_POINT §3).
 
-        prefill 토큰 *총수* 는 256 고정(= FFN batch 기여분, decode 와 함께 batch 형성)이되,
-        그 256 을 prefill 멤버들에 *어떻게 나누는가* 로 GPU-A PREFILL_ATTN 의 **depth-합**
-        (Σ chunk×depth)을 동작점 25.6M(`prefill_kv_work_target_tokens`)에 맞춘다. decode
+        prefill 토큰 *총수* 는 128 고정(= FFN batch 기여분, decode 와 함께 batch 형성)이되,
+        그 128 을 prefill 멤버들에 *어떻게 나누는가* 로 GPU-A PREFILL_ATTN 의 **depth-합**
+        (Σ chunk×depth)을 동작점 12.8M(`prefill_kv_work_target_tokens`)에 맞춘다 (도출 기준
+        256 은 25.6M). decode
         steering 과 동형의 로컬 그리디: 매 토큰마다 `ideal=(target−W)/(budget−t)` 깊이에
         가장 가까운 멤버에 1 토큰 배정 → depth-합이 목표에 자기보정 수렴.
 
@@ -347,7 +349,7 @@ class SchedulerCore:
                 if aged:
                     pick = max(aged, key=lambda rid: by_id[rid].prefill_wait)   # 가장 오래 기다린 것
                 else:
-                    # steering: depth-합 25.6M 수렴 — 다음 토큰의 이상 깊이에 가장 가까운 요청.
+                    # steering: depth-합 12.8M 수렴 — 다음 토큰의 이상 깊이에 가장 가까운 요청.
                     # 다음 토큰의 깊이 = prefill_processed + 이미 배정한 수 (causal).
                     ideal = (target_work - W) / (budget - t)
                     pick = min(cand, key=lambda rid: abs(
@@ -358,7 +360,7 @@ class SchedulerCore:
             # 풀 모델: 토큰 받은(c>0) 요청만 prefill_chunk(=이 μ-batch 에 assign). 0토큰 요청은
             # *풀에 잔류*(이 μ-batch 에 안 넣음) → 다음 구성서 재선택, prefill_wait++ 로 age-cap.
             # (sticky 모델의 빈-chunk 멤버십 유지는 풀 모델선 mb 를 미진행 요청으로 부풀려 prefill
-            #  256 을 과분산 → prefill 정체·decode 고갈. 그래서 제거.)
+            #  128 을 과분산 → prefill 정체·decode 고갈. 그래서 제거.)
             for req, _ in prefill_reqs:
                 c = alloc[req.id]
                 if c > 0:

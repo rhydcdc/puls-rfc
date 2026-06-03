@@ -3,7 +3,9 @@
 PLAN.md §4 Impl-8 + ARCH §6.7 정합. *절대 metric 미산출 (TTFT · TPOT · throughput · goodput).
 Comparative baseline 미산출 (Sarathi · vLLM).*
 
-6 산출 method + 1 callback method = 7 method total:
+Public method 11 = core report method (D1 증거) + Stage-2 D2 closed-form method:
+
+core report method:
 - record_dispatch — D1 hook callback (dispatcher 가 fire)
 - dispatch_trace — §6.5 Init/T1~T5 sequence event log
 - idle_fraction — Instance A scope (GPU · PIM 2 자원, per-instance A/B split 은 Impl-9 — O8.1)
@@ -11,6 +13,13 @@ Comparative baseline 미산출 (Sarathi · vLLM).*
 - pipeline_efficiency — max(A, B) / (A + B) ratio
 - acceleration_decomposition — F1·F2·F3·F5 cycle ratio direction 표 (D2 schema 골격, F4 미포함)
 - report — Python dict + markdown 표 (PULS 단독, Comparative baseline 없음)
+
+Stage-2 D2 closed-form method:
+- aux1_mixed_batch_weight_reuse — mixed batch weight streaming 1 회 절감
+- aux2_bus_traffic_reduction — KV cache HBM↔GPU 전송 절감 (long-ctx dominant)
+- f3_closed_form — F3 closed-form ratio (α path)
+- f5_trace_grounded — F5 channel-independent vs lock-step max-KV
+- f3_cross_validate — F3 closed-form vs run.loop measured cross-validate
 """
 
 import math
@@ -39,7 +48,7 @@ class DispatchEvent:
     timestamp: float
     micro_batch_id: int
     node_type: NodeType
-    resource: str                                       # "GPU" | "PIM"
+    resource: str                                       # "GPU" | "PIM" | "INSTANCE_B"
     dag_state_snapshot: dict                            # {mb_id: {node_type_name: state_name}} — defensive copy
 
 
