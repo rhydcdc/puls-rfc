@@ -1975,7 +1975,7 @@ pre.code-block .var { color: #f9a8d4; }
 
         <div class="callout note">
           <span class="callout-title">TWO-SIM SPLIT</span>
-          The multi-node distribution (cold-start + healing) is proven by <code class="inline">cluster_balance.cpp</code>; the single-node lifecycle (steering · prefill→decode transition · healing · age-cap 5, both compositions at 100%) by <code class="inline">cluster_lifecycle.cpp</code>. Together they are <code class="inline">ARCHITECTURE.md §7</code>.
+          The multi-node distribution (cold-start + healing) is proven by <code class="inline">cluster_balance.cpp</code> (<b>256 nodes</b>; healing over the last 150 of 300 rounds); the single-node lifecycle (steering · prefill→decode transition · healing · age-cap 5, both compositions at 100%) by <code class="inline">cluster_lifecycle.cpp</code> (<b>16 nodes</b>; last 500 of 1000 rounds = 8,000 node-rounds). Together they are <code class="inline">ARCHITECTURE.md §7</code>.
         </div>
 
       </div>
@@ -2479,7 +2479,7 @@ pre.code-block .var { color: #f9a8d4; }
       <div class="result-block">
         <h3 class="result-block-title">Runtime validation — 2 active μ-batch (integrated lifecycle)</h3>
         <p style="font-size:12.5px; color:var(--color-muted); margin: 6px 0 12px 0;">
-          One integrated sim (<code class="inline">cluster_lifecycle.cpp</code>) runs cold-start → steering · prefill→decode transition · per-completion healing · age-cap 5 on a wide synthetic pool. A node runs <b>2 active μ-batches</b>; when one finishes its forward pass it is <b>re-composed from (returned members + surplus)</b> — <i>no 3rd batch is force-composed</i>. Deployed prefill 128.
+          One integrated sim (<code class="inline">cluster_lifecycle.cpp</code>) runs cold-start → steering · prefill→decode transition · per-completion healing · age-cap 5 on a wide synthetic pool. A node runs <b>2 active μ-batches</b>; when one finishes its forward pass it is <b>re-composed from (returned members + surplus)</b> — <i>no 3rd batch is force-composed</i>. Deployed prefill 128. Statistics are over the <b>last 500 of 1000 rounds × 16 nodes = 8,000 node-rounds</b> (16,000 decode · 8,000 prefill batches).
         </p>
 
         <p style="font-size:12.5px; margin: 4px 0 6px 0;"><b>① composition — operating-point hit (with dependency · age-cap)</b></p>
