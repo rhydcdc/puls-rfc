@@ -59,14 +59,13 @@ implementation/debug_phase2/steady_*.txt
 implementation/analysis/_scratch_*/
 implementation/debug_phase2/_scratch_*/
 
-# Synthetic sweep traces — regenerate via implementation/debug_phase2/gen_sweep_traces.py
-implementation/data/sweep_*.csv
+# Data folder — traces · measurements (local-only, not published). sweeps regenerable via
+# debug_phase2/gen_sweep_traces.py; longbench traces + aux1 T4 JSON kept local only.
+implementation/data/
 
 # Local-only conceptual notes (personal understanding notes, not published)
 *.local.md
 
-# Phase-2 working handoff notes (Korean dev notes, like the ignored top-level PLAN.md)
-implementation/debug_phase2/PLAN.md
-implementation/debug_phase2/STEP6_PROMPT.md
-implementation/debug_phase2/STEP7_PROMPT.md
-implementation/debug_phase2/STEP8_PROMPT.md
+# Debug/dev work folders (Korean working notes · protos · reports — local-only, not published)
+implementation/debug_phase1/
+implementation/debug_phase2/

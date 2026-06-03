@@ -1,6 +1,0 @@
-=== steady idle: TS_on ===
-trace=debug_phase1/data/trace_ts.csv
-join=ON batch=default chunk=default theta_high=default theta_low=default
-warmup_steps=345040 measure_steps=100000 converged=True drained=False
-mb_count=3 max_window=3/3 samples=5
-idle gpu_a=0.0002 pim_a=0.9943 gpu_b=0.0000
