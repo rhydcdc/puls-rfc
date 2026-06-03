@@ -1,6 +1,6 @@
 # PULS — PIM-Unified LLM Serving
 
-> ✅ **스케줄러 로직 구현·검증 완료** — 풀 모델 배치 구성(admission=풀 보충 ∥ decode-set ∥ prefill 독립 steering)이 **3 disjoint μ-batch**를 동작점(decode 123 / Σkv 12.3M, prefill 256 / depth-work 25.6M)에 구성, 배치별 idle spread **<0.8%**(증명된 이론 floor 와 일치); 마지막 배치는 의도된 age-cap 공정성으로 ~3.7% 로 벌어짐 ([Runtime Validation](#runtime-validation)).
+> ✅ **스케줄러 로직 구현·검증 완료** — 통합 lifecycle sim(콜드스타트 → steering · prefill→decode 전이 · per-completion 힐링 · age-cap)이 **2 active μ-batch**를 동작점(배포 128: decode 62 / Σkv 6.15M, prefill 128 / depth-work 12.8M)에 구성, **composition 100% 명중 · Σdev <0.2%** → §2 균형으로 floor idle ≈0. 클러스터 스케일은 글로벌 스케줄러로 초반 ~2.2% 엣지 후 노드 풀 100K 유지 ([Runtime Validation](#runtime-validation)).
 
 **Scheduler-aware co-design of HBM-PIM and production LLM serving stack.**
 
@@ -84,7 +84,8 @@
 - **자체 스케줄러** — chunked-prefill + 혼합 배치 mixed batch primitive 와 호환 ([`ARCHITECTURE.md`](ARCHITECTURE.md) §6):
   - **Event-driven dispatch + dependency DAG** — invariant (data dependency + resource) 을 그래프로 코드화, ready-node 선택 문제로 환원
   - **2-μ-batch lookahead** — 다음 μ-batch 작업을 미리 시작 + idle 자원을 다른 μ-batch 의 작업으로 채움 (자연 산출)
-  - **풀 모델 구성 + 로컬 그리디 steering** — admission(풀 보충) ‖ decode-set steering ‖ prefill steering, 각각 고정 동작점 타깃을 독립 명중, 공정성을 위한 age-cap (전역 통계·idle-feedback 루프 없음)
+  - **풀 모델 구성 + 로컬 그리디 steering (노드 레벨)** — admission(풀 보충) ‖ decode-set steering ‖ prefill steering, 각각 고정 동작점 타깃을 독립 명중, 공정성을 위한 age-cap (전역 통계·idle-feedback 루프 없음)
+  - **글로벌 스케줄러 (서버 레벨 노드 분배)** — 전체 도착 풀을 노드별로 라우팅: **그리디 콜드스타트**(긴 요청을 엣지노드로 shed + interleave-greedy 로 정상 노드를 평균 100K 로 충전) + **그리디 힐링**(완료마다 같은 크기로 per-completion 보충 = toxic-fit, 긴 요청 분포 보존·drift 0). **초반 ~2.2% 만 엣지로 보내면 이후 각 노드 풀이 평균 100K 동작점으로 유지**되어 로컬 steering 이 명중 — inter-node 이동·축출 0 ([`ARCHITECTURE.md`](ARCHITECTURE.md) §7)
   - **축출 없는 결정론적 admission** — admit 시 full-length KV 를 예약하므로 일단 admit 된 요청은 *축출·recompute 되지 않음*(lost work 0). 메모리 압박은 preemption 이 아니라 admission backpressure(신규 거절)로 흡수하고, age-cap 이 대기를 상한(starvation 0). 공간(KV 캡)·시간(age-cap) 두 bound 가 직교 — 한 축의 압박을 다른 축의 회수로 갚지 않음
 
 ## 접근 요약
@@ -107,9 +108,9 @@
 
 ## 워크로드 적용 범위
 
-PULS 는 **특정 타겟 워크로드에 한정되지 않는다.** 배치 구성이 *길이분산 무관* steering 이기 때문이다 — former 는 풀의 평균 길이를 보지 않고, 짧은·긴 요청을 **조합**해 동작점 네 타깃(decode 개수 123 ∧ Σkv 12.3M, prefill 256 토큰 ∧ depth-work 25.6M)만 맞춘다. 따라서 **decode 와 prefill 이 풀에 풍부한 어떤 분산-서버-스케일 워크로드든** — 길이 분포가 짧든 길든 혼합이든 bimodal 이든 — 동작점에 수렴한다 (균형 ctx ~100K 는 KV 캡 유도용 중간값일 뿐, 워크로드 강제값 아님).
+PULS 는 **특정 타겟 워크로드에 한정되지 않는다.** 배치 구성이 *길이분산 무관* steering 이기 때문이다 — former 는 풀의 평균 길이를 보지 않고, 짧은·긴 요청을 **조합**해 동작점 네 타깃(배포 128: decode 개수 62 ∧ Σkv 6.15M, prefill 128 토큰 ∧ depth-work 12.8M; OPERATING_POINT §4.1)만 맞춘다. 따라서 **decode 와 prefill 이 풀에 풍부한 어떤 분산-서버-스케일 워크로드든** — 길이 분포가 짧든 길든 혼합이든 bimodal 이든 — 동작점에 수렴한다 (균형 ctx ~100K 는 KV 캡 유도용 중간값일 뿐, 워크로드 강제값 아님).
 
-- **동작점(idle≈0) 도달 조건** = 풀에 decode·prefill 이 *풍부* (고동시성 분산 서빙의 대량 상주 decode 풀 + 지속 prefill). 실서버 정상상태가 정확히 이 영역. [Runtime Validation](#runtime-validation) 에서 **3 disjoint μ-batch**를 동작점에 구성, 배치별 spread **<0.8%** 로 실증(마지막 ~3.7% = 의도된 age-cap 공정성 비용).
+- **동작점(idle≈0) 도달 조건** = 풀에 decode·prefill 이 *풍부* (고동시성 분산 서빙의 대량 상주 decode 풀 + 지속 prefill). 실서버 정상상태가 정확히 이 영역. [Runtime Validation](#runtime-validation) 에서 **2 active μ-batch + 종속성·age-cap** 를 한 sim 에 넣고 동작점에 구성, composition **100% 명중·Σdev <0.2%** 로 실증.
 - **풀이 얕으면**(저부하·짧은 decode 만) PIM 또는 GPU-A 가 노는 건 *물리적 정상*(고칠 대상 아님) — 동작점은 풀이 풍부할 때의 균형점이다.
 
 ## 가속 Source 요약
@@ -154,7 +155,7 @@ Llama-3 70B + DGX B200 + HBM4 substrate 위 4 가속 source (Aux1·Aux2·F3·F5)
 |---|---|---|
 | Aux1 | Mixed batching 가중치 재사용 | **2.0×** (closed-form), 1.97× (Colab T4 측정) |
 | Aux2 | KV bus traffic 감소 | **4.95× speedup, 79.8% 감소** |
-| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep); 풀 모델 시뮬이 **3 disjoint μ-batch 를 동작점에 구성, 배치별 spread <0.8% (balance 발현)** — [Runtime Validation](#runtime-validation) |
+| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep); 통합 lifecycle sim 이 **2 active μ-batch 를 동작점에 구성, composition 100%·Σdev <0.2% (balance 발현)** — [Runtime Validation](#runtime-validation) |
 | F5 | Channel-independent vs lock-step | **5.15× speedup** (KV variance dominant) |
 
 ### Aggregate Speedup
@@ -169,28 +170,33 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (F5 포함)**.
 
 ### Runtime Validation
 
-**합성 워크로드 + 풀 모델 스케줄러 end-to-end 시뮬레이션.** 단일 실 trace 대신 분산-서버 정상상태를 대표하는 합성 워크로드를 *고정* 해두고, idle 이 자연 수렴하는 값을 *그대로* 보고한다 — idle≈0 을 맞추려 seed 를 튜닝하지 않음(튜닝은 답을 정해놓고 맞추는 것이라 무의미).
+**통합 lifecycle 시뮬레이션 (PULS 독립, composition 명중).** 단일 실 trace 대신 분산-서버 정상상태를 대표하는 합성 워크로드를 *고정* 해두고, 콜드스타트 → 운영(steering · prefill→decode 전이 · per-completion 힐링 · age-cap)을 한 sim 에 넣어 동작점 composition 이 유지되는지 본다 — 답을 정해놓고 seed 를 튜닝하지 않음.
 
-- **워크로드(합성)** — prefill 20K\~180K 다양(sweet spot ~100K 포함), decode 8K\~40K *긴 생성* (= 분산 서버의 대량 상주 decode 풀). **warm-start seed 6,000** = 정상상태 스냅샷: 워크로드 *자체 분포* 에서 각 요청을 생애 랜덤 지점(prefill 진행도 또는 decode 진행도)에 배치 — 비편향, cold-start 램프만 생략.
-- **방식** — 풀 모델 스케줄러(admission = 풀 보충 ∥ decode-set steering ∥ prefill steering, 셋 독립). **풍부한(무한-근사) 풀**에서 staggering window 를 **3 μ-batch**(2-active + 1-여유분 window 를 3으로 강제)까지 채우고, 각 배치의 구성 + 그 배치의 *이론 floor* 유휴율을 점검.
+- **워크로드(합성)** — wide·다양 길이 풀(1K\~1M, short/mid/long 혼합), prefill·decode 풍부. **warm-start** = 정상상태 스냅샷(각 요청을 생애 랜덤 지점에 배치, cold-start 램프 생략).
+- **모델 — 2 active μ-batch (3 아님).** 한 노드는 2 μ-batch 만 동시 active(F2/F3 overlap). 한 배치의 forward pass 가 끝나면 그 멤버가 풀로 돌아오고 **(반환분 + 상주 잉여)에서 다시 1 배치 재선택**(메모리 할당 0) — *3번째 배치를 강제 구성하지 않는다.* 완료 요청은 per-completion 힐링으로 같은 크기 보충, prefill 완료는 decode 로 전이, 공정성 age-cap = 5. 배포 prefill 128.
 
-무한-근사 풀에서 3 μ-batch 동시 구성. 각 배치가 동작점(decode 123 / Σkv 12.3M, prefill 256 / depth-work 25.6M)에 *독립* steering; 배치별 idle 은 그 배치의 3자원 이론 floor (측정 idle 은 자원 공유라 window 전체값):
+**① composition — 동작점 명중 ([cluster_lifecycle.cpp](implementation/analysis/cluster_lifecycle.cpp), 종속성·age-cap 포함):**
 
-| μ-batch | decode | Σkv | prefill | depth-work | floor idle GPU-A / PIM / FFN | spread |
-|---|---|---|---|---|---|---|
-| **mb#0** | **123** | 12.30M | 256 | 25.60M | 0.0 / 0.8 / 0.0% | **0.77%** |
-| **mb#1** | **123** | 12.32M | 256 | 25.61M | 0.0 / 0.8 / 0.0% | **0.79%** |
-| **mb#2** | 108 | 12.37M | 256 | 25.58M | 0.7 / 0.0 / 3.7% | **3.74%** |
-| 타깃 | 123 | 12.3M | 256 | 25.6M | — | ~0 |
+| 2 active μ-batch (완료시 재구성) | 동작점 타깃 | 명중 | Σdev |
+|---|---|---|---|
+| **decode** | 62 ∧ Σkv 6.15M | **100%** | **0.20%** |
+| **prefill** | 128 토큰 ∧ depth-work 12.8M | **100%** | **0.07%** |
 
-*(셋 다 disjoint — 배치 간 요청 겹침 0.)*
+**② floor idle — 명중 시 op-time 유휴 (composition 과 *별개* 정보).** composition 이 명중하면 세 자원 시간이 일치 → 배치별 *이론 floor* 유휴율. floor idle 은 idle 비율이라 **prefill-invariant**(§4, op-time 균형) — 256 proto 측정 = 128 동형:
+
+| 2 active μ-batch | floor idle GPU-A / PIM / FFN | spread |
+|---|---|---|
+| **mb#0** | 0.0 / 0.8 / 0.0% | 0.77% |
+| **mb#1** | 0.0 / 0.8 / 0.0% | 0.79% |
+
+→ 가장 한가한 자원도 idle ≤0.8% = **idle ≈ 0** — **F2(projection‖PIM double-buffering)·F3(inter-instance pipeline) 발현의 정량 증거**. floor 증명(측정 ≈ 이론 floor)은 [`ARCHITECTURE.md`](ARCHITECTURE.md) §6.8.
 
 해석:
 
-- **각 배치가 동작점 명중** — Σkv 12.3M / prefill 256 / depth-work 25.6M 을 세 배치 모두 공유 풀에서 *독립적으로* 충족(길이분산 무관). 앞 둘은 decode 개수 123 도 정확, 배치별 spread <0.8% — 세 per-cycle 자원 시간 일치, **F2(projection ‖ PIM double-buffering)·F3(inter-instance pipeline) 발현의 정량 증거**.
-- **마지막 배치가 튐 (mb#2: 개수 108, spread 3.74%) — age-cap 때문.** 세 번째 배치 구성 시점엔 warm-start 가 풀 멤버 대부분을 "대기" 상태로 만들어, age-cap 이 steering 을 누르고 *이미 오래 기다린* 요청을 강제 포함 — *의도된 공정성 메커니즘*(대기 상한, starvation 0)이지 dispatch 결함이 아님. 실서버 연속 도착에선 요청이 fresh 라 age-cap 이 산발적으로만 발동 → 꼬리 소멸(순수 steering → 셋 다 123). 전체 스펙트럼 + floor 증명(측정 ≈ 이론 floor) — [`ARCHITECTURE.md`](ARCHITECTURE.md) §6.8.
-- **throughput 은 설계상 지속** — per-cycle decode 예산이 동작점에 고정(123, KV 캡에 먼저 닿으면 그 이하)이라 풀이 풍부한 한 매 cycle 이 고정된 토큰 양을 처리 → 지속성은 *별개로 열린 축이 아니라 동작점 고정의 구조적 귀결*. 본 검증 대상은 per-cycle 균형(idle); 드레인·완료·KV 누수 0 은 합성 acceptance(전부 완료·KV remaining=initial·정상 종료)로 별도 검증. 절대 tok/s 는 silicon 보정 cycle 시간 필요(Honest Disclosure 참조).
-- **클러스터 스케일 — 노드 풀 100K 센터링.** 서버스케일(노드 수백–수천)에선 글로벌 도착 평균이 100K 보다 높아 노드별 풀이 drift → count/Σkv 동시 이탈로 idle 폭발. **greedy cold-start + 전략적 healing**(완료로 빈 자리를 풀에서 `ideal` 최근접 보충, inter-node swap 0)으로 **초반 ~2.68% 엣지 비용만 감수하면 그 뒤로 각 노드를 평균 100K 동작점에 무한정 유지**(per-completion healing = toxic-fit 라 긴 요청도 보존, drift 0, 123-배치 Σ편차 <0.75%). 원리·E 스윕·측정은 [`ARCHITECTURE.md`](ARCHITECTURE.md) §7.
+- **age-cap 꼬리 없음 (2-active 구조).** 옛 검증의 "3번째 배치 튐(108개·spread 3.7%)"은 *강제된 3rd 배치*에서 warm-start 대기 멤버가 age-cap 을 유발한 것. 2-active 모델은 3rd 를 강제하지 않고 (완료분 + 잉여)로 *재구성*만 하므로 그 꼬리가 구조적으로 사라진다.
+- **종속성·age-cap 넣고도 유지.** prefill→decode 전이와 공정성 age-cap = 5 를 다 넣어도 두 composition 이 무너지지 않음 — 로직(steering · greedy · healing · age-cap · KV-센터링)은 *스케일 불변*, 동작점만 상수(prefill 256↔128 동형).
+- **throughput 은 설계상 지속** — per-cycle decode 예산이 동작점에 고정(62, KV 캡에 먼저 닿으면 그 이하)이라 풀이 풍부한 한 매 cycle 이 고정 토큰 양을 처리 → 지속성은 동작점 고정의 구조적 귀결. 절대 tok/s 는 silicon 보정 cycle 시간 필요(Honest Disclosure).
+- **클러스터 스케일 — 글로벌 스케줄러.** 서버스케일(노드 수백–수천)에선 글로벌 도착 평균이 100K 보다 높아 노드별 풀이 drift → idle 폭발. **글로벌 스케줄러**(greedy 콜드스타트: 긴 것 엣지 shed + interleave-greedy · per-completion 힐링 = toxic-fit)로 **초반 ~2.2% 엣지 비용만 감수하면 그 뒤로 각 노드를 평균 100K 동작점에 무한정 유지**(긴 요청 보존, drift 0). 원리·E 스윕·on2 측정은 [`ARCHITECTURE.md`](ARCHITECTURE.md) §7 / [cluster_balance.cpp](implementation/analysis/cluster_balance.cpp).
 
 ### Honest Disclosure
 
