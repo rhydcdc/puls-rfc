@@ -125,6 +125,9 @@ def main():
     ap.add_argument("--sample-k", type=int, default=5_000)
     ap.add_argument("--converge-eps", type=float, default=0.01)
     ap.add_argument("--label", default="floor")
+    ap.add_argument("--prefill", type=int, default=None,
+                    help="동작점 prefill 스케일 오버라이드 (배포 128). 256 도출 기준의 모든 동작점 값을 "
+                         "prefill/256 으로 스케일: decode_count·kv_operating·prefill_kv_work·kv_capacity + PF_RATE.")
     ap.add_argument("--age-cap", type=int, default=None,
                     help="age_cap 오버라이드 (item 4 ablation; 큰 값=∞ 무력화)")
     ap.add_argument("--seed", type=int, default=None,
@@ -150,6 +153,18 @@ def main():
     run = Run.init("puls_sched.config:default_dummy_config", ns.trace,
                    f"analysis/_scratch_{ns.label}")
     sched = run.scheduler
+    if ns.prefill is not None:   # 동작점 prefill 스케일 (배포 128 = 모든 값 ÷2; 256 도출 기준)
+        global PF_RATE
+        s = ns.prefill / 256.0
+        ad = sched.config.admission
+        PF_RATE = ns.prefill
+        object.__setattr__(ad, "prefill_chunk_default", ns.prefill)
+        object.__setattr__(ad, "decode_count_target", round(ad.decode_count_target * s))
+        object.__setattr__(ad, "kv_operating_target_tokens", round(ad.kv_operating_target_tokens * s))
+        object.__setattr__(ad, "prefill_kv_work_target_tokens", round(ad.prefill_kv_work_target_tokens * s))
+        new_cap = round(ad.kv_capacity_aggregate * s)
+        object.__setattr__(ad, "kv_capacity_aggregate", new_cap)
+        sched.kv_accountant._capacity = new_cap
     if ns.age_cap is not None:   # frozen dataclass — in-place 우회(모든 컴포넌트가 동일 객체 참조)
         object.__setattr__(sched.config.admission, "age_cap", ns.age_cap)
     if ns.kv_cap is not None:
