@@ -1,6 +1,6 @@
 # PULS — PIM-Unified LLM Serving
 
-> ✅ **Scheduler logic implemented & validated** — The integrated lifecycle sim (cold-start → steering · prefill→decode transition · per-completion healing · age-cap) composes **2 active μ-batches** to the operating point (deployed 128: decode 62 / Σkv 6.15M, prefill 128 / depth-work 12.8M), at **composition 100% · Σdev <0.2%** → floor idle ≈0 by the §2 balance. At cluster scale the global scheduler holds each node pool at 100K after a ~2.2% initial edge ([Runtime Validation](#runtime-validation)).
+> ✅ **Scheduler logic implemented & validated** — The integrated lifecycle sim (cold-start → steering · prefill→decode transition · per-completion healing · age-cap) composes **2 active μ-batches** to the operating point (deployed 128: decode 62 / Σkv 6.15M, prefill 128 / depth-work 12.8M), at **composition 100% · Σdev <0.2%** → idle ≈0 by the §2 balance. At cluster scale the global scheduler holds each node pool at 100K after a ~2.2% initial edge ([Runtime Validation](#runtime-validation)).
 
 **Scheduler-aware co-design of HBM-PIM and production LLM serving stack.**
 
@@ -180,21 +180,12 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (including F5)
 - **Workload (synthetic)** — a wide, diverse-length pool (1K–1M, short/mid/long mixed), prefill and decode abundant. **warm-start** = a steady-state snapshot (each request placed at a random lifecycle point, skipping the cold-start ramp).
 - **Model — 2 active μ-batch (not 3).** A node runs only 2 μ-batches concurrently (F2/F3 overlap). When one batch's forward pass ends, its members return to the pool and **a new batch is re-selected from (the returned members + the standing surplus)** (zero memory allocation) — *no third batch is force-composed.* Completed requests are refilled like-for-like by per-completion healing, completed prefills transition to decode, age-cap = 5 for fairness. Deployed prefill 128.
 
-**① composition — operating-point hit ([cluster_lifecycle.cpp](implementation/analysis/cluster_lifecycle.cpp), with dependency · age-cap):**
+**composition — operating-point hit ([cluster_lifecycle.cpp](implementation/analysis/cluster_lifecycle.cpp), with dependency · age-cap):**
 
 | 2 active μ-batch (re-composed on completion) | operating-point target | hit | Σdev |
 |---|---|---|---|
 | **decode** | 62 ∧ Σkv 6.15M | **100%** | **0.20%** |
 | **prefill** | 128 tokens ∧ depth-work 12.8M | **100%** | **0.07%** |
-
-**② floor idle — per-batch idle when hit (information *separate* from composition).** When the composition hits, the three resource times match → each batch's *theoretical floor* idle. floor idle is an idle *fraction*, hence **prefill-invariant** (§4, op-time balance) — the 256-derivation measurement = the 128 deployment alike:
-
-| 2 active μ-batch | floor idle GPU-A / PIM / FFN | spread |
-|---|---|---|
-| **mb#0** | 0.0 / 0.8 / 0.0% | 0.77% |
-| **mb#1** | 0.0 / 0.8 / 0.0% | 0.79% |
-
-→ even the most idle resource is ≤0.8% = **idle ≈ 0** — **quantitative evidence that F2 (projection ‖ PIM double-buffering) and F3 (inter-instance pipeline) manifest.** Floor proof (measured ≈ theoretical floor) in [`ARCHITECTURE.md`](ARCHITECTURE.md) §6.8.
 
 Interpretation:
 
@@ -208,7 +199,7 @@ Interpretation:
 - **HBM4 substrate** = hypothetical projection (current production absent; ARCH §3.1 literal alignment).
 - **η_HBM_external** = H100 HBM3 measurement extended to HBM4 (Framing A).
 - **F1·F2 ablation + comparative baseline (vLLM / Sarathi-Serve)** = deferred to subsequent calibration (calibration-heavy).
-- **Runtime Validation = synthetic workload** — a synthetic distribution representing the distributed-server steady state (large standing decode pool + continuous prefill) + an unbiased warm-start seed (skips only the cold-start ramp). Cold-start full prefill of a real 1M-ctx trace is hundreds of millions of steps, impractical to simulate directly → warm-start represents the *standing pool*. The validation target is idle (per-cycle balance), not absolute latency.
+- **Runtime Validation = synthetic workload** — a synthetic distribution representing the distributed-server steady state (large standing decode pool + continuous prefill) + an unbiased warm-start seed (skips only the cold-start ramp). Cold-start full prefill of a real 1M-ctx trace is hundreds of millions of steps, impractical to simulate directly → warm-start represents the *standing pool*. The validation target is composition (per-cycle balance), not absolute latency.
 - **Absolute metrics** (TTFT, TPOT, throughput) = silicon absent, permanently out of scope.
 
 ## Limitations / Disclosure
@@ -238,8 +229,8 @@ The core scheduler policy of PULS ([`ARCHITECTURE.md`](ARCHITECTURE.md) §6) is 
 ## Repository
 
 - [`README.md`](README.md) — this document (entry point)
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — architecture body (motivation, design principles, substrate, instance disaggregation, scheduler integration, pool-model admission + idle floor §6.8, layer flow, prior-art comparison)
-- [`OPERATING_POINT.md`](OPERATING_POINT.md) — canonical Phase-2 operating-point & batch-composition spec (pool model, steering targets, idle-floor basis)
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — architecture body (motivation, design principles, substrate, instance disaggregation, scheduler integration, pool-model admission + 2-active composition validation §6.8, layer flow, prior-art comparison)
+- [`OPERATING_POINT.md`](OPERATING_POINT.md) — canonical Phase-2 operating-point & batch-composition spec (pool model, steering targets, operating-point basis)
 - [`docs/scheduler_policy.html`](docs/scheduler_policy.html) — interactive reading guide (companion to ARCHITECTURE.md §6)
 - [`LICENSE`](LICENSE) — Apache 2.0
 

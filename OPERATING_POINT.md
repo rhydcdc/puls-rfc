@@ -52,12 +52,12 @@ projection+prefill-attn / FFN=인스턴스 B)의 시간을 맞춰 인스턴스 �
 
 세 시간이 ≈25.5µs 로 모이면 overlap(F2·F3) 시 idle ≈ 0. 허용 ±10% → 가장 한가한 자원 idle ≤ ~10%.
 
-> **PIM 숨음 (floor 검증).** 동작점에서 **t_pim ≤ t_gpuA**(prefill 256 측정 50.43 ≤ 52.89µs;
+> **PIM 숨음.** 동작점에서 **t_pim ≤ t_gpuA**(prefill 256 측정 50.43 ≤ 52.89µs;
 > 128 배포는 ~절반, 비율·margin 불변) — PIM
-> decode-attn 이 GPU-A 윈도우에 *완전히 숨고 여유 4.6%*. PREFILL_ATTN 이 t_gpuA 의 80% 라
+> decode-attn 이 GPU-A 윈도우에 *완전히 숨는다*. PREFILL_ATTN 이 t_gpuA 의 80% 라
 > GPU-A 가 병목이고 PIM·FFN 이 그 뒤에 가려진다. 한때 둔 `pim_slack_safety_margin`(decode 가
 > prefill compute-bound 에 못 숨을까 봐 둔 10% 헤지)은 **불필요로 판명** — 어떤 산식에도 미사용
-> 이었고(타깃은 op-time 균형서 직접 도출), floor 가 숨음을 확정. 기준치 재계산 불요. 상세 ARCH §6.8.
+> 이었고(타깃은 op-time 균형서 직접 도출), op-time 균형이 숨음을 확정. 기준치 재계산 불요.
 
 ## 3. former 알고리즘 — 로컬 그리디 steering + age-cap
 
@@ -236,7 +236,7 @@ ctx 100K 는 하드웨어 상수라 불변(§4); prefill 은 *스케일 knob* �
   `ideal=(target_kv−S)/(target_count−n)` 가장 가까운 디코더 선택(단 wait≥AGE_CAP 은 강제) →
   (개수 62, Σkv 6.15M [배포 128]; 도출 256 은 123·12.3M) 동시 수렴 + starvation 0. prefill 도
   depth-합 steering+age-cap. config: target_count·target_kv·prefill·age_cap. (= S2 가 지운
-  max_batch_size 를 "FFN 개수 타깃 62"으로 의미 정정 복원.) idle floor 검증은 ARCH §6.8 /
+  max_batch_size 를 "FFN 개수 타깃 62"으로 의미 정정 복원.) 구성 검증은 ARCH §6.8 /
   [REPORT](implementation/debug_phase2/REPORT.md). 통합 lifecycle 검증은 §4.1.
 - prefill 값 선택은 두 제약의 균형: **메모리는 128**(64 스택 적합, §4.1) · **MFU 안전판은 256**
   (batch 379 ≫ knee). FFN MFU knee 가 미보정(silicon 부재)이라 128(batch 190)이 포화하는지는

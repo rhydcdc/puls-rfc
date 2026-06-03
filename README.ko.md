@@ -1,6 +1,6 @@
 # PULS — PIM-Unified LLM Serving
 
-> ✅ **스케줄러 로직 구현·검증 완료** — 통합 lifecycle sim(콜드스타트 → steering · prefill→decode 전이 · per-completion 힐링 · age-cap)이 **2 active μ-batch**를 동작점(배포 128: decode 62 / Σkv 6.15M, prefill 128 / depth-work 12.8M)에 구성, **composition 100% 명중 · Σdev <0.2%** → §2 균형으로 floor idle ≈0. 클러스터 스케일은 글로벌 스케줄러로 초반 ~2.2% 엣지 후 노드 풀 100K 유지 ([Runtime Validation](#runtime-validation)).
+> ✅ **스케줄러 로직 구현·검증 완료** — 통합 lifecycle sim(콜드스타트 → steering · prefill→decode 전이 · per-completion 힐링 · age-cap)이 **2 active μ-batch**를 동작점(배포 128: decode 62 / Σkv 6.15M, prefill 128 / depth-work 12.8M)에 구성, **composition 100% 명중 · Σdev <0.2%** → §2 균형으로 idle ≈0. 클러스터 스케일은 글로벌 스케줄러로 초반 ~2.2% 엣지 후 노드 풀 100K 유지 ([Runtime Validation](#runtime-validation)).
 
 **Scheduler-aware co-design of HBM-PIM and production LLM serving stack.**
 
@@ -175,21 +175,12 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (F5 포함)**.
 - **워크로드(합성)** — wide·다양 길이 풀(1K\~1M, short/mid/long 혼합), prefill·decode 풍부. **warm-start** = 정상상태 스냅샷(각 요청을 생애 랜덤 지점에 배치, cold-start 램프 생략).
 - **모델 — 2 active μ-batch (3 아님).** 한 노드는 2 μ-batch 만 동시 active(F2/F3 overlap). 한 배치의 forward pass 가 끝나면 그 멤버가 풀로 돌아오고 **(반환분 + 상주 잉여)에서 다시 1 배치 재선택**(메모리 할당 0) — *3번째 배치를 강제 구성하지 않는다.* 완료 요청은 per-completion 힐링으로 같은 크기 보충, prefill 완료는 decode 로 전이, 공정성 age-cap = 5. 배포 prefill 128.
 
-**① composition — 동작점 명중 ([cluster_lifecycle.cpp](implementation/analysis/cluster_lifecycle.cpp), 종속성·age-cap 포함):**
+**composition — 동작점 명중 ([cluster_lifecycle.cpp](implementation/analysis/cluster_lifecycle.cpp), 종속성·age-cap 포함):**
 
 | 2 active μ-batch (완료시 재구성) | 동작점 타깃 | 명중 | Σdev |
 |---|---|---|---|
 | **decode** | 62 ∧ Σkv 6.15M | **100%** | **0.20%** |
 | **prefill** | 128 토큰 ∧ depth-work 12.8M | **100%** | **0.07%** |
-
-**② floor idle — 명중 시 op-time 유휴 (composition 과 *별개* 정보).** composition 이 명중하면 세 자원 시간이 일치 → 배치별 *이론 floor* 유휴율. floor idle 은 idle 비율이라 **prefill-invariant**(§4, op-time 균형) — 256 proto 측정 = 128 동형:
-
-| 2 active μ-batch | floor idle GPU-A / PIM / FFN | spread |
-|---|---|---|
-| **mb#0** | 0.0 / 0.8 / 0.0% | 0.77% |
-| **mb#1** | 0.0 / 0.8 / 0.0% | 0.79% |
-
-→ 가장 한가한 자원도 idle ≤0.8% = **idle ≈ 0** — **F2(projection‖PIM double-buffering)·F3(inter-instance pipeline) 발현의 정량 증거**. floor 증명(측정 ≈ 이론 floor)은 [`ARCHITECTURE.md`](ARCHITECTURE.md) §6.8.
 
 해석:
 
@@ -203,7 +194,7 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (F5 포함)**.
 - **HBM4 substrate** = hypothetical projection (현재 production 부재; ARCH §3.1 literal 정합).
 - **η_HBM_external** = H100 HBM3 측정값을 HBM4 로 확장 (Framing A).
 - **F1·F2 ablation + 비교 baseline (vLLM / Sarathi-Serve)** = 후속 calibration 으로 연기 (calibration-heavy).
-- **Runtime Validation = 합성 워크로드** — 분산-서버 정상상태(대량 상주 decode 풀 + 지속 prefill)를 대표하는 합성 분포 + warm-start seed(비편향, cold-start 램프 생략). 실 1M-ctx trace 의 cold-start 전체 prefill 은 수억 step 이라 직접 시뮬 비현실적 → warm-start 가 *상주 풀* 을 대표. idle(per-cycle 균형)이 검증 대상이며, 절대 latency 아님.
+- **Runtime Validation = 합성 워크로드** — 분산-서버 정상상태(대량 상주 decode 풀 + 지속 prefill)를 대표하는 합성 분포 + warm-start seed(비편향, cold-start 램프 생략). 실 1M-ctx trace 의 cold-start 전체 prefill 은 수억 step 이라 직접 시뮬 비현실적 → warm-start 가 *상주 풀* 을 대표. composition(per-cycle 균형)이 검증 대상이며, 절대 latency 아님.
 - **절대 metric** (TTFT, TPOT, throughput) = silicon 부재로 영구 out of scope.
 
 ## Limitations / Disclosure
@@ -226,8 +217,8 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (F5 포함)**.
 ## Repository
 
 - [`README.md`](README.md) — 본 문서 (entry point)
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — 아키텍처 본문 (motivation, design principles, substrate, instance disaggregation, scheduler integration, 풀 모델 admission + idle floor §6.8, layer flow, prior art 비교)
-- [`OPERATING_POINT.md`](OPERATING_POINT.md) — Phase-2 동작점 & 배치 구성 canonical spec (풀 모델, steering 타깃, idle-floor 근거)
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — 아키텍처 본문 (motivation, design principles, substrate, instance disaggregation, scheduler integration, 풀 모델 admission + 2-active 구성 검증 §6.8, layer flow, prior art 비교)
+- [`OPERATING_POINT.md`](OPERATING_POINT.md) — Phase-2 동작점 & 배치 구성 canonical spec (풀 모델, steering 타깃, 동작점 구성 근거)
 - [`LICENSE`](LICENSE) — Apache 2.0
 
 ## License

@@ -2082,7 +2082,7 @@ pre.code-block .var { color: #f9a8d4; }
             </li>
             <li class="lookahead">
               <span class="item-label">PIM hidden behind compute-bound GPU</span>
-              The GPU stages (QKV / projection / prefill-attn) are compute-bound and leave the HBM bus mostly idle; PIM decode-attn overlaps that window via its in-place internal path, so it adds nothing to the per-μ-batch cycle (F2 · F3, §6.8 · §5.3).
+              The GPU stages (QKV / projection / prefill-attn) are compute-bound and leave the HBM bus mostly idle; PIM decode-attn overlaps that window via its in-place internal path, so it adds nothing to the per-μ-batch cycle (F2 · F3, §5.3).
             </li>
             <li>
               <span class="item-label">P at Init = tail state</span>
@@ -2210,7 +2210,7 @@ pre.code-block .var { color: #f9a8d4; }
           </div>
         </div>
         <div class="source-mechanism">
-          In steady state, Instance A processes μ-batch <b>M</b> (attention + projection) while Instance B processes μ-batch <b>M-1</b> (FFN) — the two instances handle <i>different</i> μ-batches at the same wall-clock instant. The per-layer effective time drops from <code>t_A + t_B</code> to <code>max(t_A, t_B)</code>. The pool-model sim composes <b>3 disjoint μ-batches to the operating point</b>, each at a three-resource idle spread <b>&lt;0.8%</b> (per-batch theoretical floor) — the three per-cycle times match to &lt;1%, confirming both instances actively contribute (§6.8).
+          In steady state, Instance A processes μ-batch <b>M</b> (attention + projection) while Instance B processes μ-batch <b>M-1</b> (FFN) — the two instances handle <i>different</i> μ-batches at the same wall-clock instant. The per-layer effective time drops from <code>t_A + t_B</code> to <code>max(t_A, t_B)</code>. The pool-model sim composes <b>μ-batches to the operating point</b> where the three per-cycle times match to &lt;1%, confirming both instances actively contribute (§6.8).
         </div>
       </div>
 
@@ -2430,7 +2430,7 @@ pre.code-block .var { color: #f9a8d4; }
       <div class="section-header">
         <div class="section-eyebrow">§ 5.7 — QUANTITATIVE PROJECTION</div>
         <h1 class="section-title">Results</h1>
-        <div class="section-lede">Calibrated projection on Llama-3 70B + DGX B200 + HBM4 hypothetical substrate, plus a runtime validation that the pool-model scheduler reaches the operating point and that its measured idle is the proven algorithm floor. Absolute metrics (TTFT, TPOT, throughput) are out of scope — silicon absent.</div>
+        <div class="section-lede">Calibrated projection on Llama-3 70B + DGX B200 + HBM4 hypothetical substrate, plus a runtime validation that the pool-model scheduler reaches the operating point. Absolute metrics (TTFT, TPOT, throughput) are out of scope — silicon absent.</div>
       </div>
 
       <div class="result-block">
@@ -2482,7 +2482,7 @@ pre.code-block .var { color: #f9a8d4; }
           One integrated sim (<code class="inline">cluster_lifecycle.cpp</code>) runs cold-start → steering · prefill→decode transition · per-completion healing · age-cap 5 on a wide synthetic pool. A node runs <b>2 active μ-batches</b>; when one finishes its forward pass it is <b>re-composed from (returned members + surplus)</b> — <i>no 3rd batch is force-composed</i>. Deployed prefill 128. Statistics are over the <b>last 500 of 1000 rounds × 16 nodes = 8,000 node-rounds</b> (16,000 decode · 8,000 prefill batches).
         </p>
 
-        <p style="font-size:12.5px; margin: 4px 0 6px 0;"><b>① composition — operating-point hit (with dependency · age-cap)</b></p>
+        <p style="font-size:12.5px; margin: 4px 0 6px 0;"><b>composition — operating-point hit (with dependency · age-cap)</b></p>
         <table class="result-table">
           <thead><tr><th>2 active μ-batch</th><th>operating-point target</th><th>hit</th><th>Σdev</th></tr></thead>
           <tbody>
@@ -2491,17 +2491,6 @@ pre.code-block .var { color: #f9a8d4; }
           </tbody>
         </table>
 
-        <p style="font-size:12.5px; margin: 12px 0 6px 0;"><b>② floor idle — per-batch idle when hit</b> (prefill-invariant; separate from composition)</p>
-        <table class="result-table">
-          <thead><tr><th>2 active μ-batch</th><th>floor idle G / P / F</th><th>spread</th></tr></thead>
-          <tbody>
-            <tr><td class="mono">mb#0</td><td class="mono">0.0 / 0.8 / 0.0%</td><td class="mono"><b>0.77%</b></td></tr>
-            <tr><td class="mono">mb#1</td><td class="mono">0.0 / 0.8 / 0.0%</td><td class="mono"><b>0.79%</b></td></tr>
-          </tbody>
-        </table>
-        <p style="margin-top:12px; font-size:12.5px; color:var(--color-muted); line-height:1.55;">
-          Both targets hit at <b>100% · Σdev &lt;0.2%</b> even with the prefill→decode dependency and age-cap 5. Floor idle ≈ 0 (even the most idle resource ≤0.8%) — <b>quantitative evidence that F2 (projection ‖ PIM double-buffering) and F3 (inter-instance pipeline) manifest</b>. <b>No age-cap tail</b>: the old 3-forced test spiked the 3rd batch (count 108 · spread 3.7%) only because a 3rd batch was forced; the 2-active model re-composes instead, so that tail vanishes structurally. Floor proof: <code class="inline">ARCHITECTURE.md §6.8</code>.
-        </p>
       </div>
 
       <div class="result-block">
