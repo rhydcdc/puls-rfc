@@ -32,7 +32,6 @@ static long long       PF_WORK   = 25600000LL;
 static int             DEC_POOL  = 300;          // 동작점: 2 μ-batch(246) + 잉여 54
 static int             PF_POOL   = 300;          // 프리필 풀(abundant — env PF_POOL 로 스윕)
 static int             AGE_CAP   = 5;            // 배치 구성 fairness (env AGE_CAP 로 스윕)
-static const double    EDGE_BAND = 1000.0;
 
 static mt19937 rng(7);
 static inline double U(){ return uniform_real_distribution<double>(0.0,1.0)(rng); }
@@ -43,17 +42,6 @@ static int sampleB(){ double u=U();
   return logU(256000,1000000); }
 // throughput 균형: avg_dtot ≈ avg_prompt × 123/256
 static int sampleDtot(int p){ return max(1000,(int)(p*(123.0/256.0)*(0.6+0.8*U()))); }
-// 엣지 게이트: 풀 평균 100K 로(긴 것 shed) — 센터 프롬프트 반환
-static int centeredPrompt(){
-  static vector<int> buf; static int idx=0;
-  if(idx>=(int)buf.size()){
-    vector<int> w; for(int i=0;i<20000;i++) w.push_back(sampleB());
-    sort(w.rbegin(),w.rend()); long long s=0; for(int x:w)s+=x; int c=w.size(),i=0;
-    while(c>0 && (double)s/c > TGT_AVG+EDGE_BAND){ s-=w[i]; c--; i++; }
-    buf.assign(w.begin()+i,w.end()); shuffle(buf.begin(),buf.end(),rng); idx=0;
-  }
-  return buf[idx++];
-}
 
 struct Req { int prompt,dtot,pf,dec,wait; };
 

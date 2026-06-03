@@ -17,12 +17,12 @@
 using namespace std;
 
 static const int       Z        = 256;
-static const long long CAP       = 30000000LL;
-static const double    TGT_AVG   = 100000.0;
-static const int       TGT_CNT   = 123;
-static const long long TGT_KV    = 12300000LL;
-static const int       NODE_MAX  = 300;
-static const int       NODE_MIN  = 246;
+static const double    TGT_AVG   = 100000.0;       // ctx 100K = 하드웨어 상수(불변)
+static long long       CAP       = 30000000LL;     // 동작점 스케일 (env PREFILL 로 128↔256)
+static int             TGT_CNT   = 123;
+static long long       TGT_KV    = 12300000LL;
+static int             NODE_MAX  = 300;            // = CAP/TGT_AVG
+static int             NODE_MIN  = 246;            // = 2×TGT_CNT (2 μ-batch 바닥)
 
 static mt19937 rng(12345);
 static inline double U(){ return uniform_real_distribution<double>(0.0,1.0)(rng); }
@@ -154,14 +154,21 @@ static vector<int> trim(vector<int> kept, int target){
 }
 
 int main(){
+  if(const char* e=getenv("PREFILL")){ double s=atoi(e)/256.0;   // 동작점 스케일: 전부 prefill 에 선형
+    TGT_CNT=(int)llround(123*s); TGT_KV=(long long)llround(12300000.0*s);
+    CAP=(long long)llround(30000000.0*s); NODE_MAX=(int)llround(CAP/TGT_AVG); NODE_MIN=2*TGT_CNT; }
+  if(const char* e=getenv("NODE_MAX")) NODE_MAX=atoi(e);   // 디코드 풀 크기(=2×TGT_CNT+잉여) 직접 스윕
+  if(const char* e=getenv("SEED")) rng.seed(atoi(e));      // 노이즈 확인용 시드
   const int P = 180000;
-  printf("분포B short20/mid70/long10, Z=%d, cap30M. on-point=compose(123,12.3M±10%%).\n",Z);
-  printf("on1=단일배치%%, on2=2 disjoint 배치%%(=floor 246 진짜 의미).\n\n");
+  printf("분포B short20/mid70/long10, Z=%d, cap=%.1fM. on-point=compose(%d, %.2fM±10%%). NODE_MAX=%d NODE_MIN=%d\n",
+         Z, CAP/1e6, TGT_CNT, TGT_KV/1e6, NODE_MAX, NODE_MIN);
+  printf("on1=단일배치%%, on2=2 disjoint 배치%%(=floor %d 진짜 의미). edge%%=엣지노드로 shed 비율.\n\n", NODE_MIN);
+  char rlab[24]; snprintf(rlab,sizeof rlab,"∈%d-%d",NODE_MIN,NODE_MAX);   // 노드 count 범위 라벨(동작점 따라)
 
   // ── sim1: cold-start greedy ──────────────────────────────────────────────
   printf("===== sim1: cold-start greedy (interleave) — E 스윕 =====\n");
   printf("%6s %6s %6s | %6s %7s %9s | %8s %8s | %6s %6s\n",
-    "E(K)","edge#","edge%","Ccap","cntMin","∈246-300","|dev|avg","|dev|max","on1%","on2%");
+    "E(K)","edge#","edge%","Ccap","cntMin",rlab,"|dev|avg","|dev|max","on1%","on2%");
   vector<double> Es={0,1000,2000,5000,10000,20000};
   for(double E:Es){
     int shed; double mu; vector<int> kept=gate(P,E,shed,mu);
@@ -177,7 +184,7 @@ int main(){
   // 보충(toxic-fit). edge 0(필요한 것만 당김). 시간에 따라 안정(drift 없음) 확인 = early vs late.
   printf("\n===== sim3: churn + per-completion 힐링 (E=1K cold-start, 완료확률 p, ROUNDS 라운드) =====\n");
   printf("%5s %6s | %6s %7s %9s | %8s %8s | %6s %6s %8s\n",
-    "p%","window","cntMin","cntMean","∈246-300","|dev|avg","|dev|max","on1%","on2%","pulls/rd");
+    "p%","window","cntMin","cntMean",rlab,"|dev|avg","|dev|max","on1%","on2%","pulls/rd");
   vector<double> Ps={0.01,0.03,0.05};
   const int ROUNDS=300, WARM=150;
   for(double p:Ps){
@@ -217,8 +224,8 @@ int main(){
     printf("%5s %6s | %6d %7.1f %8.1f%% | %8.0f %8.0f | %5.1f %5.1f %8.0f\n",
       "", "late", lateCntMin, lateCntMean/lateN, lateInR/lateN, lateDevA/lateN,
       lateDevM, lateO1/lateN, lateO2/lateN, latePulls/lateN);
-    printf("%5s %6s | 실제 123-배치: 평균 %.0f토큰(타깃 100K), Σ|dev| %.2f%%(타깃 12.3M, ±10%% 밴드)\n",
-      "", "batch", bMean/bN, 100.0*bSumDev/bN);
+    printf("%5s %6s | 실제 %d-배치: 평균 %.0f토큰(타깃 100K), Σ|dev| %.2f%%(타깃 %.2fM, ±10%% 밴드)\n",
+      "", "batch", TGT_CNT, bMean/bN, 100.0*bSumDev/bN, TGT_KV/1e6);
   }
   printf("(early=warmup 직후 1라운드, late=마지막 %d라운드 평균. drift 없으면 early≈late.)\n", ROUNDS-WARM);
 
@@ -258,6 +265,6 @@ int main(){
       100.0*pullLong/(pullTot>0?pullTot:1), S.onp2, S.devAvg);
   }
   printf("(long%%cold=cold-start 상주 긴요청 비율, long%%late=300rd 후. per-completion 이 보존하면 toxic-fit ✓)\n");
-  printf("batch 줄 = 노드 상주 풀에서 실제 뽑은 123개 배치의 평균/Σ편차 — 300-평균이 아니라 이게 동작점.\n");
+  printf("batch 줄 = 노드 상주 풀에서 실제 뽑은 %d개 배치의 평균/Σ편차 — %d-평균이 아니라 이게 동작점.\n", TGT_CNT, NODE_MAX);
   return 0;
 }
