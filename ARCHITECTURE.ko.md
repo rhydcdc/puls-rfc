@@ -674,5 +674,5 @@ batched 는 긴 요청을 완전히 굶겨(8.04% → 0.01%) 분포를 ~100K 로 
 본 architecture 문서의 정량 coverage:
 
 - **Source decomposition** (Aux1·Aux2·F3·F5, η_HBM sensitivity sweep) — calibrated projection, [`README.md`](README.md#results) 참조
-- **F1·F2 ablation, MFU plateau, admission ceiling, deadband width** — 후속 calibration 으로 연기
+- **F1·F2 ablation, MFU plateau, admission ceiling** — 후속 calibration 으로 연기
 - **절대 metric** (TTFT, TPOT, throughput) — silicon 부재로 영구 out of scope

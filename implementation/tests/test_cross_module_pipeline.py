@@ -69,7 +69,7 @@ def test_admission_to_dispatch_pim_op_time_chain(scheduler_core):
     풀 모델: decode KV 검증은 디코더(prompt_len=0)로 (새 PREFILL 요청은 decode_tokens 에 안 듦)."""
     scheduler_core.request_queue.push(Request(id=0, prompt_len=0, kv_length=200))
     scheduler_core.request_queue.push(Request(id=1, prompt_len=0, kv_length=300))
-    scheduler_core._handle(Event(timestamp=0.0, type=EventType.ADMISSION_TICK, payload={}))
+    scheduler_core._handle(Event(timestamp=0.0, type=EventType.ADMISSION_PASS, payload={}))
     mb = scheduler_core.dispatcher.micro_batches[0]
     expected_kv = 200 + 300
     assert mb.kv_rows_total == expected_kv
@@ -167,7 +167,7 @@ def test_cross_module_pipeline_chain_deterministic_1000_iter():
         core = _fresh_core()
         core.request_queue.push(_make_req(0, kv_length=100))
         core.request_queue.push(_make_req(1, kv_length=200))
-        core._handle(Event(timestamp=0.0, type=EventType.ADMISSION_TICK, payload={}))
+        core._handle(Event(timestamp=0.0, type=EventType.ADMISSION_PASS, payload={}))
         mb = core.dispatcher.micro_batches[0]
         op_t = core.dispatcher.pim_executor.op_time(kv_rows_total=mb.kv_rows_total)
         op_times.append(op_t)
@@ -179,13 +179,13 @@ def test_cross_module_chain_seed_independence(seed):
     """seed sweep → 동일 op_time. ARCH §3.5.2 FSM jitter ±0 + pure arithmetic."""
     core = _fresh_core(seed=seed)
     core.request_queue.push(_make_req(0, kv_length=100))
-    core._handle(Event(timestamp=0.0, type=EventType.ADMISSION_TICK, payload={}))
+    core._handle(Event(timestamp=0.0, type=EventType.ADMISSION_PASS, payload={}))
     mb = core.dispatcher.micro_batches[0]
     op_t = core.dispatcher.pim_executor.op_time(kv_rows_total=mb.kv_rows_total)
     # seed 변경 영향 0 — reference 와 동일
     core_ref = _fresh_core(seed=42)
     core_ref.request_queue.push(_make_req(0, kv_length=100))
-    core_ref._handle(Event(timestamp=0.0, type=EventType.ADMISSION_TICK, payload={}))
+    core_ref._handle(Event(timestamp=0.0, type=EventType.ADMISSION_PASS, payload={}))
     mb_ref = core_ref.dispatcher.micro_batches[0]
     op_t_ref = core_ref.dispatcher.pim_executor.op_time(kv_rows_total=mb_ref.kv_rows_total)
     assert op_t == op_t_ref

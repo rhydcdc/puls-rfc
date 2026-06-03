@@ -19,15 +19,14 @@ class TestRunInit:
         # 모든 핵심 컴포넌트 instantiate 정합
         assert run.scheduler is not None
         assert run.evaluator is not None
-        # Evaluator hook 등록 정합 (1 dispatch + 1 admission_tick callback)
+        # Evaluator hook 등록 정합 (1 dispatch callback)
         assert len(run.scheduler.dispatcher._dispatch_callbacks) == 1
-        assert len(run.scheduler._admission_tick_callbacks) == 1
-        # Q1 self-rescheduling enable 확인
-        assert run.scheduler.enable_admission_tick_rescheduling is True
-        # Q4 eager pre-load — queue 에 REQUEST_ARRIVAL 10 + ADMISSION_TICK 1 = 11
+        # Q1 self-rescheduling enable 확인 (live admission 재기동 경로)
+        assert run.scheduler.continuous_admission is True
+        # Q4 eager pre-load — queue 에 REQUEST_ARRIVAL 10 + ADMISSION_PASS 1 = 11
         types = [e[2].type for e in run.scheduler.queue._heap]
         assert types.count(EventType.REQUEST_ARRIVAL) == 10
-        assert types.count(EventType.ADMISSION_TICK) == 1
+        assert types.count(EventType.ADMISSION_PASS) == 1
 
     def test_init_bad_config_module_format(self, tmp_path):
         with pytest.raises(ValueError, match="module.path:factory_fn"):
@@ -107,7 +106,6 @@ class TestRunTeardown:
         run.teardown()
         data = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
         assert "dispatch_trace" in data
-        assert "convergence" in data
         assert "idle_fraction" in data
         assert "acceleration_decomposition" in data
 

@@ -5,7 +5,7 @@ from enum import Enum, auto
 class EventType(Enum):
     KERNEL_COMPLETION = auto()
     REQUEST_ARRIVAL = auto()
-    ADMISSION_TICK = auto()
+    ADMISSION_PASS = auto()
 
 
 @dataclass

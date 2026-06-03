@@ -3,7 +3,7 @@
 PLAN.md §4 Impl-9 + §0 Completeness Definition 정합. D1 (동작하는 scheduler) 완성 시점.
 
 Run 의 책임:
-1. init — Module instantiate + evaluator wiring + trace eager pre-load + first ADMISSION_TICK priming
+1. init — Module instantiate + evaluator wiring + trace eager pre-load + first ADMISSION_PASS priming
 2. step — SchedulerCore.step() delegate (Q10 thin wrapper)
 3. loop — termination 3 조건 (queue empty AND window empty AND in_flight empty) 까지 step 반복
 4. teardown — evaluator.report() → JSON + Markdown 산출 (Q8)
@@ -141,12 +141,11 @@ class Run:
             instance_pipeline=instance_pipeline,    # (A) production inter-AB wiring
         )
         # Q1 — self-rescheduling enable (R14 opt-in flag)
-        scheduler.enable_admission_tick_rescheduling = True
+        scheduler.continuous_admission = True
 
         # Evaluator wiring (D3 standalone — Impl-8 hook API 정합)
         evaluator = Evaluator(config=config, clock=clock, idle_telemetry=idle_telemetry)
         dispatcher.on_dispatch(evaluator.record_dispatch)
-        scheduler.on_admission_tick(evaluator.record_admission_tick)
 
         # Q4 eager pre-load — Trace REQUEST_ARRIVAL 전부 push
         for req in replayer.replay(rate_multiplier=1.0):
@@ -156,11 +155,11 @@ class Run:
                 payload={"request": req},
             ))
 
-        # Q1 first ADMISSION_TICK priming. Phase-2 S2(§2.5) — 동작점 고정으로 payload
+        # Q1 first ADMISSION_PASS priming. Phase-2 S2(§2.5) — 동작점 고정으로 payload
         # trivial(빈 dict). former 는 KV 합·prefill 512 만 봄 (cycle 측정 payload 삭제).
         queue.push(Event(
             timestamp=0.0,
-            type=EventType.ADMISSION_TICK,
+            type=EventType.ADMISSION_PASS,
             payload={},
         ))
 

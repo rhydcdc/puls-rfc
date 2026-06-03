@@ -6,8 +6,6 @@ import pytest
 from puls_sched.clock import Clock
 from puls_sched.evaluator import (
     AblationSource,
-    AdmissionSnapshot,
-    ConvergenceVerdict,
     DecompositionCell,
     DispatchEvent,
     Evaluator,
@@ -49,77 +47,6 @@ def test_evaluator_dispatch_trace_immutable_snapshot(evaluator):
     # DispatchEvent frozen
     with pytest.raises(Exception):  # dataclasses.FrozenInstanceError or AttributeError
         trace[0].timestamp = 99.0  # type: ignore
-
-
-# =========================================================================
-# admission_convergence
-# =========================================================================
-
-def test_evaluator_admission_convergence_empty(evaluator):
-    v = evaluator.admission_convergence()
-    assert v == ConvergenceVerdict(converged=False, oscillating=False, in_band_fraction=0.0, samples=0)
-
-
-def test_evaluator_admission_convergence_all_in_band(evaluator, dummy_config):
-    """10 snapshot 모두 in_band → converged=True, oscillating=False, in_band_fraction=1.0"""
-    width = dummy_config.admission.deadband_width["short"]
-    for i in range(10):
-        snap = AdmissionSnapshot(
-            timestamp=float(i), gpu_idle_fraction=0.2, pim_idle_fraction=0.2,
-            a_cycle=10.0, b_cycle=10.0 + width * 0.5,  # diff < width
-            ctx_tokens=4000, spec_admitted=True, n=1,
-        )
-        evaluator.record_admission_tick(snap)
-    v = evaluator.admission_convergence()
-    assert v.converged is True
-    assert v.oscillating is False
-    assert v.in_band_fraction == 1.0
-    assert v.samples == 10
-
-
-def test_evaluator_admission_convergence_sin_wave_oscillating(evaluator):
-    """합성 sin wave (a-b 의 sign 자주 flip) → oscillating=True"""
-    # 10 snapshot: a-b 가 +/+/-/- ... 큰 swing
-    for i in range(10):
-        sign = 1.0 if (i % 2 == 0) else -1.0
-        snap = AdmissionSnapshot(
-            timestamp=float(i), gpu_idle_fraction=0.2, pim_idle_fraction=0.2,
-            a_cycle=100.0 + sign * 50.0, b_cycle=100.0,
-            ctx_tokens=4000, spec_admitted=True, n=1,
-        )
-        evaluator.record_admission_tick(snap)
-    v = evaluator.admission_convergence()
-    # sign change count = 9 (every step), n-1 = 9, ratio = 1.0 ≥ 0.4
-    assert v.oscillating is True
-
-
-def test_evaluator_admission_convergence_monotonic_convergence(evaluator, dummy_config):
-    """a-b 가 100 → 10 → 1 → 0.5 → 0.1 ... → 마지막 in_band 도달 → converged=True"""
-    width = dummy_config.admission.deadband_width["short"]
-    diffs = [100.0, 50.0, 10.0, 5.0, 1.0, width * 0.5, width * 0.4, width * 0.3, width * 0.2, width * 0.1]
-    for i, diff in enumerate(diffs):
-        snap = AdmissionSnapshot(
-            timestamp=float(i), gpu_idle_fraction=0.2, pim_idle_fraction=0.2,
-            a_cycle=100.0 + diff, b_cycle=100.0,
-            ctx_tokens=4000, spec_admitted=True, n=1,
-        )
-        evaluator.record_admission_tick(snap)
-    v = evaluator.admission_convergence()
-    assert v.converged is True
-    assert v.oscillating is False
-
-
-def test_evaluator_admission_convergence_admitted_and_not_both_captured(evaluator):
-    """spec=None (admission 실패) 도 snapshot 누적 — empty admission tick capture invariant"""
-    for spec_admitted in [True, False, True, False, True]:
-        snap = AdmissionSnapshot(
-            timestamp=0.0, gpu_idle_fraction=0.0, pim_idle_fraction=0.0,
-            a_cycle=1.0, b_cycle=1.0, ctx_tokens=4000,
-            spec_admitted=spec_admitted, n=1 if spec_admitted else 0,
-        )
-        evaluator.record_admission_tick(snap)
-    v = evaluator.admission_convergence()
-    assert v.samples == 5  # admitted + rejected 모두
 
 
 # =========================================================================
@@ -238,7 +165,7 @@ def test_evaluator_acceleration_decomposition_f2_formula(evaluator):
 def test_evaluator_report_dict_schema(evaluator):
     result = evaluator.report(a_cycle=10, b_cycle=20, t_pim=5, t_proj=5)
     assert set(result.keys()) == {
-        "dispatch_trace", "convergence", "idle_fraction", "pim_utilization",
+        "dispatch_trace", "idle_fraction", "pim_utilization",
         "pipeline_efficiency", "acceleration_decomposition", "markdown", "ablation_config",
     }
 

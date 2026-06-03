@@ -59,7 +59,6 @@ def _build_stress_core(config=None):
     )
     evaluator = Evaluator(config=config, clock=clock, idle_telemetry=idle)
     dispatcher.on_dispatch(evaluator.record_dispatch)
-    core.on_admission_tick(evaluator.record_admission_tick)
     return core, evaluator
 
 
@@ -100,24 +99,6 @@ def test_stress_100_mb_dispatch_capture_loss_zero():
 
 
 # =========================================================================
-# (I-E2) admission snapshot capture loss 0
-# =========================================================================
-
-def test_stress_100_admission_ticks_capture_loss_zero():
-    """100 admission tick (admit + reject 혼합) → 100 snapshot."""
-    core, ev = _build_stress_core()
-    for i in range(100):
-        core.queue.push(Event(
-            timestamp=float(i), type=EventType.ADMISSION_TICK,
-            payload={"t_proj": 1.0, "a_cycle": 1.0, "b_cycle": 1.0 + (i % 5), "ctx_tokens": 4000},
-        ))
-    while core.step():
-        pass
-    # admission 이 spec 못 만들어도 (queue empty) snapshot 누적
-    assert len(ev._admission_snapshots) == 100
-
-
-# =========================================================================
 # (I-E3) Multi-seed determinism (PLAN §0 C5)
 # =========================================================================
 
@@ -135,7 +116,7 @@ def test_stress_report_seed_sweep_deterministic(seed):
             a = 10.0 + r.uniform(0, 5)
             b = 10.0 + r.uniform(0, 5)
             c.queue.push(Event(
-                timestamp=float(i), type=EventType.ADMISSION_TICK,
+                timestamp=float(i), type=EventType.ADMISSION_PASS,
                 payload={"t_proj": 1.0, "a_cycle": a, "b_cycle": b, "ctx_tokens": 4000},
             ))
         while c.step():
@@ -144,7 +125,6 @@ def test_stress_report_seed_sweep_deterministic(seed):
     r1 = ev1.report(a_cycle=10, b_cycle=20, t_pim=2, t_proj=2)
     r2 = ev2.report(a_cycle=10, b_cycle=20, t_pim=2, t_proj=2)
     assert r1["markdown"] == r2["markdown"]
-    assert r1["convergence"] == r2["convergence"]
 
 
 # =========================================================================
@@ -235,7 +215,7 @@ def test_stress_pipeline_efficiency_bounded(evaluator):
 
 @pytest.mark.parametrize("seed", [0, 42, 99, 1000])
 def test_stress_composite_invariant_violation_zero(seed):
-    """Random seed 위 100-mb dispatch + 50 admission tick → 모든 invariant 보존."""
+    """Random seed 위 100-mb dispatch + 50 admission pass → 모든 invariant 보존."""
     config = default_dummy_config()
     core, ev = _build_stress_core(config)
     rng = random.Random(seed)
@@ -250,15 +230,13 @@ def test_stress_composite_invariant_violation_zero(seed):
         a = rng.uniform(1.0, 10.0)
         b = rng.uniform(1.0, 10.0)
         core.queue.push(Event(
-            timestamp=100.0 + float(i), type=EventType.ADMISSION_TICK,
+            timestamp=100.0 + float(i), type=EventType.ADMISSION_PASS,
             payload={"t_proj": 1.0, "a_cycle": a, "b_cycle": b, "ctx_tokens": 4000},
         ))
     while core.step():
         pass
     # (I-E1) dispatch capture
     assert len(ev.dispatch_trace()) == 400
-    # (I-E2) admission capture
-    assert len(ev._admission_snapshots) == 50
     # (I-E4) KV invariant — no admission → no consumption
     assert core.kv_accountant.remaining == initial_kv
     # (I-E5) F1·F2·F3·F5 direction_positive

@@ -40,10 +40,10 @@ def test_steer_stops_at_count_target(admission):
 
 
 def test_steer_stops_at_kv_target(admission):
-    """Σkv 타깃(12.3M) 도달 시 정지 (개수 타깃 미달). 쪼개기 불가 → 마지막이 살짝 넘김."""
-    cands = [_make_dec(i, kv_length=10_000_000) for i in range(5)]   # 각 10M
+    """Σkv 타깃(6.15M) 도달 시 정지 (개수 타깃 미달). 쪼개기 불가 → 마지막이 살짝 넘김."""
+    cands = [_make_dec(i, kv_length=4_000_000) for i in range(5)]    # 각 4M
     sel = admission.steer_decode_set(cands)
-    assert len(sel) == 2                                              # 10M+10M=20M ≥ 12.3M
+    assert len(sel) == 2                                              # 4M+4M=8M ≥ 6.15M
     assert sum(r.kv_length for r in sel) >= admission.admission_cfg.kv_operating_target_tokens
 
 

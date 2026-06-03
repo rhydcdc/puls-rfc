@@ -225,7 +225,7 @@ def test_prefill_steering_avoids_overshoot_on_deep(scheduler_core):
 def test_prefill_steering_prefers_closer_to_ideal_depth(scheduler_core):
     """둘 다 얕아도(ideal 100K 미만) 더 깊은(=ideal 근접) 멤버가 더 받음."""
     shallow, mid = _prefill_req(0, 50_000), _prefill_req(1, 90_000)
-    prefill_chunk, _, _ = scheduler_core._populate_mb_phases([shallow, mid], 256)
+    prefill_chunk, _, _ = scheduler_core._populate_mb_phases([shallow, mid], 128)
     assert len(prefill_chunk.get(1, [])) > len(prefill_chunk.get(0, []))
 
 

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Callable, Optional, TYPE_CHECKING
+from typing import Optional
 
 from puls_sched.admission import Admission
 from puls_sched.clock import Clock
@@ -18,11 +18,6 @@ from puls_sched.request import Request, RequestState
 from puls_sched.request_queue import RequestQueue
 from puls_sched.window import InFlightWindow
 
-if TYPE_CHECKING:
-    from puls_sched.evaluator import AdmissionSnapshot
-
-
-AdmissionTickCallback = Callable[["AdmissionSnapshot"], None]
 
 # STEP 5.5 — per-mb KV 예산의 분모 = 동시 활성 μ-batch 목표. ARCH §5.6/F2 는 동시 2개
 # (M 의 PIM attention ‖ M+1 의 QKV)면 충족; window 3번째 슬롯은 빠지는 M-1 전이 여유라
@@ -52,49 +47,16 @@ class SchedulerCore:
     _next_mb_id: int = 0
     # ---- Phase-2 S2 — 합류 게이트(_join_gate_open) 삭제. 풀 모델에선 멤버십=용량이라
     # 자리(KV·batch) 있고 일감 있으면 무조건 backfill (유휴율 게이트 개념 소멸, OPERATING_POINT §3).
-    # ---- Impl-8 — D1 admission tick hook (evaluator 등록 점) ----
-    _admission_tick_callbacks: list[AdmissionTickCallback] = field(default_factory=list)
-    # ---- Impl-9 Q1 — ADMISSION_TICK self-rescheduling opt-in (Run.init 가 enable). ----
+    # ---- Impl-9 Q1 — ADMISSION_PASS self-rescheduling opt-in (Run.init 가 enable). ----
     # Default False: isolated unit test 영역의 single-shot 처리 보존 (R14 setup gap).
     # True: ARCH §6.4 per-iteration admission cadence 정합 (continuous chain).
-    enable_admission_tick_rescheduling: bool = False
+    continuous_admission: bool = False
     # ---- Impl-10-pre-1 (A) — production hot path 위 inter-AB chain wiring. ----
     # Default None: 기존 SchedulerCore fixture 영역 backward-compat (단위 test 무변경).
     # None 아니면 매 O_PROJ 완료 시 instance_pipeline.dispatch(mb) 호출 — ARCH §3.4
     # *forward pass = L × cycle* literal 의 production hot path 영역 wiring.
     # gpu_instance_b activity recording + fixed-shape handoff defensive validation.
     instance_pipeline: Optional[InstancePipeline] = None
-
-    def on_admission_tick(self, callback: AdmissionTickCallback) -> None:
-        """Admission tick snapshot capture 위 callback 등록 (Impl-8 D1 hook).
-
-        Evaluator 같은 외부 inspector 가 admission_convergence series 캡처 위 등록.
-        SchedulerCore 자체는 Evaluator 를 모름 (D3 standalone).
-        """
-        self._admission_tick_callbacks.append(callback)
-
-    def _fire_admission_tick(self) -> None:
-        """등록된 callback 들에게 admission tick snapshot 통지 (Impl-8 D1 hook fire, 진단용).
-
-        Phase-2 풀 모델 — 동작점 고정으로 cycle 측정 삭제(a/b_cycle=0). n = 현재 활성 μ-batch
-        들의 decode 토큰 총수(진단). idle 사후 진단은 evaluator 가 idle_telemetry 로 담당.
-        """
-        if not self._admission_tick_callbacks:
-            return
-        from puls_sched.evaluator import AdmissionSnapshot
-        n_decode = sum(len(mb.decode_tokens) for mb in self.dispatcher.micro_batches.values())
-        snapshot = AdmissionSnapshot(
-            timestamp=self.clock.now,
-            gpu_idle_fraction=self.admission.idle_telemetry.gpu_idle_fraction(),
-            pim_idle_fraction=self.admission.idle_telemetry.pim_idle_fraction(),
-            a_cycle=0.0,
-            b_cycle=0.0,
-            ctx_tokens=0,
-            spec_admitted=(n_decode > 0 or len(self.window.current_ids()) > 0),
-            n=n_decode,
-        )
-        for cb in self._admission_tick_callbacks:
-            cb(snapshot)
 
     def step(self) -> bool:
         if len(self.queue) == 0:
@@ -119,48 +81,48 @@ class SchedulerCore:
                         self.dispatcher.instance_b_busy = False
                     self.dispatcher.tick()
                     # STEP 2.5 — 완료 = iteration 경계 = admit 기회 (event-driven admission).
-                    if self.enable_admission_tick_rescheduling:
-                        self._schedule_admission_tick()
+                    if self.continuous_admission:
+                        self._schedule_admission_pass()
                     return
                 self.dispatcher.on_completion(event)
                 # Impl-6 (Q5) — O_PROJ done 분기 → LayerState.advance → L 도달 시 token decode signal
                 self._maybe_advance_forward_pass(event)
                 self.dispatcher.tick()
                 # STEP 2.5 — 완료 시 admission (자원이 비는 유일 시점). 고정 타이머 self-push 폐기.
-                if self.enable_admission_tick_rescheduling:
-                    self._schedule_admission_tick()
+                if self.continuous_admission:
+                    self._schedule_admission_pass()
             case EventType.REQUEST_ARRIVAL:
                 req = event.payload["request"]
                 self.request_queue.push(req)
                 # Impl-9 Q1 — Arrival re-wakes admission chain (idle guard 의 dual entry).
                 # ARCH §6.4 'per-iteration admission' 의 arrival-driven 재기동 의미 정합.
-                if self.enable_admission_tick_rescheduling:
-                    self._schedule_admission_tick()
-            case EventType.ADMISSION_TICK:
+                if self.continuous_admission:
+                    self._schedule_admission_pass()
+            case EventType.ADMISSION_PASS:
                 # Phase-2 풀 모델 (OPERATING_POINT §3) — 세 관심사 분리:
                 #  (1) admission = 풀 보충: request_queue → in_flight(PREFILL), KV 게이트만.
                 #  (2)+(3) μ-batch 구성: decode-set(123/12.3M) ∥ prefill(256/25.6M) 을 풀에서
                 #      *독립적으로* steering+age-cap 으로 구성 → window 를 활성 목표(2)까지 채움.
                 self._refill_pool()
                 self._fill_window()
-                self._fire_admission_tick()
                 # 고정 타이머 self-push 폐기. 다음 admission 은 완료/신규도착 시 재기동.
 
-    def _schedule_admission_tick(self) -> None:
+    def _schedule_admission_pass(self) -> None:
         """완료(KERNEL_COMPLETION) / 신규 도착(REQUEST_ARRIVAL) 시 admission 재기동.
 
         STEP 2.5 — 고정 타이머 self-push 폐기 후 admission 의 유일한 재기동 경로. 이벤트
-        기반: 자원이 비는 시점(완료)과 새 일감 도착 시점에만 admission tick push.
+        기반: 자원이 비는 시점(완료)과 새 일감 도착 시점에만 admission pass push.
 
         Phase-2 S2 (§2.5) — 동작점 고정으로 payload trivial(빈 dict). former 는 KV 합·prefill
         512 만 보므로 cycle 측정 payload 산출(`_compose_admission_payload`) 삭제.
         """
         if len(self.request_queue) == 0 and len(self.in_flight_requests) == 0:
             return
-        next_t = self.clock.now + self.config.admission.tick_interval_us
+        # 즉시(now) push — 트리거 이벤트와 동일 시각에 admission pass 처리(지연 0).
+        # ADMISSION_PASS 는 폴링 틱이 아니라 "지금 admit" 의 이벤트 표현(완료/도착에만 armed).
         self.queue.push(Event(
-            timestamp=next_t,
-            type=EventType.ADMISSION_TICK,
+            timestamp=self.clock.now,
+            type=EventType.ADMISSION_PASS,
             payload={},
         ))
 

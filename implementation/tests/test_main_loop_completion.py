@@ -12,10 +12,10 @@ from puls_sched.request import Request, RequestState
 
 
 def _admission_event():
-    """ADMISSION_TICK event — Phase-2 S2(§2.5): 동작점 고정으로 payload trivial(빈 dict)."""
+    """ADMISSION_PASS event — Phase-2 S2(§2.5): 동작점 고정으로 payload trivial(빈 dict)."""
     return Event(
         timestamp=0.0,
-        type=EventType.ADMISSION_TICK,
+        type=EventType.ADMISSION_PASS,
         payload={},
     )
 

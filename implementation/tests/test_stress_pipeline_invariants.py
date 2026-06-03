@@ -163,7 +163,7 @@ def test_stress_nvlink_100_shape_sequence_stateless(nvlink_transfer, dummy_confi
 # Cross-module stress (admission → register chain × 20)
 # =========================================================================
 
-def test_stress_full_pipeline_20_admission_ticks(scheduler_core):
+def test_stress_full_pipeline_20_admission_passes(scheduler_core):
     """Impl-9 갱신 — 20 cumulative admit. Lifecycle 완주 후 모든 mb evict.
 
     Pre-check + explicit evict 의 ARCH-compliant lifecycle: admit → cycle → evict → admit. 누적 mb_id
@@ -172,7 +172,7 @@ def test_stress_full_pipeline_20_admission_ticks(scheduler_core):
     # mb_id sequence 추적
     for i in range(20):
         scheduler_core.request_queue.push(_make_req(i, kv_length=10 * (i + 1), max_tokens=1))
-        scheduler_core._handle(Event(timestamp=float(i), type=EventType.ADMISSION_TICK, payload={}))
+        scheduler_core._handle(Event(timestamp=float(i), type=EventType.ADMISSION_PASS, payload={}))
         # Drain lifecycle (proper completion → evict 위)
         while scheduler_core.step():
             pass

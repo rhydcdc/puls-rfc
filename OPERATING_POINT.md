@@ -89,10 +89,10 @@ window=3 순차 (2 active F2/F3 overlap + 1 전이 여유).
 - **로컬 자기보정**: 긴 걸 골랐으면 다음 `ideal`↓ → 짧은 걸. 두 축 동시 수렴. 전역 분포 안 봄.
 - **[5.55M,6.77M] 밴드 = 진단용 idle-SLA 라벨**(±10%→idle≤10%), 제어값 아님.
 - **검증**:
-  - [proto_steering.py](implementation/debug_phase2/proto_steering.py): 정규·heavy-tail·short-heavy·bimodal 전부 **N123
+  - `proto_steering.py`(로컬 검증): 정규·heavy-tail·short-heavy·bimodal 전부 **N123
     Σ12.3M spread ~1%** (FIFO 는 off-avg 22~30% 실패). 원소 = 짧+중+긴 혼합(예 47+47+29).
     *(도출 256-scale 검증; 알고리즘 스케일 불변 → 배포 128 은 N62·Σ6.15M 동형, §4.1 lifecycle 실측.)*
-  - [proto_steering_fair.py](implementation/debug_phase2/proto_steering_fair.py): 스트리밍서 **starvation 0**
+  - `proto_steering_fair.py`(로컬 검증): 스트리밍서 **starvation 0**
     — age-cap 이 모든 길이 클래스를 ≤AGE_CAP+1 batch 안에 drain → *도착한 집합 = 서빙된 집합*
     (보존). ⚠ 이건 age-cap 의 **공정성 *결과*** 이지 분포를 *타깃* 하는 게 아니다 — 배치 구성은
     여전히 avg/분포 안 보고 두 타깃만 맞춘다(길이분산 무관). steering 단독은 ideal-크기만
@@ -140,7 +140,7 @@ MFU 실측서 190 부족 판명 시 256 복귀**(256 batch 379 안전, 512 batch
 **오차 밴드 = ±10% (진단용 idle SLA 경계, 제어값 아님).** 밴드 폭 ≈ 허용 최악 idle: ±10%→
 edge idle ~8.6~10.6%, ±15%→~12.4~15.4%. **steering 은 타깃(62, 6.15M)에 명중하므로 실현
 idle ~0** — 밴드는 "이 안이면 idle≤10%" 라는 진단 라벨일 뿐(former 가 밴드로 stop 하지 않음).
-밴드 폭은 ARCH §6.4 deadband=2σ_total 근거이나 σ 실측 불가라 deferred
+밴드 폭은 σ 실측 불가라 deferred
 calibration; 10% 는 그 placeholder. (15%/20% 도 동작 가능 — calibration 때 조정.)
 
 ## 4.1 HBM4 메모리 적합성 & **prefill 128 배포 동작점** (2026-06-03 라이프사이클 검증)
@@ -237,7 +237,7 @@ ctx 100K 는 하드웨어 상수라 불변(§4); prefill 은 *스케일 knob* �
   (개수 62, Σkv 6.15M [배포 128]; 도출 256 은 123·12.3M) 동시 수렴 + starvation 0. prefill 도
   depth-합 steering+age-cap. config: target_count·target_kv·prefill·age_cap. (= S2 가 지운
   max_batch_size 를 "FFN 개수 타깃 62"으로 의미 정정 복원.) 구성 검증은 ARCH §6.8 /
-  [REPORT](implementation/debug_phase2/REPORT.md). 통합 lifecycle 검증은 §4.1.
+  REPORT(로컬). 통합 lifecycle 검증은 §4.1.
 - prefill 값 선택은 두 제약의 균형: **메모리는 128**(64 스택 적합, §4.1) · **MFU 안전판은 256**
   (batch 379 ≫ knee). FFN MFU knee 가 미보정(silicon 부재)이라 128(batch 190)이 포화하는지는
   deferred calibration — **배포는 128, MFU 실측서 190 부족 시 256 복귀**(§4.1 caveat). 알고리즘은

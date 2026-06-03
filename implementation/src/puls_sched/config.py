@@ -59,22 +59,22 @@ class AdmissionConfig:
     kv_capacity_aggregate: int
     ctx_tier_short_max: int
     ctx_tier_mid_max: int
-    deadband_width: Mapping[str, float]
     request_queue_capacity: int
-    tick_interval_us: float = 10.0
-    prefill_chunk_default: int = 256
-    # Phase-2 former-v2 (OPERATING_POINT §1·§3, prefill 256 기본) — 동작점은 *두 타깃*으로
+    prefill_chunk_default: int = 128
+    # Phase-2 former-v2 (OPERATING_POINT §1·§3·§4.1, 배포 prefill 128) — 동작점은 *두 타깃*으로
     # 정의되고 former 가 steering 으로 둘에 동시 수렴한다(개수+KV-work 동시 명중, 쪼개기 불가).
-    #   decode: 개수 123 (decode_count_target) AND Σkv 12.3M (kv_operating_target_tokens)
-    #   prefill: 256 토큰 (prefill_chunk_default) AND depth-합 25.6M (prefill_kv_work_target_tokens)
-    # → PIM≈GPU-A≈B≈51µs (spread~1%, op-time 직접 산출 + proto_steering 검증).
-    kv_operating_target_tokens: int = 12_300_000
-    decode_count_target: int = 123
+    #   decode: 개수 62 (decode_count_target) AND Σkv 6.15M (kv_operating_target_tokens)
+    #   prefill: 128 토큰 (prefill_chunk_default) AND depth-합 12.8M (prefill_kv_work_target_tokens)
+    # → PIM≈GPU-A≈B≈25.5µs (spread~1%, op-time 직접 산출 + proto_steering 검증).
+    # (도출 기준 256 은 모든 값 2배 — 123·12.3M·256·25.6M; 알고리즘 스케일 불변, OPERATING_POINT §1.)
+    kv_operating_target_tokens: int = 6_150_000
+    decode_count_target: int = 62
     # prefill steering 타깃: Σ(chunk_per_req × depth) — GPU-A PREFILL_ATTN=O(chunk×ctx) 균형.
-    prefill_kv_work_target_tokens: int = 25_600_000
+    prefill_kv_work_target_tokens: int = 12_800_000
     # age-cap(공정성): wait ≥ age_cap 인 요청은 steering 무시하고 강제 포함 → starvation 0,
-    # 대기 ≤ age_cap+1 batch. sweep 상 2 가 spread·공정·지연 sweet spot (OPERATING_POINT §3).
-    age_cap: int = 2
+    # 대기 ≤ age_cap+1 batch. 배포 5 로 통일 (대기 ≤5 ≈128µs ≪ TBT, spread 0.7% knee;
+    # 옛 node-scheduler 의 2 는 레이턴시 보수적 선택 — OPERATING_POINT §3·§4.1).
+    age_cap: int = 5
 
 
 @dataclass(frozen=True)
@@ -308,14 +308,14 @@ def default_dummy_config() -> Config:
         slo=SLOConfig(ttft_target_ms=100.0, tpot_target_ms=10.0),
         admission=AdmissionConfig(
             n_sat=16,
-            # Phase-2 former-v2 (prefill 256 기준) — 총 30M aggregate (= 배치당 12.3M×2슬롯+여유).
-            # main_loop._per_mb_kv_budget = 30M / _STAGGERING_TARGET_MB(2) = 15M per μ-batch
-            # → decode 동작점 12.3M 이 배치당 15M 천장 안에 안착. A∥B(F3) 오버랩 위해 2 배치
-            # 동시 in-flight(KV 영구 상주) → 총 30M. HW = 80GB/stack·5TB (256 기준, OPERATING_POINT §1).
-            kv_capacity_aggregate=30_000_000,
+            # Phase-2 former-v2 (배포 prefill 128) — 총 15M aggregate (= 배치당 6.15M×2슬롯+여유).
+            # main_loop._per_mb_kv_budget = 15M / _STAGGERING_TARGET_MB(2) = 7.5M per μ-batch
+            # → decode 동작점 6.15M 이 배치당 7.5M 천장 안에 안착. A∥B(F3) 오버랩 위해 2 배치
+            # 동시 in-flight(KV 영구 상주) → 총 15M. HW = 64GB/stack·4.40TB (16-high 물리 상한;
+            # 배포 128 의 Instance A 2.75TB 가 적합 — OPERATING_POINT §4.1; 256 의 30M 은 초과).
+            kv_capacity_aggregate=15_000_000,
             ctx_tier_short_max=8_000,
             ctx_tier_mid_max=32_000,
-            deadband_width={"short": 1.0, "mid": 2.0, "long": 3.0},
             request_queue_capacity=1024,
         ),
         ablation=AblationConfig(),

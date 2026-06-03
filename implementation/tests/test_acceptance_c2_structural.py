@@ -28,11 +28,6 @@ class TestC2Schema:
         events = report["dispatch_trace"]
         assert len(events) > 0
 
-    def test_admission_convergence_present(self, tmp_path):
-        _, report = _make_run_and_report(tmp_path)
-        conv = report["convergence"]
-        assert conv.samples > 0
-
     def test_acceleration_decomposition_4_sources(self, tmp_path):
         _, report = _make_run_and_report(tmp_path)
         decomp = report["acceleration_decomposition"]
@@ -42,7 +37,7 @@ class TestC2Schema:
 
     def test_report_json_keys(self, tmp_path):
         _, report = _make_run_and_report(tmp_path)
-        for k in ("dispatch_trace", "convergence", "idle_fraction",
+        for k in ("dispatch_trace", "idle_fraction",
                   "pim_utilization", "pipeline_efficiency",
                   "acceleration_decomposition", "ablation_config", "markdown"):
             assert k in report

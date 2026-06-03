@@ -51,7 +51,7 @@ class Dispatcher:
     def register(self, mb: MicroBatch) -> None:
         """MicroBatch 를 dispatcher 의 lookup 저장소에 등록 (Q1-bis).
 
-        main_loop 의 ADMISSION_TICK body 가 spec → MicroBatch 변환 후 호출.
+        main_loop 의 ADMISSION_PASS body 가 spec → MicroBatch 변환 후 호출.
         """
         if mb.id in self.micro_batches:
             raise RuntimeError(f"MicroBatch {mb.id} already registered")

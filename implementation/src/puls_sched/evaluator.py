@@ -3,10 +3,9 @@
 PLAN.md §4 Impl-8 + ARCH §6.7 정합. *절대 metric 미산출 (TTFT · TPOT · throughput · goodput).
 Comparative baseline 미산출 (Sarathi · vLLM).*
 
-7 산출 method + 2 callback method = 9 method total:
-- record_dispatch / record_admission_tick — D1 hook callback (dispatcher / main_loop 가 fire)
+6 산출 method + 1 callback method = 7 method total:
+- record_dispatch — D1 hook callback (dispatcher 가 fire)
 - dispatch_trace — §6.5 Init/T1~T5 sequence event log
-- admission_convergence — §6.4 deadband 위 idle fraction 시간 series 위 oscillation / 수렴 판정
 - idle_fraction — Instance A scope (GPU · PIM 2 자원, per-instance A/B split 은 Impl-9 — O8.1)
 - pim_utilization — PIM busy time fraction (Impl-10-pre-2: k_total knob 폐기 위 단순 time fraction)
 - pipeline_efficiency — max(A, B) / (A + B) ratio
@@ -17,11 +16,9 @@ Comparative baseline 미산출 (Sarathi · vLLM).*
 import math
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
 
 from puls_sched.clock import Clock
 from puls_sched.config import Config
-from puls_sched.deadband import in_band, lookup_width
 from puls_sched.idle_telemetry import IdleTelemetry
 from puls_sched.node import NodeType
 
@@ -44,34 +41,6 @@ class DispatchEvent:
     node_type: NodeType
     resource: str                                       # "GPU" | "PIM"
     dag_state_snapshot: dict                            # {mb_id: {node_type_name: state_name}} — defensive copy
-
-
-@dataclass(frozen=True)
-class AdmissionSnapshot:
-    """SchedulerCore admission tick hook 가 fire 하는 snapshot.
-
-    ARCH §6.4 deadband convergence trace 의 *one row* — admission tick 자연 cadence.
-    Spec=None (admission 실패) 도 snapshot 누적 (convergence series 의 의미 있는 entry).
-    """
-
-    timestamp: float
-    gpu_idle_fraction: float
-    pim_idle_fraction: float
-    a_cycle: float
-    b_cycle: float
-    ctx_tokens: int
-    spec_admitted: bool
-    n: int
-
-
-@dataclass(frozen=True)
-class ConvergenceVerdict:
-    """admission_convergence() 의 판정 결과. PLAN §4 Impl-8 acceptance — oscillation / 수렴 판정."""
-
-    converged: bool
-    oscillating: bool
-    in_band_fraction: float
-    samples: int
 
 
 class AblationSource(Enum):
@@ -166,32 +135,23 @@ class DecompositionCell:
 # ============================================================================
 
 
-# admission_convergence heuristic 임계값 (통계 의미 const, config 의존 0 — Impl-6 KS p-value 0.05 패턴 정합).
-# O8.3 carry-over — Impl-10 calibrated input 위 deadband sensitivity 실측 후 재평가 영역.
-_CONVERGE_TAIL_THRESHOLD = 0.8                          # 마지막 tail window 의 in_band 비율 임계값
-_OSCILLATE_SIGN_CHANGE_THRESHOLD = 0.4                  # sign change / (n-1) 비율 임계값
-_CONVERGE_TAIL_WINDOW = 5                               # tail window size
-
-
 @dataclass
 class Evaluator:
     """Structural evaluator — D1 증거 + D2 schema 골격. Standalone (D3 정합).
 
     Hook 등록 패턴 (Impl-9 driver 또는 test 가 wiring):
         dispatcher.on_dispatch(evaluator.record_dispatch)
-        scheduler_core.on_admission_tick(evaluator.record_admission_tick)
     """
 
     config: Config
     clock: Clock
     idle_telemetry: IdleTelemetry                       # post-hoc snapshot 영역 (D1 hybrid)
     _dispatch_events: list[DispatchEvent] = field(default_factory=list)
-    _admission_snapshots: list[AdmissionSnapshot] = field(default_factory=list)
     _pim_busy_accum: float = 0.0                        # Σ pim_busy_dt 누적 (pim_utilization 산출 위)
     _pim_last_dispatch_t: float | None = None
 
     # ------------------------------------------------------------------------
-    # D1 hybrid — hook callback (dispatcher / SchedulerCore 에서 fire)
+    # D1 hybrid — hook callback (dispatcher 에서 fire)
     # ------------------------------------------------------------------------
 
     def record_dispatch(self, event: DispatchEvent) -> None:
@@ -205,57 +165,13 @@ class Evaluator:
                 self._pim_busy_accum += event.timestamp - self._pim_last_dispatch_t
             self._pim_last_dispatch_t = event.timestamp
 
-    def record_admission_tick(self, snapshot: AdmissionSnapshot) -> None:
-        """SchedulerCore.on_admission_tick 가 fire 하면 호출. Series 누적."""
-        self._admission_snapshots.append(snapshot)
-
     # ------------------------------------------------------------------------
-    # 7 산출 method (PLAN §4 Impl-8 정합)
+    # 6 산출 method (PLAN §4 Impl-8 정합)
     # ------------------------------------------------------------------------
 
     def dispatch_trace(self) -> tuple[DispatchEvent, ...]:
         """§6.5 Init/T1~T5 sequence 의 event log. Tuple = immutable snapshot."""
         return tuple(self._dispatch_events)
-
-    def admission_convergence(self) -> ConvergenceVerdict:
-        """§6.4 deadband 수렴 trace 위 oscillation / 수렴 판정.
-
-        Heuristic (구조 검증, 정량값 미산출):
-        - in_band_fraction = (|a-b| ≤ deadband_width 인 snapshot 비율)
-        - converged: 마지막 N snapshot 의 in_band 비율 ≥ _CONVERGE_TAIL_THRESHOLD (0.8)
-        - oscillating: idle_fraction (a-b) sign change 빈도 ≥ _OSCILLATE_SIGN_CHANGE_THRESHOLD (0.4)
-
-        둘 다 False = transient. 둘 다 True 는 정의상 불가능 (caller 가 해석).
-        """
-        if not self._admission_snapshots:
-            return ConvergenceVerdict(False, False, 0.0, 0)
-        in_band_count = 0
-        sign_changes = 0
-        prev_sign = 0
-        for s in self._admission_snapshots:
-            width = lookup_width(self.config.admission, s.ctx_tokens)
-            if in_band(s.a_cycle - s.b_cycle, width):
-                in_band_count += 1
-            cur_sign = 1 if s.a_cycle > s.b_cycle else (-1 if s.a_cycle < s.b_cycle else 0)
-            if prev_sign != 0 and cur_sign != 0 and cur_sign != prev_sign:
-                sign_changes += 1
-            if cur_sign != 0:
-                prev_sign = cur_sign
-        n = len(self._admission_snapshots)
-        in_band_fraction = in_band_count / n
-        tail_n = min(n, _CONVERGE_TAIL_WINDOW)
-        tail_in_band = sum(
-            1 for s in self._admission_snapshots[-tail_n:]
-            if in_band(s.a_cycle - s.b_cycle, lookup_width(self.config.admission, s.ctx_tokens))
-        )
-        converged = (tail_in_band / tail_n) >= _CONVERGE_TAIL_THRESHOLD if tail_n > 0 else False
-        oscillating = (sign_changes / max(1, n - 1)) >= _OSCILLATE_SIGN_CHANGE_THRESHOLD
-        return ConvergenceVerdict(
-            converged=converged,
-            oscillating=oscillating,
-            in_band_fraction=in_band_fraction,
-            samples=n,
-        )
 
     def idle_fraction(self) -> dict:
         """3-key idle fraction schema. Impl-10-pre-1 O8.1 정합.
@@ -554,155 +470,6 @@ class Evaluator:
             "provenance": "f3_closed_form_alpha_path + run_loop_measured_b_cycle",
         }
 
-    def d2_report(
-        self, kv_lengths: list[int], ctx_sweep: list[int] | None = None,
-        aux1_t4_ratio_path: str | Path | None = None,
-    ) -> dict:
-        """D2 통합 산출 — 4 source closed-form + T4 microbench ingest + markdown.
-
-        Args:
-            kv_lengths: trace 첫 N req kv_length 목록 (Aux2 per-req + F5 입력)
-            ctx_sweep: F3 ctx sweep 목록 (default [2k, 32k, 128k, 1M])
-            aux1_t4_ratio_path: Colab T4 microbench JSON path (optional ingest)
-        """
-        if ctx_sweep is None:
-            ctx_sweep = [2_000, 32_000, 128_000, 1_000_000]
-        cal = self.config.calibration
-
-        aux1 = self.aux1_mixed_batch_weight_reuse()
-        aux2_per_req = [
-            self.aux2_bus_traffic_reduction(kv) for kv in kv_lengths
-        ]
-        f3_by_ctx = [self.f3_closed_form(ctx) for ctx in ctx_sweep]
-        f5 = self.f5_trace_grounded(kv_lengths)
-
-        # η_HBM sensitivity sweep
-        eta_sweep = {}
-        for eta in cal.eta_hbm_external_sweep:
-            # Snapshot calibration with different η
-            import dataclasses as dc
-            cal_eta = dc.replace(cal, eta_hbm_external=eta)
-            cfg_eta = dc.replace(self.config, calibration=cal_eta)
-            ev_eta = Evaluator(config=cfg_eta, clock=self.clock, idle_telemetry=self.idle_telemetry)
-            eta_sweep[eta] = {
-                "aux1_saving_total_ns": ev_eta.aux1_mixed_batch_weight_reuse().saving_total_80_layer_ns,
-                "aux2_avg_saving_total_ns": sum(
-                    ev_eta.aux2_bus_traffic_reduction(kv).saving_total_80_layer_ns
-                    for kv in kv_lengths
-                ) / len(kv_lengths) if kv_lengths else 0.0,
-            }
-
-        # T4 microbench ingest (optional, disclosure only)
-        aux1_t4 = None
-        path = aux1_t4_ratio_path or cal.aux1_t4_ratio_path
-        if path:
-            p = Path(path)
-            if not p.is_absolute():
-                p = Path(__file__).parent.parent.parent / p
-            if p.exists():
-                import json
-                aux1_t4 = json.loads(p.read_text())
-
-        result = {
-            "aux1": aux1,
-            "aux2_per_req": aux2_per_req,
-            "f3_by_ctx": f3_by_ctx,
-            "f5": f5,
-            "eta_sweep": eta_sweep,
-            "aux1_t4_microbench": aux1_t4,
-            "provenance": dict(cal.provenance),
-        }
-        result["markdown"] = self._format_d2_markdown(result)
-        return result
-
-    @staticmethod
-    def _format_d2_markdown(d2: dict) -> str:
-        """D2 통합 markdown — 4 source + provenance + honest disclosure."""
-        lines = ["# D2 Calibrated Projection Report (Stage 2)", ""]
-        lines.append("## Substrate Provenance")
-        for k, v in d2["provenance"].items():
-            lines.append(f"- {k}: `{v}`")
-        lines.append("")
-
-        # Aux1
-        a1 = d2["aux1"]
-        lines.append("## Aux1 — Mixed Batching Weight Reuse")
-        lines.append(f"- saving_per_layer = {a1.saving_per_layer_ns:.2f} ns")
-        lines.append(f"- saving_total (80 layer) = {a1.saving_total_80_layer_ns:.2f} ns = "
-                     f"{a1.saving_total_80_layer_ns / 1000:.2f} µs")
-        lines.append(f"- provenance: {a1.provenance_label}")
-        lines.append("")
-
-        # Aux2
-        lines.append("## Aux2 — Bus Traffic Reduction (per-req kv_length)")
-        lines.append("| req | saving_total_ns | saving_total_us |")
-        lines.append("|---|---|---|")
-        for i, c in enumerate(d2["aux2_per_req"]):
-            lines.append(f"| {i} | {c.saving_total_80_layer_ns:.2f} | "
-                         f"{c.saving_total_80_layer_ns / 1000:.2f} |")
-        lines.append("")
-
-        # F3
-        lines.append("## F3 — Inter-instance Pipeline Ratio (closed-form, α path)")
-        lines.append("| ctx | t_proj_us | t_attn_us | a_cycle_us | b_cycle_us | F3 ratio |")
-        lines.append("|---|---|---|---|---|---|")
-        for r in d2["f3_by_ctx"]:
-            lines.append(f"| {r.ctx_tokens} | {r.t_proj_us:.2f} | {r.t_attn_us:.2f} | "
-                         f"{r.a_cycle_us:.2f} | {r.b_cycle_us:.2f} | {r.f3_ratio:.4f} |")
-        lines.append("")
-
-        # F5
-        f5 = d2["f5"]
-        lines.append("## F5 — Channel-independent vs Lock-step max-KV")
-        lines.append(f"- n_reqs = {f5.n_requests}, sum_KV = {f5.sum_kv}, max_KV = {f5.max_kv}")
-        lines.append(f"- tiles_indep = {f5.tiles_channel_independent}, "
-                     f"tiles_lockstep = {f5.tiles_lockstep_max_kv}")
-        lines.append(f"- F5 ratio = {f5.f5_ratio:.4f} "
-                     f"(< 1.0 = channel-independent 가 lock-step 보다 빠름)")
-        lines.append("")
-
-        # η sweep
-        lines.append("## η_HBM Sensitivity Sweep")
-        lines.append("| η | Aux1 saving (ns) | Aux2 avg saving (ns) |")
-        lines.append("|---|---|---|")
-        for eta, v in d2["eta_sweep"].items():
-            lines.append(f"| {eta} | {v['aux1_saving_total_ns']:.2f} | "
-                         f"{v['aux2_avg_saving_total_ns']:.2f} |")
-        lines.append("")
-
-        # T4 microbench
-        if d2["aux1_t4_microbench"]:
-            lines.append("## Aux1 Empirical Anchor — T4 Microbench")
-            lines.append(f"- provenance: `{d2['aux1_t4_microbench']['metadata']['provenance_label']}`")
-            lines.append("| batch (k → 2k) | t_separate (ms) | t_mixed (ms) | ratio |")
-            lines.append("|---|---|---|---|")
-            for k, v in d2["aux1_t4_microbench"].get("aux1_ratio", {}).items():
-                if isinstance(v, dict) and "ratio_separate_over_mixed" in v:
-                    lines.append(f"| {k} | {v['t_separate_ms']:.4f} | "
-                                 f"{v['t_mixed_ms']:.4f} | {v['ratio_separate_over_mixed']:.4f} |")
-            lines.append("")
-            lines.append("*Cross-validation disclosure — T4 위 architectural property (mixed batch "
-                         "weight reuse 가 memory-bound regime 위 dominant). B200 위 ingest 0 — "
-                         "T4 ≠ B200 substrate mismatch 정합.*")
-            lines.append("")
-
-        # Honest disclosure
-        lines.append("## Honest Disclosure")
-        lines.append("- **F1 (SP-PIM vs GPU attention) — Impl-11 deferred**: Blackwell GPU attention "
-                     "kernel calibration 영역. Stage 2 위 reference placeholder `decode_attn_fallback` 보존.")
-        lines.append("- **F2 (double-buffering 정량) — Impl-11 deferred**: calibrated cycle 위 "
-                     "isolated ratio.")
-        lines.append("- **Memory = HBM4 hypothetical projection**: 현재 production 부재, "
-                     "ARCH §3.1 *HBM4 logic die* literal 정합.")
-        lines.append("- **η_HBM_ext = Framing A**: D1 H100 (HBM3) 측정값 → HBM4 영역 extension. "
-                     "직접 measurement 부재.")
-        lines.append("- **NVLink 산식 위 등장 0**: ARCH §3.4 *async hidden* + §3.5.3 *result via HBM*.")
-        lines.append("- **FP16 PIM tile = reference**: ARCH §6.6 regime A 확정 evidence. "
-                     "production 위 `kv_precision = FP8` 영원 (산식 위 미사용).")
-        lines.append("- **`compute_*_op_time_s` per-mb spec-derived**: ARCH §3.5.2 Computed Wait + "
-                     "사용자 의도 *'각 trace 위 정확 산출'* 정합. 평균/dummy 0.")
-        return "\n".join(lines)
-
     def report(
         self, a_cycle: float, b_cycle: float, t_pim: float, t_proj: float,
     ) -> dict:
@@ -711,14 +478,13 @@ class Evaluator:
         Q9 — dict 가 structured (test 검증), markdown 이 human-readable.
         PLAN §0.5 출처 라벨 동반 — markdown 에 ablation flag 명시.
 
-        Returns dict with 8 keys:
-            dispatch_trace · convergence · idle_fraction · pim_utilization ·
+        Returns dict with 7 keys:
+            dispatch_trace · idle_fraction · pim_utilization ·
             pipeline_efficiency · acceleration_decomposition · markdown · ablation_config
         """
         decomp = self.acceleration_decomposition(a_cycle, b_cycle, t_pim, t_proj)
         result = {
             "dispatch_trace": self.dispatch_trace(),
-            "convergence": self.admission_convergence(),
             "idle_fraction": self.idle_fraction(),
             "pim_utilization": self.pim_utilization(),
             "pipeline_efficiency": self.pipeline_efficiency(a_cycle, b_cycle),
@@ -746,13 +512,6 @@ class Evaluator:
         lines.append("")
         lines.append(f"## PIM Utilization: {result['pim_utilization']:.4f}")
         lines.append(f"## Pipeline Efficiency: {result['pipeline_efficiency']:.4f}")
-        lines.append("")
-        lines.append("## Convergence")
-        conv = result["convergence"]
-        lines.append(f"- converged: {conv.converged}")
-        lines.append(f"- oscillating: {conv.oscillating}")
-        lines.append(f"- in_band_fraction: {conv.in_band_fraction:.4f}")
-        lines.append(f"- samples: {conv.samples}")
         lines.append("")
         lines.append("## Acceleration Decomposition (Direction Only — Impl-10 calibrated 값)")
         lines.append("| Source | cycle_with | cycle_without | ratio | direction+ |")

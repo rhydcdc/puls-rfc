@@ -65,7 +65,6 @@ def test_m3_evaluator_stage2_methods_present():
         "f3_closed_form",
         "f5_trace_grounded",
         "f3_cross_validate",
-        "d2_report",
     ]
     for m in methods:
         assert hasattr(Evaluator, m), f"Evaluator.{m} 영역 부재"
@@ -153,27 +152,6 @@ def test_m10_time_config_gpu_op_time_us_only_fallback():
     cfg = default_dummy_config()
     keys = set(cfg.time.gpu_op_time_us.keys())
     assert keys == {"decode_attn_fallback"}, f"Stage 1 dummy lookup 잔존: {keys}"
-
-
-# ============================================================================
-# M11 — D2 markdown 위 honest disclosure substring 정합
-# ============================================================================
-
-
-def test_m11_d2_markdown_honest_disclosure():
-    from puls_sched.clock import Clock
-    from puls_sched.idle_telemetry import IdleTelemetry
-    cfg = default_dummy_config()
-    ev = Evaluator(config=cfg, clock=Clock(), idle_telemetry=IdleTelemetry())
-    d2 = ev.d2_report(kv_lengths=[100000, 50000])
-    md = d2["markdown"]
-    # Honest disclosure 영역
-    assert "Impl-11 deferred" in md
-    assert "HBM4 hypothetical" in md or "hbm4_projection" in md.lower()
-    assert "Framing A" in md
-    assert "async hidden" in md  # NVLink async hidden disclosure
-    assert "FP16 PIM tile" in md or "Regime A" in md  # FP16 reference disclosure
-    assert "per-mb spec-derived" in md  # Stage 2 timing 정합
 
 
 # ============================================================================

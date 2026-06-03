@@ -676,5 +676,5 @@ Batched starves longs entirely (8.04% → 0.01%), narrowing the distribution to 
 Quantitative coverage of this architecture document:
 
 - **Source decomposition** (Aux1·Aux2·F3·F5, η_HBM sensitivity sweep) — calibrated projection, see [`README.md`](README.md#results)
-- **F1·F2 ablation, MFU plateau, admission ceiling, deadband width** — deferred to subsequent calibration
+- **F1·F2 ablation, MFU plateau, admission ceiling** — deferred to subsequent calibration
 - **Absolute metrics** (TTFT, TPOT, throughput) — silicon absent, permanently out of scope

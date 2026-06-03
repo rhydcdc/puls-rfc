@@ -35,7 +35,6 @@ _EXPECTED_MODULES = {
     "request_queue",
     "kv_accountant",
     "idle_telemetry",
-    "deadband",
     "admission",
     # Impl-4
     "pim_emulator",
@@ -60,10 +59,7 @@ _EXPECTED_ADMISSION_FIELDS = {
     "kv_capacity_aggregate",
     "ctx_tier_short_max",
     "ctx_tier_mid_max",
-    "deadband_width",
     "request_queue_capacity",
-    # Impl-9 — ADMISSION_TICK self-rescheduling cadence (Q1)
-    "tick_interval_us",
     # Impl-10-pre-2 (O9.1) — Hybrid Chunk Size Policy base
     "prefill_chunk_default",
     # Phase-2 §0.8 — 동작점 decode KV 합 목표 (steering 타깃 2)
@@ -350,15 +346,15 @@ def test_meta_data_directory_traces_present():
 # ============================================================================
 
 def test_meta_evaluator_method_inventory():
-    """Evaluator 의 public method bit-exact: 2 callback + 7 산출 = 9 method."""
+    """Evaluator 의 public method bit-exact: 1 callback + 6 산출 = 7 method."""
     from puls_sched.evaluator import Evaluator
     publics = {
         n for n in dir(Evaluator)
         if not n.startswith("_") and callable(getattr(Evaluator, n))
     }
     expected = {
-        "record_dispatch", "record_admission_tick",
-        "dispatch_trace", "admission_convergence", "idle_fraction",
+        "record_dispatch",
+        "dispatch_trace", "idle_fraction",
         "pim_utilization", "pipeline_efficiency", "acceleration_decomposition",
         "report",
     }
@@ -388,15 +384,6 @@ def test_meta_dispatch_event_fields():
     from puls_sched.evaluator import DispatchEvent
     assert set(DispatchEvent.__dataclass_fields__.keys()) == {
         "timestamp", "micro_batch_id", "node_type", "resource", "dag_state_snapshot",
-    }
-
-
-def test_meta_admission_snapshot_fields():
-    """AdmissionSnapshot schema lock-in — 9 field."""
-    from puls_sched.evaluator import AdmissionSnapshot
-    assert set(AdmissionSnapshot.__dataclass_fields__.keys()) == {
-        "timestamp", "gpu_idle_fraction", "pim_idle_fraction",
-        "a_cycle", "b_cycle", "ctx_tokens", "spec_admitted", "n",
     }
 
 
@@ -469,11 +456,6 @@ def test_meta_dispatcher_has_on_dispatch_method():
     assert hasattr(Dispatcher, "on_dispatch")
     sig = inspect.signature(Dispatcher.on_dispatch)
     assert list(sig.parameters.keys()) == ["self", "callback"]
-
-
-def test_meta_scheduler_core_has_on_admission_tick_method():
-    """SchedulerCore.on_admission_tick method (D1 hook API)."""
-    assert hasattr(SchedulerCore, "on_admission_tick")
 
 
 def test_meta_arch_5_7_f4_not_decomposed():

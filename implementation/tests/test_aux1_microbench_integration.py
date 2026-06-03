@@ -9,13 +9,6 @@ empirical anchor — Aux1 closed-form 의 architectural property 정합 검증.
 import json
 from pathlib import Path
 
-import pytest
-
-from puls_sched.clock import Clock
-from puls_sched.config import default_dummy_config
-from puls_sched.evaluator import Evaluator
-from puls_sched.idle_telemetry import IdleTelemetry
-
 
 T4_JSON_PATH = (
     Path(__file__).parent.parent / "data" / "aux1_ratio_t4_measured.json"
@@ -79,23 +72,3 @@ def test_t4_3_n_sat_saturating_knee_exposed():
                 found_saturating = True
                 break
     assert found_saturating, "compute-bound regime (ratio ≤ 1.2) 영역 노출 안 됨"
-
-
-# ============================================================================
-# T4.4 — Evaluator.d2_report() 위 JSON ingest 정합
-# ============================================================================
-
-
-def test_t4_4_d2_report_ingests_aux1_t4_json():
-    """d2_report 위 aux1_t4_ratio_path 위 JSON ingest + report 위 microbench section."""
-    cfg = default_dummy_config()
-    ev = Evaluator(config=cfg, clock=Clock(), idle_telemetry=IdleTelemetry())
-    d2 = ev.d2_report(
-        kv_lengths=[128000, 100000, 64000],
-        aux1_t4_ratio_path=str(T4_JSON_PATH),
-    )
-    assert d2["aux1_t4_microbench"] is not None
-    assert "metadata" in d2["aux1_t4_microbench"]
-    assert "aux1_ratio" in d2["aux1_t4_microbench"]
-    # markdown 위 T4 section disclosure
-    assert "T4 Microbench" in d2["markdown"] or "Empirical Anchor" in d2["markdown"]

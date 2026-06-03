@@ -58,7 +58,7 @@ def _make_req(req_id: int, kv_length: int = 10, max_tokens: int = 0) -> Request:
 def test_stress_100_cycle_admission_dispatch_no_invariant_violation():
     """Impl-9 ARCH-compliant 갱신 — 100 req lifecycle 위 I1~I5 invariant + state consistency.
 
-    Run.loop 의 단일 admission tick 후 step drain 패턴 (proper lifecycle, manual busy reset 폐기).
+    Run.loop 의 단일 admission pass 후 step drain 패턴 (proper lifecycle, manual busy reset 폐기).
     """
     core = _make_core()
     n_requests = 100
@@ -67,7 +67,7 @@ def test_stress_100_cycle_admission_dispatch_no_invariant_violation():
         req = _make_req(i, kv_length=10, max_tokens=1)
         core.request_queue.push(req)
         core._handle(Event(
-            timestamp=float(i), type=EventType.ADMISSION_TICK, payload={},
+            timestamp=float(i), type=EventType.ADMISSION_PASS, payload={},
         ))
         # Drain events (proper lifecycle — invariants 강제 위)
         while core.step():
@@ -101,7 +101,7 @@ def test_stress_admission_completion_kv_roundtrip():
     for i in range(50):
         core.request_queue.push(_make_req(i, kv_length=20, max_tokens=1))
         core._handle(Event(
-            timestamp=float(i), type=EventType.ADMISSION_TICK, payload={},
+            timestamp=float(i), type=EventType.ADMISSION_PASS, payload={},
         ))
         while core.step():
             pass
@@ -118,7 +118,7 @@ def test_determinism_100_cycle_admission_main_loop_bit_exact():
         for i in range(50):
             core.request_queue.push(_make_req(i, kv_length=20))
             core._handle(Event(
-                timestamp=float(i), type=EventType.ADMISSION_TICK, payload={},
+                timestamp=float(i), type=EventType.ADMISSION_PASS, payload={},
             ))
             core.dispatcher.gpu_busy = False
             core.dispatcher.pim_busy = False

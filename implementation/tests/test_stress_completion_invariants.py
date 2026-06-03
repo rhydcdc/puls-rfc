@@ -69,7 +69,7 @@ def _make_core(kv_capacity: int = 1_000_000):
 
 
 def _adm_event():
-    return Event(timestamp=0.0, type=EventType.ADMISSION_TICK,
+    return Event(timestamp=0.0, type=EventType.ADMISSION_PASS,
                  payload={"t_proj": 1.0, "t_pim_fn": lambda n: 0.5,
                           "a_cycle": 1.0, "b_cycle": 1.0, "ctx_tokens": 1000})
 

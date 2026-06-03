@@ -7,8 +7,8 @@ from dataclasses import dataclass, field
 _RESOURCE_SLOTS = ("gpu_instance_a", "pim_instance_a", "gpu_instance_b")
 
 # Legacy 키 (Impl-3 영역 single-instance) → Impl-10-pre-1 의 3-slot 매핑.
-# 기존 caller (evaluator.AdmissionSnapshot · dispatcher 의 단축 호출)
-# 가 "GPU"/"PIM" 키 사용 — backward-compat 정합. (balance_intra_A 는 Phase-2 S1 삭제.)
+# 기존 caller (dispatcher 의 단축 호출)가 "GPU"/"PIM" 키 사용 — backward-compat
+# 정합. (balance_intra_A 는 Phase-2 S1 삭제.)
 _LEGACY_KEY_MAP = {
     "GPU": "gpu_instance_a",
     "PIM": "pim_instance_a",
@@ -64,7 +64,7 @@ class IdleTelemetry:
     def active_duration(self, resource: str) -> float:
         """Resource 의 누적 활동 시간 (clock time 단위). Impl-10-pre-1 (B) — cycle 측정 substrate.
 
-        SchedulerCore 의 _measure_cycles 가 ADMISSION_TICK 사이 delta 산출 위 호출.
+        Evaluator.acceleration_decomposition 이 a/b cycle 측정 위 호출.
         """
         slot = _LEGACY_KEY_MAP.get(resource, resource)
         if slot not in self._active_duration:

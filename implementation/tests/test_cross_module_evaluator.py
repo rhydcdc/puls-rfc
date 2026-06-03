@@ -1,6 +1,6 @@
 """Impl-8 cluster E — cross-module chain (Evaluator + dispatcher + main_loop) + non-intrusion.
 
-dispatcher.on_dispatch(evaluator.record_dispatch) + scheduler_core.on_admission_tick(...)
+dispatcher.on_dispatch(evaluator.record_dispatch)
 → 실 dispatch progression → evaluator.report() 의 chain 검증. Impl-6 cross-module 패턴 정합.
 """
 import dataclasses
@@ -52,7 +52,6 @@ def _build_full_core_with_evaluator(config=None):
     )
     evaluator = Evaluator(config=config, clock=clock, idle_telemetry=idle)
     dispatcher.on_dispatch(evaluator.record_dispatch)
-    core.on_admission_tick(evaluator.record_admission_tick)
     return core, evaluator
 
 
@@ -69,18 +68,6 @@ def test_chain_register_dispatch_record():
     qkv.transition_to(NodeState.READY)
     core.dispatcher.dispatch_gpu(qkv)
     assert len(evaluator.dispatch_trace()) == 1
-
-
-def test_chain_register_admission_record():
-    """on_admission_tick 등록 → ADMISSION_TICK event drain → evaluator._admission_snapshots 누적."""
-    core, evaluator = _build_full_core_with_evaluator()
-    # Admission 이 spec 산출 못 해도 (queue empty) snapshot 은 누적 (D1 hybrid empty tick capture)
-    core.queue.push(Event(
-        timestamp=0.0, type=EventType.ADMISSION_TICK,
-        payload={"t_proj": 1.0, "a_cycle": 1.0, "b_cycle": 1.0, "ctx_tokens": 4000},
-    ))
-    core.step()
-    assert len(evaluator._admission_snapshots) == 1
 
 
 def test_chain_evaluator_standalone_scheduler_unaware():
@@ -141,7 +128,7 @@ def test_chain_kv_no_leak_with_evaluator_attached():
         core.request_queue.push(req)
     # Drive admission via direct push (synthetic)
     core.queue.push(Event(
-        timestamp=0.0, type=EventType.ADMISSION_TICK,
+        timestamp=0.0, type=EventType.ADMISSION_PASS,
         payload={"t_proj": 1.0, "a_cycle": 1.0, "b_cycle": 1.0, "ctx_tokens": 4000},
     ))
     core.step()
@@ -181,22 +168,6 @@ def test_chain_evaluator_no_dispatch_state_mutation():
     assert state_a == state_b  # evaluator 부착이 state 영향 0
 
 
-def test_chain_admission_snapshot_captures_idle_fraction():
-    """Snapshot 의 idle_fraction == admission.idle_telemetry 값 (post-hoc snapshot)."""
-    core, evaluator = _build_full_core_with_evaluator()
-    # idle_telemetry 에 합성 active 주입
-    core.admission.idle_telemetry.reset(0.0)
-    core.admission.idle_telemetry.record_active("GPU", 0.0, 1.0)
-
-    core.queue.push(Event(
-        timestamp=2.0, type=EventType.ADMISSION_TICK,
-        payload={"t_proj": 1.0, "a_cycle": 1.0, "b_cycle": 1.0, "ctx_tokens": 4000},
-    ))
-    core.step()
-    snap = evaluator._admission_snapshots[0]
-    assert snap.gpu_idle_fraction == core.admission.idle_telemetry.gpu_idle_fraction()
-
-
 def test_chain_replay_determinism():
     """동일 fixture + ablation config 위 chain 2 회 → report() bit-exact (PLAN §0 C5)."""
     config = default_dummy_config()
@@ -206,7 +177,7 @@ def test_chain_replay_determinism():
     for c in (core1, core2):
         for i in range(3):
             c.queue.push(Event(
-                timestamp=float(i), type=EventType.ADMISSION_TICK,
+                timestamp=float(i), type=EventType.ADMISSION_PASS,
                 payload={"t_proj": 1.0, "a_cycle": 1.0, "b_cycle": 1.0 + i, "ctx_tokens": 4000},
             ))
         while c.step():
@@ -216,4 +187,3 @@ def test_chain_replay_determinism():
     r2 = ev2.report(a_cycle=10, b_cycle=20, t_pim=5, t_proj=5)
     assert r1["markdown"] == r2["markdown"]
     assert r1["acceleration_decomposition"] == r2["acceleration_decomposition"]
-    assert r1["convergence"] == r2["convergence"]
