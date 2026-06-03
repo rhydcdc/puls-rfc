@@ -4,6 +4,17 @@
 projection+prefill-attn / FFN=인스턴스 B)의 시간을 맞춰 인스턴스 간 idle 최소화.
 수치는 op-time 직접 산출(PIMExecutor·compute_ffn/gpu_op_time_s, **TP=8** 반영).
 
+> **검증 코드 (PULS 독립, composition 명중만) — 두 sim 분담:**
+> - [cluster_balance.cpp](implementation/analysis/cluster_balance.cpp) — **콜드스타트 분배**:
+>   엣지게이트(긴 것 shed) + interleave-greedy 로 256 노드를 평균 100K 로 채우고, 남은 풀로
+>   **2 disjoint 배치(on2)**가 (count, Σkv) 명중 가능함을 증명.
+> - [cluster_lifecycle.cpp](implementation/analysis/cluster_lifecycle.cpp) — **단일 노드 생애**:
+>   콜드스타트 후 steering·전이(프리필→디코드)·per-completion 힐링·age-cap 통합, 디코드(62∧6.15M)·
+>   프리필(128∧12.8M) composition 유지를 증명(배포 128, 둘 다 **100% 명중**).
+>
+> **★ 분산이 이미 작다** — Σdev 디코드 **0.20%**·프리필 **0.07%** (±10% 밴드 ≪, 실현 idle ~0).
+> on2 의 band-pass(밴드 안/밖)보다 *이 편차 크기*가 동작점의 실질 지표 (on2 미달분도 힐링이 메움).
+
 ---
 
 ## 1. 고정값 (순서대로) — prefill **256** 도출 기준 (배포 동작점 = **128**, §4.1)
