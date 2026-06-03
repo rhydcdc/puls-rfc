@@ -36,7 +36,7 @@
   - [6.8 Idle Floor: Theory vs Measurement](#68-idle-floor-theory-vs-measurement)
 - [7. Cluster Scale: Per-Node Pool 100K-Centering Routing](#7-cluster-scale-per-node-pool-100k-centering-routing)
   - [7.1 Motivation: Idle Blowup Without Centering](#71-motivation-idle-blowup-without-centering)
-  - [7.2 What the Node's 30M HBM Actually Holds](#72-what-the-nodes-30m-hbm-actually-holds)
+  - [7.2 What the Node's HBM Actually Holds](#72-what-the-nodes-hbm-actually-holds)
   - [7.3 Cold-start: Edge Gating + Interleave Greedy](#73-cold-start-edge-gating--interleave-greedy)
   - [7.4 Healing: Strategic Greedy Refill (No Eviction)](#74-healing-strategic-greedy-refill-no-eviction)
   - [7.5 Measurement — E Sweep · Stability](#75-measurement--e-sweep--stability)
@@ -277,7 +277,7 @@ Within Instance A, when the GPU projection is compute-bound, HBM bandwidth becom
 **Does PIM's KV bandwidth actually hide in the compute-bound window? (quantified grounds).** The *temporal* fit is shown in §6.8 (t_pim ≤ t_gpuA). The *bandwidth* fit rests on four grounds — three computable from spec, one silicon-deferred:
 
 1. **The headroom is real.** GPU-A projection is compute-bound: QKV arithmetic intensity ≈ 349 FLOP/byte ≫ the B200 roofline ridge (2200 TFLOPS ÷ 16 TB/s ≈ 137 FLOP/byte). So during projection only ~32% of the external HBM bus is used — ~68% sits idle.
-2. **PIM does not use the external bus at all.** One decode-attn layer reads Σkv 12.3M × 2 KB (FP8 K+V, n_kv=8 · d_head=128) = 25.2 GB; over t_pim ≈ 50 µs that is **~500 TB/s — ~4× the 128 TB/s external aggregate**. KV therefore *cannot* be streamed over the bus the GPU uses; PULS processes it in-place at the DRAM rows (the F1 / Aux2 premise). The "hiding" is **path separation, not fitting into leftover bus bandwidth**.
+2. **PIM does not use the external bus at all.** One decode-attn layer reads Σkv 6.15M × 2 KB (FP8 K+V, n_kv=8 · d_head=128; deployed 128) = 12.6 GB; over t_pim ≈ 25 µs that is **~500 TB/s — ~4× the 128 TB/s external aggregate** (the ratio is prefill-invariant). KV therefore *cannot* be streamed over the bus the GPU uses; PULS processes it in-place at the DRAM rows (the F1 / Aux2 premise). The "hiding" is **path separation, not fitting into leftover bus bandwidth**.
 3. **The internal path is faster, but not contention-free.** The attention SFU is on the logic die, so PIM still shares the TSV / cell-array path with GPU accesses to the same channels — contention exists. But by bypassing the external bus protocol it receives the TSV at η_internal, **≈ 1/η_external ≈ 1.35× the effective rate** of an external read. And channel-level toggling (§3.2) is itself an accelerator: normal-mode channels stream weights to the GPU *while* PIM-mode channels feed decode-attn — weight-load ‖ KV-compute proceed concurrently, not serially.
 4. **Silicon-deferred closure (honest gap).** Whether the TSV / cell-array bandwidth sustains PIM's full KV read *concurrently* with the GPU's residual weight loads, without saturation, depends on η_internal and per-channel TSV bandwidth — Ramulator2-*estimated*, not silicon-measured (OI9 / §3.5.3). The four factors are strong grounds and encode the P5 + §3.2 architectural premise; they are not a closed measurement.
 
@@ -410,53 +410,53 @@ on event(kernel K of μ-batch X completes):
 The scheduler composes each μ-batch to drive the three resources (PIM = decode-attn, GPU-A = projection + prefill-attn, FFN = Instance B) to equal time, minimizing inter-instance and intra-instance idle. Composition is **three separate concerns**, each steered independently from its own in-flight pool — *not* one cohort regulated by idle-fraction feedback. (An earlier draft used measured GPU/PIM idle fractions + a hysteresis deadband to adjust admission per iteration; that feedback model is superseded — see the closing note. The scheduler now hits *fixed targets* by steering rather than reacting to measured idle.)
 
 1. **Admission = pool refill only.** `request_queue → in-flight (PREFILL)`, gated solely by the aggregate KV budget (`can_admit`). It does not look at the decode/prefill targets. A request with `prompt_len = 0` (decode-only), or one whose prefill is already complete, transitions straight to DECODE.
-2. **Decode-set steering.** From the in-flight **DECODE pool**, select a set hitting two targets at once — **count 123 ∧ Σkv 12.3M** — by local-greedy steering with an age-cap. Pure *selection* (no KV admission, no queue manipulation; KV is reserved at pool entry). Unselected requests age (`wait++`); selected reset (`wait = 0`).
-3. **Prefill steering.** From the in-flight **PREFILL pool**, distribute **256 tokens** (the fixed FFN-batch knob, ① below) across members so the PREFILL_ATTN depth-sum hits **25.6M**, by the same per-token local-greedy + age-cap. A member receiving 0 tokens *stays in the pool* (it is not added as an empty chunk, which would inflate the μ-batch and starve decode) — a separate axis from decode.
+2. **Decode-set steering.** From the in-flight **DECODE pool**, select a set hitting two targets at once — **count 62 ∧ Σkv 6.15M** (deployed 128; the 256-derivation is 123·12.3M) — by local-greedy steering with an age-cap. Pure *selection* (no KV admission, no queue manipulation; KV is reserved at pool entry). Unselected requests age (`wait++`); selected reset (`wait = 0`).
+3. **Prefill steering.** From the in-flight **PREFILL pool**, distribute **128 tokens** (the fixed FFN-batch knob, ① below) across members so the PREFILL_ATTN depth-sum hits **12.8M**, by the same per-token local-greedy + age-cap. A member receiving 0 tokens *stays in the pool* (it is not added as an empty chunk, which would inflate the μ-batch and starve decode) — a separate axis from decode.
 4. **Per-iteration recomposition.** After every forward pass the μ-batch is re-selected from the pool (`_recompose_mb`), disjoint from other active μ-batches. The in-flight window holds 2 active μ-batches (`_STAGGERING_TARGET_MB = 2`; capacity 3 = 2 active + 1 transition slack), which is the staggering precondition for F2/F3 overlap (§5.6, §6.5). This restores the degree of freedom a sticky-cohort model destroys — composition tracks the pool as it drains and refills.
 
 > **This is the real continuous-batching paradigm, not an approximation of it.** A production server holds a standing population mixing lifecycle stages — requests decoding (long generations in flight), requests prefilling (new prompts), and requests that just finished prefill and entered decode — and recomposes the batch every iteration (vLLM / Sarathi-Serve iteration-level scheduling). The pool model *is* that structure: an in-flight pool with PREFILL/DECODE states, KV resident in the pool, PREFILL→DECODE transition, admission refill, and per-iteration recomposition with mixed batching. The earlier sticky-cohort model — which froze a fixed cohort and processed it to completion together — was the *unfaithful* one; real servers never freeze a batch. The scheduling mechanism is therefore structurally faithful; what remains synthetic is only the *workload feed* (the warm-start seed and the abundant-pool assumption, honestly disclosed in the README), not the mechanism. So the idle floor proven in §6.8 is the floor of the real scheduling structure, not of a toy.
 
 **The operating point (causal chain ① → ⑤).** The prefill token count fixes the FFN batch, which fixes the decode count, which with the balance ctx fixes the decode-KV sum:
 
-| order | fixed value | value (prefill 256) | binding resource |
+| order | fixed value | value (prefill **128**, deployed; 256-derivation is 2×) | binding resource |
 |---|---|---|---|
-| ① | prefill tokens / batch | **256** (power-of-2, kernel-friendly) | GPU-A (PREFILL_ATTN = Σ chunk×depth) |
-| ② | balance time X (= throughput cycle) | **~51 µs** (X·L ≈ 4.1 ms = batch forward-pass period) | — |
-| ③ | FFN batch | **379 tokens** | Instance B |
-| ④ | **decode count N_dec (control target)** | **123** (= 379 − 256) | Instance B |
-| ⑤ | **decode-KV sum (control target)** | **12.3M** | Instance A (PIM) |
-| + | prefill KV-work (control target) | **25.6M** (= 256 × depth) | GPU-A |
+| ① | prefill tokens / batch | **128** (power-of-2, kernel-friendly; 256 is the derivation basis) | GPU-A (PREFILL_ATTN = Σ chunk×depth) |
+| ② | balance time X (= throughput cycle) | **~25.5 µs** (X·L ≈ 2.0 ms = batch forward-pass period) | — |
+| ③ | FFN batch | **190 tokens** | Instance B |
+| ④ | **decode count N_dec (control target)** | **62** (= 190 − 128) | Instance B |
+| ⑤ | **decode-KV sum (control target)** | **6.15M** | Instance A (PIM) |
+| + | prefill KV-work (control target) | **12.8M** (= 128 × depth) | GPU-A |
 | + | balance ctx | **~100K** (hardware constant) | — |
 
-The *count* (123) is independent of KV length (FFN sees only the token count); the *KV sum* (12.3M) is the sum of lengths (PIM sees only the sum). Both satisfied ⟺ mean ctx ≈ 100K.
+The *count* (62) is independent of KV length (FFN sees only the token count); the *KV sum* (6.15M) is the sum of lengths (PIM sees only the sum). Both satisfied ⟺ mean ctx ≈ 100K. (Deployed 128; the 256-derivation is 123·12.3M, all 2× — OPERATING_POINT §1.)
 
-**Local-greedy steering + age-cap (the `former` algorithm).** The control target is the pair *(count 123, Σkv 12.3M)* — not a single average. Pure FIFO catches Σkv but misses the count on an off-average pool (measured spread 22–30%). So at each step the scheduler computes the *length it next needs* and admits the decoder closest to it (steering); a request that has waited `≥ AGE_CAP` is force-included (age-cap — fairness / FIFO intent). No global statistics, no future prediction — purely local:
+**Local-greedy steering + age-cap (the `former` algorithm).** The control target is the pair *(count 62, Σkv 6.15M)* (deployed 128; the 256-derivation is 123·12.3M) — not a single average. Pure FIFO catches Σkv but misses the count on an off-average pool (measured spread 22–30%). So at each step the scheduler computes the *length it next needs* and admits the decoder closest to it (steering); a request that has waited `≥ AGE_CAP` is force-included (age-cap — fairness / FIFO intent). No global statistics, no future prediction — purely local:
 
 ```
-one μ-batch (decode):                 # AGE_CAP = 2
+one μ-batch (decode):                 # AGE_CAP = 5 (deployed/cluster; the old node-scheduler sweep was 2)
   n=0, S=0
-  while n < target_count(123) and S < target_kv(12.3M) and pool:
+  while n < target_count(62) and S < target_kv(6.15M) and pool:
     if any request with wait ≥ AGE_CAP: admit the oldest             # fairness (forced)
     else: admit decoder closest to ideal=(target_kv−S)/(target_count−n)   # steering
   remaining waiters: wait += 1
-  → converges to (123, 12.3M); n increases monotonically → ≤123 steps.
-prefill: distribute 256 tokens to depth-sum 25.6M by the same steering + age-cap.
-window = 3 (2 active for F2/F3 overlap + 1 transition slack).
+  → converges to (62, 6.15M); n increases monotonically → ≤62 steps.
+prefill: distribute 128 tokens to depth-sum 12.8M by the same steering + age-cap.
+2 active μ-batch — re-composed on completion from (returned members + surplus) (capacity 3 = 2 active + 1 transition slack).
 ```
 
-- **★ Length-distribution-agnostic (the key property).** On a heavily varied pool (real traffic), short + long requests are *combined* to hit both targets. Heavy / mixed / bimodal — any distribution works, because the average is never read; only the two targets are matched. Even an age-cap-forced off-size request is corrected by steering (a forced long request lowers `ideal` → the next picks several short ones), so the batch stays (123, 12.3M). A request that arrives first is processed within ≤ AGE_CAP+1 batches.
-- **Operating parameters = target_count + target_kv + AGE_CAP.** The ±10% band [11.1M, 13.5M] is **not a control value** — it is a diagnostic idle-SLA label (band width ≈ worst-case tolerated idle: ±10% → edge idle ~8.6–10.6%). Steering hits the target, so realized idle ≈ 0; `former` does not stop on the band.
-- **AGE_CAP trade-off (sweep).** cap↑ → steering freedom↑ → spread↓, but waiting (latency)↑. cap↓ → FIFO-like → fair / low-latency but spread↑. `cap1: sp 3.1%` · `**cap2: sp 1.2%, wait ≤3**` · `cap5: sp 0.7%, wait 5` · `cap∞: sp 0.8% but starvation (wait 37)`. → **AGE_CAP = 2 adopted** (the spread / fairness / latency sweet spot). The fairness cost of this choice is quantified in §6.8.
+- **★ Length-distribution-agnostic (the key property).** On a heavily varied pool (real traffic), short + long requests are *combined* to hit both targets. Heavy / mixed / bimodal — any distribution works, because the average is never read; only the two targets are matched. Even an age-cap-forced off-size request is corrected by steering (a forced long request lowers `ideal` → the next picks several short ones), so the batch stays (62, 6.15M). A request that arrives first is processed within ≤ AGE_CAP+1 batches.
+- **Operating parameters = target_count + target_kv + AGE_CAP.** The ±10% band [5.55M, 6.77M] is **not a control value** — it is a diagnostic idle-SLA label (band width ≈ worst-case tolerated idle: ±10% → edge idle ~8.6–10.6%). Steering hits the target, so realized idle ≈ 0; `former` does not stop on the band.
+- **AGE_CAP trade-off (sweep).** cap↑ → steering freedom↑ → spread↓, but waiting (latency)↑. cap↓ → FIFO-like → fair / low-latency but spread↑. `cap1: sp 3.1%` · `cap2: sp 1.2%, wait ≤3` · `**cap5: sp 0.7%, wait 5**` · `cap∞: sp 0.8% but starvation (wait 37)`. → **AGE_CAP = 5 adopted (deployed)** — wait 5 batches ≈ 128 µs ≪ TBT, so latency-harmless, and spread 0.7% < cap2. The old node-scheduler was conservatively 2 (quantified in §6.8).
 
-**ctx 100K is a hardware constant, not an empirical guess.** Solving the triple balance yields `ctx_balance = (K2+1)/K1` from the op-time coefficient ratios (PIM tile rate ÷ FFN flops/tok ÷ prefill-attn flops/tok·depth ÷ proj flops/tok); *prefill cancels out*, so the balance ctx is 100K for **every** prefill (§5 sweep B confirms). Its role is to *derive* the targets (Σkv 12.3M = 123 × 100K), **not** to impose a mean on the workload. This is why the algorithm is length-distribution-agnostic: it matches the two derived targets, however individual request lengths are distributed.
+**ctx 100K is a hardware constant, not an empirical guess.** Solving the triple balance yields `ctx_balance = (K2+1)/K1` from the op-time coefficient ratios (PIM tile rate ÷ FFN flops/tok ÷ prefill-attn flops/tok·depth ÷ proj flops/tok); *prefill cancels out*, so the balance ctx is 100K for **every** prefill (§5 sweep B confirms). Its role is to *derive* the targets (deployed 128: Σkv 6.15M = 62 × 100K; derivation 256: 12.3M = 123 × 100K), **not** to impose a mean on the workload. This is why the algorithm is length-distribution-agnostic: it matches the two derived targets, however individual request lengths are distributed.
 
-**prefill 256 vs 512.** prefill is not the balance ctx but the *scale knob* X. 256 halves the throughput cycle X (51 vs 101 µs) and HBM (~30M → 5 TB vs 60M → 10 TB) at zero TTFT / throughput cost (X is linear in prefill, so chunk 2× · cycle ½ cancel). The sole risk is FFN GEMM MFU saturation — batch 379 must fill the tensor cores; wave-quant estimation says batch ~128 saturates (379 is ample), but the model fixes MFU = 0.6 so the knee is not observable (silicon absent). **512 is the fallback if FFN saturation proves infeasible** (batch 759, vLLM-convergent).
+**prefill deployed 128 (derivation 256, vs 512).** prefill is not the balance ctx but the *scale knob* X — the smaller it is, the more the throughput cycle and HBM halve at zero TTFT / throughput cost (X is linear in prefill, so chunk · cycle cancel), provided the FFN batch stays above the MFU knee. 512→256→**128**: cycle X 101→51→**25.5 µs**, HBM aggregate (decode) 60M→30M→**15M** = 9.8→4.92→**2.46 TB** (FP8 160 KiB/tok). **Only 128 fits the 64 official stacks (4.40 TB)** (256·512 overflow — OPERATING_POINT §4.1). Sole risk = FFN GEMM MFU saturation: wave-quant estimation says batch ~128 saturates; the 128 deployment's batch = 62 + 128 = **190 (> knee, 48% margin)**, so it saturates but with less slack than 256 (379); the model fixes MFU = 0.6 so the knee is unobservable (silicon absent). **Deploy 128, fall back to 256 if measurement shows 190 insufficient** (512 batch 759 is safer still, vLLM-convergent).
 
 > **Superseded note.** The legacy idle-fraction-feedback + hysteresis-deadband admission of earlier drafts is replaced by this pool model. Deadband width was `2σ_total`, but σ is unmeasurable on a self-authored framework with no hardware jitter model (§9 / OI4), so the feedback variant was never the operative mechanism. The pool model hits fixed targets directly via steering; the ±10% band survives only as a diagnostic idle-SLA label, not a control input.
 
 ### 6.5 Example Dispatch Trace
 
-An instance of a 3-μ-batch in-flight window under PULS scheduler's balanced steady state (cycle balance maintained per §6.4). Example composition:
+An instance of a **2-active-μ-batch + transition-tail** (capacity 3) in-flight window under PULS scheduler's balanced steady state (cycle balance maintained per §6.4; not *composing* 3 — 2 active overlap while the immediately-preceding batch drains as a tail). Example composition:
 
 | μ-batch | Composition | Notes |
 |---|---|---|
@@ -479,25 +479,15 @@ The table below is *one trace* of event-driven dispatch, not a fixed period. `T_
 
 **Regime applicability.** The trace shape above is the steady-state attractor of PULS scheduler under balanced admission and is therefore **ctx-independent**: chunked prefill (§5.5) lets admission scale chunk granularity to maintain `t_PIM(decode-attn) ≈ sum of GPU stages` across any ctx within TBT SLO, so the same Init/T1–T5 dispatch ordering recovers regardless of chunk size. The trace ceases to apply only at very long ctx where balance is infeasible (§6.6 "A-bound natural transition") — a system-level property of multi-request schedulers under growing ctx, not a PULS-specific limitation.
 
-### 6.6 Bound Analysis
+### 6.6 Bound Analysis — Removed (the operating point is balanced, no single bound)
 
-Qualitative estimation of the *physical* bounds — which resource limits the cycle at a given ctx. This table is descriptive, not a control input: the §6.4 pool model steers to fixed targets rather than reacting to a measured bound. After sim measurement, only the component times · transition ctx are updated.
+The legacy ctx-dependent bound analysis (short-ctx GPU-bound / long-ctx PIM-bound / mid-ctx B-bound) was a **pre-steering** framing. The §6.4 operating point steers the composition to (62, 6.15M) · (128, 12.8M), equalizing the three resource times → **there is no single binding resource** (idle ≈ 0, §6.8 floor). "Which resource bounds the cycle" is therefore meaningless at the operating point, so this analysis is removed.
 
-**Intra-A bound** — From the perspective of double-buffering (§5.6): Instance A's internal GPU stage (projection + AR) vs PIM stage (decode attention).
-
-- **Short-ctx (2k–8k): GPU-bound.** Sum of GPU stages > t_PIM. §6.4 Intra-A prescription: admit additional decode → fill the next μ-batch's PIM window. Since AR cost is borne identically by the baseline, only the position of the transition ctx is preserved.
-- **Long-ctx (≥ 32k): PIM-bound.** t_PIM > sum of GPU stages. §6.4 Intra-A prescription: admit additional prefill chunk → fill the next μ-batch's GPU stage.
-
-**Inter-AB bound** — From the perspective of the inter-instance pipeline (§3.4): Instance A pipeline cycle vs Instance B FFN cycle. A_cycle = max(t_proj + t_AR, t_PIM) vs B_cycle = t_FFN_wide.
-
-- **Mid-ctx (32k–256k): B-bound.** B_cycle > A_cycle. PIM attention is still shorter than the FFN cycle.
-- **Long-ctx (≥ 256k): natural transition to A-bound.** A_cycle ≥ B_cycle. PIM attention surpasses the FFN cycle.
-
-**Tile-level (per-tile, ns scale)** — The tile time of PIM decode-attn = max(FP8 load time, FSM compute time). Under FP8 KV assumption it is in the compute-bound regime; under FP16 KV assumption it transitions to the load-bound regime, and the tile time roughly 2×'s. FP8 quantization is the direct enabler of this t_decode-attn_PIM.
+The sole exception = the **degenerate extreme (natural transition to A-bound).** When traffic is so long-ctx-only that the short requests to pair with are exhausted, PIM attention cannot hide inside the GPU-A window and crosses to A_cycle ≥ B_cycle — not present on real infinitely-varied traffic; a system-level limit of multi-request schedulers under growing ctx, not a PULS-specific one (OPERATING_POINT §6). (FP8 KV keeps the tile time compute-bound, halving t_decode-attn_PIM — substrate enabler in §3.2.)
 
 ### 6.7 Implementation Requirements
 
-- Self-authored event-driven framework: 1 event queue, 1 dependency DAG, 3-μ-batch state in the in-flight window. Same invocation cadence as the production scheduler step.
+- Self-authored event-driven framework: 1 event queue, 1 dependency DAG, 2-active-μ-batch (+ transition tail, capacity 3) state in the in-flight window. Same invocation cadence as the production scheduler step.
 - PIM completion-time predictor (FSM cycle-accurate).
 - Idle fraction telemetry (per GPU-A · PIM · FFN, accumulated per measurement window).
 - Pool-model composer (decode-set steering ‖ prefill steering ‖ admission refill, §6.4).
@@ -517,7 +507,7 @@ perfect overlap (F2 double-buffer · F3 pipeline) →
   floor idle_r = 1 − t_r / cycle
 ```
 
-Two unbiased warm-start snapshots show the floor is reached and that **the spread is governed by the prefill pool's richness** (the decode target Σkv 12.3M is hit in both).
+Two unbiased warm-start snapshots show the floor is reached and that **the spread is governed by the prefill pool's richness** (the decode target Σkv 12.3M is hit in both). *(The op-time figures below are 256-derivation measurements — floor idle is an idle **fraction**, hence prefill-invariant [§6.4], identical at deployed 128. Deployed age-cap = 5; the ablation below is at proto age_cap=2.)*
 
 **(A) Both pools abundant — the operating-point condition** (a rich prefill pool *and* the standing decode pool). batch: decode 119, Σkv 12.3M; prefill 256, **depth-work 25.6M (exact)**.
 
@@ -576,78 +566,65 @@ measured idle (abs)      = theoretical floor + uniform overlap gap (fill/drain �
 
 The measured idle is the algorithm floor; the floor decomposes into intrinsic imbalance + a pool-thinness-gated fairness cost + a uniform overlap gap, with no unexplained residual. Lower idle than (A) requires either a richer prefill pool (already near-floor) or dropping the fairness guarantee. Full record: [`implementation/debug_phase2/REPORT.md`](implementation/debug_phase2/REPORT.md).
 
-**Multi-batch composition (3 μ-batches).** The window holds 3 slots (2 active + 1 transition slack). Forcing the staggering target to 3 under an abundant pool (`floor_proof.py --target-mb 3 --compose-only`) verifies the window / recompose / disjoint logic composes *N* well-formed μ-batches, not just 2. Per-batch composition (`age_cap = 2`, near-infinite pool; per-batch idle = that batch's own three-resource theoretical floor):
+**Multi-batch composition — 2 active μ-batch (deployed model).** The window holds 2 active + 1 transition slack (capacity 3). When one batch's forward pass ends, it is **only *re-composed* from (returned members + surplus), never force-composing a 3rd.** The integrated lifecycle ([cluster_lifecycle.cpp](implementation/analysis/cluster_lifecycle.cpp)) verifies that with the prefill→decode dependency and age-cap = 5, at deployed 128, **decode (62 ∧ Σkv 6.15M) and prefill (128 ∧ depth-work 12.8M) both hit 100% · Σdev 0.20% / 0.07%, with no age-cap tail** (the logic is scale-invariant, prefill 256 ↔ 128 isomorphic).
 
-| μ-batch | decode | Σkv | prefill | depth-work | floor idle GPU-A / PIM / FFN | spread |
-|---|---|---|---|---|---|---|
-| mb#0 | **123** | 12.30M | 256 | 25.60M | 0.0 / 0.8 / 0.0% | 0.77% |
-| mb#1 | **123** | 12.32M | 256 | 25.61M | 0.0 / 0.8 / 0.0% | 0.79% |
-| mb#2 | 108 | 12.37M | 256 | 25.58M | 0.7 / 0.0 / 3.7% | 3.74% |
-
-All three are **disjoint** (no request shared), and Σkv / prefill / depth-work hit the target in every batch — only the decode *count* of the last batch falls short. The cause is the age-cap, isolated by sweeping pool size and fairness:
-
-| condition | mb#0 | mb#1 | mb#2 | mb#2 spread | reading |
-|---|---|---|---|---|---|
-| `age_cap=2`, finite pool (KV 60M) | 123 | 117 | 106 | 4.27% | tail imbalance |
-| `age_cap=2`, near-∞ pool (KV 200M) | 123 | **123** | 108 | 3.74% | bigger pool fixes mb#1, **not** mb#2 |
-| `age_cap=∞`, near-∞ pool | 123 | 123 | **123** | 0.83% | all hit count 123 (pure steering) |
-
-- **Pool size fixes the earlier batches, not the last** (mb#1: 117 → 123 with a bigger pool; mb#2 stays ~107). So pool exhaustion is only a partial cause.
-- **The last batch's shortfall is the age-cap.** By the time the 3rd batch is composed, the warm-start has left most pool members "waiting" (`wait ≥ AGE_CAP`), so the age-cap force-includes already-aged requests over the steering — the *intended fairness mechanism* (bounded wait, starvation 0), not a dispatch failure. With `age_cap = ∞` (pure steering) all three reach count 123.
-- **This is a warm-start artifact, not real-server behavior.** A continuous-arrival stream keeps requests fresh, so the age-cap fires only on genuinely-aged requests (sparse), not on a whole batch at once — the tail vanishes there, as the `age_cap = ∞` row shows the steering can.
+> **Legacy 3-forced stress test (superseded).** Forcing the window to 3 (`floor_proof.py --target-mb 3`) made the warm-start leave most pool members "waiting" (`wait ≥ AGE_CAP`), so the **3rd batch showed an age-cap tail** (count short 108 · spread 3.7%; Σkv · prefill · depth-work still hit). This is a warm-start artifact of the *forced 3rd batch*, not a dispatch failure (`age_cap = ∞` → all three hit, isolated by sweep), and **the 2-active deployed model never forces a 3rd batch — it only re-composes — so that tail vanishes structurally.** Legacy sweep · full record: [`implementation/debug_phase2/REPORT.md`](implementation/debug_phase2/REPORT.md).
 
 ## 7. Cluster Scale: Per-Node Pool 100K-Centering Routing
 
-The §6 operating point (count 123 ∧ Σkv 12.3M) is hit by steering only when a node's in-flight pool is a **diverse pool centered at ~100K** (§6.4). On a single node admission maintains that pool, but at **server scale** (hundreds–thousands of nodes) the global arrival mean exceeds 100K, so per-node pools drift above 100K. This section covers the **cluster-layer routing** that prevents that drift and seats each node at the operating point.
+The §6 operating point (deployed 128: count 62 ∧ Σkv 6.15M; the 256-derivation is 123·12.3M) is hit by steering only when a node's in-flight pool is a **diverse pool centered at ~100K** (§6.4). On a single node admission maintains that pool, but at **server scale** (hundreds–thousands of nodes) the global arrival mean exceeds 100K, so per-node pools drift above 100K. This section covers the **cluster-layer routing** that prevents that drift and seats each node at the operating point.
+
+> **Scale note.** This §7 is at the **deployed 128 operating point** (the 256-derivation is 2× every value — OPERATING_POINT §1). Node pool **134 = 2 μ-batch (124) + surplus 10** · prefill 60 (OPERATING_POINT §4.1). Measurements = [cluster_balance.cpp](implementation/analysis/cluster_balance.cpp) `PREFILL=128 NODE_MAX=134`. **The gate-shed part of edge% is prefill-invariant** (depends on the gate threshold 100K+E; total edge with leftover is 256 2.68% · 128 2.17%); on2 · Σ-dev are looser than 256 because the batch is 62 (half of 123), so variance is larger (§6.8). Cold-start is closed by the deployed lifecycle's decode composition 100% (§6.8).
 
 > **Independent of the PULS core.** This routing does not change the §6 batch-composition algorithm — it is a layer above that only decides *which requests go to which node*. The sim is PULS-independent: it checks only batch-composition accuracy (count · Σkv), not op-time. With no real traffic available it uses an assumed distribution **B** (short 20% [1–16K] / mid 70% [16–256K] / long 10% [256K–1M], mean ≈ 116K) — on the same footing as the README's honest disclosure.
 
 ### 7.1 Motivation: Idle Blowup Without Centering
 
-Run a cluster without this logic and each node's in-flight pool tracks the global mean (116K), piling long requests onto a node. Under the 30M cap, a high resident mean fits fewer decoders: compose batches large (hundreds-scale) and **count falls below 123 while Σkv rises above 12.3M** — both control targets break at once, the three-resource balance (PIM / GPU-A / FFN) collapses, and the **idle index blows up**. The operating point holds only under *per-node* 100K centering (§6.4 — 100K is not a mean *forced* on the workload but the intermediate value 12.3M / 123 that derives the cap), so the cluster layer must seat each node's pool at that condition.
+Run a cluster without this logic and each node's in-flight pool tracks the global mean (116K), piling long requests onto a node. Under the 15M cap, a high resident mean fits fewer decoders: compose batches large (hundreds-scale) and **count falls below 62 while Σkv rises above 6.15M** — both control targets break at once, the three-resource balance (PIM / GPU-A / FFN) collapses, and the **idle index blows up**. The operating point holds only under *per-node* 100K centering (§6.4 — 100K is not a mean *forced* on the workload but the intermediate value 6.15M / 62 that derives the cap), so the cluster layer must seat each node's pool at that condition.
 
-### 7.2 What the Node's 30M HBM Actually Holds
+### 7.2 What the Node's HBM Actually Holds
 
-To understand the routing target, first see how a node uses its 30M (at mean ctx 100K):
+To understand the routing target, first see how a node uses its HBM (cap 15M, deployed 13.4M; at mean ctx 100K):
 
 ```
-HBM 30M = batch A's 123 decoders (12.3M, disjoint)
-        + batch B's 123 decoders (12.3M, disjoint)
-        + 54 surplus decoders     (5.4M)
-        = 300 decoders, all resident
+HBM cap 15M = up to 150 decoders at 100K; deployed pool:
+  batch A's 62 decoders (6.15M, disjoint)
++ batch B's 62 decoders (6.15M, disjoint)
++ 10 surplus decoders   (1.0M)
+= 134 decoders (13.4M) resident  ← below the 15M cap (surplus kept small to free room for weights, OPERATING_POINT §4.1)
 ```
 
-It is not that 2 batches "use up 30M" — **the full 300 decoders fill the 30M.** The 2 batches merely *point at* 246 of them. (30M ÷ 12.3M ≈ 2.4 slots = 2 batches + surplus; and 30M ÷ 100K = 300 decoders; and 300 ÷ 123 ≈ 2.4 batches — all the same number.)
+It is not that 2 batches "use up 13.4M" — **the full 134 decoders fill the 13.4M.** The 2 batches merely *point at* 124 of them, surplus 10. (256 was cap-full 300 = 30M; 128 trims the surplus to 10 so 134 < cap 150 — that much headroom for weights.)
 
 **Forming a batch = zero memory allocation.** After warmup no new batch is created. Of the 2 active batches, the one whose forward pass finished is merely *recomposed* (`main_loop.py` `_recompose_mb`, §6.4-4):
 
 ```
 batch A's forward pass finishes
-  → A's old 123 decoders return to the pool (still resident! memory unchanged)
-  → candidate = (A's old 123) + (54 surplus) = 177      ← all already resident
-  → reselect 123 of them → new batch A
+  → A's old 62 decoders return to the pool (still resident! memory unchanged)
+  → candidate = (A's old 62) + (10 surplus) = 72       ← all already resident
+  → reselect 62 of them → new batch A
   → memory allocation = 0
 ```
 
-So the node pool keeps **300 decoders resident at mean 100K**, and steering *selects* 123 of them each iteration to form a batch. The per-node routing target is therefore **count 246–300, mean ≈ 100K** (= 300 × 100K = 30M cap full) — once met, steering pulls two disjoint 12.3M batches and the reselection (177 → 123) also holds.
+So the node pool keeps **134 decoders resident at mean 100K**, and steering *selects* 62 of them each iteration to form a batch. The per-node routing target is therefore **count 124–134, mean ≈ 100K** — once met, steering pulls two disjoint 6.15M batches and the reselection (72 → 62) also holds.
 
-> **The operating point is the 123-batch, not the 300-mean.** A node's 300-mean of 100K guarantees *capacity/count* (fit 246–300 under the 30M cap), not batch composition directly. That a 123-batch hits 12.3M is the job of the steering composer + pool diversity (§6.4, length-variance-agnostic). Sim measurement: the actually-composed 123-batch averages 99,971–100,030 tokens, Σ deviation < 0.75% (target 12.3M, per-completion).
+> **The operating point is the 62-batch, not the 134-mean.** A node's 134-mean of 100K guarantees *capacity/count* (fit 124–134 under the 15M cap), not batch composition directly. That a 62-batch hits 6.15M is the job of the steering composer + pool diversity (§6.4, length-variance-agnostic). **The deployed operating-point Σdev = 0.20%** (the integrated lifecycle's live-KV-centering composer, §6.8). For reference, cluster_balance's *standalone* toxic-fit composer is looser (62-batch averages ~98,827 tokens, Σ-dev ~1.84% — distribution-preserving without live-KV centering); since deployed healing uses the lifecycle's live-KV centering, **0.20%** is the operating-point value.
 
 ### 7.3 Cold-start: Edge Gating + Interleave Greedy
 
 Filling the cluster initially:
 
 1. **Centering / gating (edge isolation).** View each request length L as deviation d = L − 100K. From the arrival pool, peel off the *longest first* to **edge nodes** until the remaining mean drops to ≤ 100K + E (the criterion is the *remaining mean* — `E` is a per-element mean band = Σd ≤ E × count; E = 1K → mean ≤ 101K, E = 0 → Σd → 0). Edge nodes serve the initial *abnormal (excessively long)* decodes — isolating them is what centers the normal-node pools at 100K. The peeled fraction = **edge% = f(E) alone** (the tail above threshold V(E) of distribution B = P(x > V(E))). Independent of node count / pool size; depends only on the distribution.
-2. **Interleave-greedy packing.** Place the remaining requests in *arrival order (shuffled)*, each into the node whose mean would land closest to 100K after insertion (min |post-add mean − 100K|, within cap / count limits). Long + short interleave naturally within a node, so **count 300 · cap 30M · mean 100K are satisfied simultaneously.**
+2. **Interleave-greedy packing.** Place the remaining requests in *arrival order (shuffled)*, each into the node whose mean would land closest to 100K after insertion (min |post-add mean − 100K|, within cap / count limits). Long + short interleave naturally within a node, so **count 134 · cap 15M · mean 100K are satisfied simultaneously.**
 
-> **Why interleave, not magnitude sort.** Since 300 × 100K = 30M, satisfying all three (cap · count · mean) at once requires long and short mixed within a node. Packing by deviation magnitude (KK / LPT style) stacks the long ones first, so **count is low while the cap fills first** and short requests lose their slots (sim: many placement failures · on-point collapse). Over/under swap also converges immediately for no gain. → precise partition / swap dropped, plain interleave greedy adopted.
+> **Why interleave, not magnitude sort.** Since 134 × 100K = 13.4M (cap 15M), satisfying all three (cap · count · mean) at once requires long and short mixed within a node. Packing by deviation magnitude (KK / LPT style) stacks the long ones first, so **count is low while the cap fills first** and short requests lose their slots (sim: many placement failures · on-point collapse). Over/under swap also converges immediately for no gain. → precise partition / swap dropped, plain interleave greedy adopted.
 
 ### 7.4 Healing: Strategic Greedy Refill (No Eviction)
 
 In operation, when a request on a node **completes** (decode ends, KV release) its slot frees — memory churn happens only at this *completion* instant, with full reservation and no eviction (§6.4 pool model). After the departures the node carries two deficits:
 
-- **Count deficit** `C_req = max(0, target − count)` — the amount to refill back up to the cap (target = 300), never letting it fall below the 2 μ-batch floor (246).
-- **Deviation deficit** `D_req = target_footprint − sum` (= 30M − sum) — the total KV to inject to bring the mean back to 100K. Large `D_req` if a long request left (a long is needed), small if a short left.
+- **Count deficit** `C_req = max(0, target − count)` — the amount to refill back up to the deployed pool (target = 134), never letting it fall below the 2 μ-batch floor (124).
+- **Deviation deficit** `D_req = target_footprint − sum` (= 13.4M − sum) — the total KV to inject to bring the mean back to 100K. Large `D_req` if a long request left (a long is needed), small if a short left.
 
 **Healing is per-completion — this is the crux.** Real-server admission (§6.4) *admits one request the moment one completes* (backpressure). So recovery happens per freed hole, and that single slot's `ideal` is:
 
@@ -660,11 +637,11 @@ ideal = (target_footprint − sum) / remaining slots
 
 That is, **it refills the departed size with the same size (like-for-like). A long leaves, a long comes back** — exactly Phase-1's "fill the coarse (toxic) hole first." Because `ideal = hole` targets the hole's exact size: big hole → big admit, small hole → small admit, automatically. As a result:
 
-- **Resident length distribution is preserved** — each departed class is refilled with the same class, so it does not narrow (measured: resident long-request (≥256K) fraction 8.15% → **7.34%**, held).
-- **Each length class consumed at its arrival rate** — longs flow into normal nodes at their arrival rate (≈7.6%) and never pile up → **edge stays at the cold-start rate (~2.68%)**.
+- **Resident length distribution is preserved** — each departed class is refilled with the same class, so it does not narrow (measured at 128: resident long-request (≥256K) fraction 8.23% → **7.36%**, held).
+- **Each length class consumed at its arrival rate** — longs flow into normal nodes at their arrival rate (≈7.6%) and never pile up → **edge stays at the cold-start rate (~2.2%)**.
 - **Inter-node swap 0** — it pulls from the pool only.
 
-> **⚠ Batched refill breaks toxic-fit.** If you pool many completions and refill at once, `ideal = D_req/slot` collapses to the *average* (e.g. one long + many short → ideal ≈ 100K) and never pulls a long. Measured, batched starves longs entirely (resident long 8.15% → **0%**, distribution narrows to ~100K) and shunts those longs to edge. **So always refill per-completion (slot=1)** — then `ideal = hole` and toxic-fit holds. (Per-completion is also the actual §6.4 admission mechanism.)
+> **⚠ Batched refill breaks toxic-fit.** If you pool many completions and refill at once, `ideal = D_req/slot` collapses to the *average* (e.g. one long + many short → ideal ≈ 100K) and never pulls a long. Measured (128), batched starves longs entirely (resident long 8.04% → **0.01%**, distribution narrows to ~100K) and shunts those longs to edge. **So always refill per-completion (slot=1)** — then `ideal = hole` and toxic-fit holds. (Per-completion is also the actual §6.4 admission mechanism.)
 
 > **Relation to Phases 2 & 3.** The original Phase 2 (opposite-sign *pairs*) and Phase 3 (small-element *multi-combination*) generalize for a *finite/sparse* pool where no single element matches the hole; they *compose* one. The infinite pool (§7) makes best-of-K almost always find a single element at the hole, so **pairs/combinations collapse to a single pull**. Phase 1 (toxic-fit, biggest first), by contrast, stays alive exactly via `ideal = hole`. Implementation: `heal` ([cluster_balance.cpp](implementation/analysis/cluster_balance.cpp) / [cluster_routing.py](implementation/src/cluster_routing.py)).
 
@@ -672,40 +649,40 @@ Because the pool is effectively infinite, each admit nearly hits its `ideal`, so
 
 ### 7.5 Measurement — E Sweep · Stability
 
-Assumed distribution B, Z = 256 nodes, cap 30M, on-point = compose(123, 12.3M ± 10%).
+Assumed distribution B, Z = 256 nodes, cap 15M, on-point = compose(62, 6.15M ± 10%), deployed pool 134 (`PREFILL=128 NODE_MAX=134`).
 
-**Cold-start E sweep** (edge% = fraction isolated to edge, on2% = disjoint 2-batch hit rate = the real meaning of the 246 floor):
+**Cold-start E sweep** (edge% = fraction isolated to edge, on2% = disjoint 2-batch hit rate = the real meaning of the 124 floor):
 
-| E | edge% | count ∈ 246–300 | \|mean − 100K\| | on2% |
+| E | edge% | count ∈ 124–134 | \|mean − 100K\| | on2% |
 |---|---|---|---|---|
-| 0 | 2.63 | 99.2% | 2.7K | 98.4 |
-| **1K** | **2.68** | **99.2%** | **2.95K** | **97.7** |
-| 5K | 2.47 | 97.7% | 6.1K | 93.4 |
-| 10K | 1.89 | 89.5% | 10.6K | 82.0 |
-| 20K | 1.22 | 68.4% | 17.3K | 61.3 |
+| 0 | 2.07 | 99.2% | 3.4K | 96.5 |
+| **1K** | **2.17** | **94.9%** | **5.5K** | **93.8** |
+| 5K | 1.73 | 89.5% | 7.5K | 88.7 |
+| 10K | 1.53 | 77.7% | 12.7K | 73.4 |
+| 20K | 0.89 | 63.3% | 19.7K | 57.0 |
 
-E ↓ → tighter centering but more edge; E ↑ → less edge but mean drifts → count floor missed. **E = 1K adopted** — edge 2.68% for near-perfect centering (a safety margin for a discrete distribution; E = 0 may be unattainable exactly). The cold-start on2 < 100% is not a composition failure but a *count-floor miss* on 1–2 nodes (239–245 < 246), which healing fills.
+E ↓ → tighter centering but more edge; E ↑ → less edge but mean drifts → count floor missed. **E = 1K adopted** — edge 2.17% for near-perfect centering. The cold-start on2 < 100% is not a composition failure but a *count-floor miss* on some nodes (~105 < 124), which healing fills (on2 is somewhat lower than 256's ~98% because the batch is 62 — §6.8; the deployed lifecycle still hits decode 100%).
 
 **Healing stability** (per-completion, completion probability p, last 150 rounds averaged):
 
-| p | count | ∈ 246–300 | \|mean − 100K\| | on2% | 123-batch mean / Σ-dev |
+| p | count | ∈ 124–134 | \|mean − 100K\| | on2% | 62-batch mean / Σ-dev |
 |---|---|---|---|---|---|
-| 1% | 293 | 99.6% | 2.5K | 98.4 | 99,980 tokens / 0.67% |
-| 3% | 291 | 98.8% | 3.6K | 97.4 | 100,030 tokens / 0.73% |
-| 5% | 292 | 100% | 3.2K | 98.7 | 99,971 tokens / 0.70% |
+| 1% | 133 | 98.0% | 4.7K | 94.4 | 98,823 tokens / 1.84% |
+| 3% | 133 | 97.7% | 5.1K | 93.9 | 98,828 tokens / 1.89% |
+| 5% | 133 | 96.1% | 5.3K | 92.9 | 98,827 tokens / 1.84% |
 
-After healing engages, **drift is 0** (just-post-warmup ≈ last round). Per-completion **preserves the cold-start state (diverse, mean 100K)** — mean within ±2.5–3.6K of 100K, on2 ~98%, the actually-composed 123-batch mean within ±30 tokens of 100K with Σ deviation < 0.75% (operating point hit). Count sits at ~291 (not 300) by design — only the freed seats are refilled, staying within 246–300.
+After healing engages, **drift is 0** (just-post-warmup ≈ last round). Per-completion **preserves the cold-start state (diverse, mean 100K)** — the node *mean* within ±4.7–5.3K of 100K (`|mean−100K|`, centering quality), on2 ~93%, count ~133 (refill only the freed seats, within 124–134). The table's `62-batch Σ-dev 1.84%` is **cluster_balance's standalone composer** (no live-KV centering); the **deployed operating-point Σdev = 0.20%** — the integrated lifecycle's live-KV-centering composer (§6.8). on2 below 256's ~98% is the 62-batch variance (§6.8) too; the deployed lifecycle hits **decode 100% · Σdev 0.20%** via healing + steering.
 
 **Toxic-fit validation — long-request (≥256K) preservation** (E = 1K, p = 3%, 300 rounds):
 
 | healing mode | resident long%(cold) | resident long%(late) | pull-long% | on2% | \|mean−100K\| |
 |---|---|---|---|---|---|
-| batched (avg) | 8.15% | **0.00%** | 0.03% | 100.0 | 7 tokens |
-| **per-completion** | 8.15% | **7.34%** | 7.58% | 97.7 | 2.9K |
+| batched (avg) | 8.04% | **0.01%** | 0.32% | 100.0 | 8 tokens |
+| **per-completion** | 8.23% | **7.36%** | 7.67% | 96.5 | 4.2K |
 
-Batched starves longs entirely (8.15% → 0%), narrowing the distribution to ~100K (hence the *too*-clean dev 7 · on2 100%) and shunting longs to edge. **Per-completion preserves longs** (8.15% → 7.34%; pull-long 7.58% = consumed at arrival rate), realizing toxic-fit → edge stays at the cold-start rate. **Pay only the ~2.68% initial edge cost, and thereafter greedy cold-start + per-completion healing run the PIM indefinitely at the per-node 100K operating point.**
+Batched starves longs entirely (8.04% → 0.01%), narrowing the distribution to ~100K (hence the *too*-clean dev 8 · on2 100%) and shunting longs to edge. **Per-completion preserves longs** (8.23% → 7.36%; pull-long 7.67% = consumed at arrival rate), realizing toxic-fit → edge stays at the cold-start rate. **Pay only the ~2.2% initial edge cost, and thereafter greedy cold-start + per-completion healing run the PIM indefinitely at the per-node 100K operating point.**
 
-> **Honest disclosure.** Sim assumptions: (a) distribution B is assumed (no real traffic), (b) the infinite pool is emulated by best-of-K sampling, (c) churn is abstracted as completion probability p (not real decode-step accumulation), (d) steady-state edge is checked indirectly via the pull-long rate (≈ arrival rate) rather than tracked directly, (e) the **prefill→decode dependency and prefill's dual target (256 tokens ∧ depth-work 25.6M) are not modeled here** — prefill balance is a node-level steering concern (§6.4, validated by proto_steering); the cluster routing covers only decode-pool centering. Real PULS pairs steering with the **age-cap** (§6.4) to prevent starvation — omitted in the cluster sim's composability check only because its effect there is < 1% (§6.4 sweep); retained in operation.
+> **Honest disclosure.** Sim assumptions: (a) distribution B is assumed (no real traffic), (b) the infinite pool is emulated by best-of-K sampling, (c) churn is abstracted as completion probability p (not real decode-step accumulation), (d) steady-state edge is checked indirectly via the pull-long rate (≈ arrival rate) rather than tracked directly, (e) this **cluster_balance sim covers only decode-pool centering / on2** (the prefill→decode dependency and prefill's dual target are not modeled here). That dependency, prefill (128 tokens ∧ depth-work 12.8M), and **age-cap = 5** are all included in the integrated validation by [cluster_lifecycle.cpp](implementation/analysis/cluster_lifecycle.cpp) (§6.8), which closes with **decode and prefill both at 100%** — the two-sim split of cluster_balance (distribution · on2) + cluster_lifecycle (node lifecycle). The age-cap effect on the cold-start E sweep is small, hence omitted in cluster_balance (§6.4 sweep).
 
 ---
 

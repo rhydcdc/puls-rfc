@@ -1,6 +1,6 @@
 # PULS — PIM-Unified LLM Serving
 
-> ✅ **Scheduler logic implemented & validated** — The pool-model batch composition (admission = pool refill ∥ decode-set ∥ prefill, steered independently) composes **3 disjoint μ-batches** to the operating point (decode 123 / Σkv 12.3M, prefill 256 / depth-work 25.6M), each at a per-batch idle spread **<0.8%** (matching the proven theoretical floor); the last batch widens to ~3.7% by the intended age-cap fairness ([Runtime Validation](#runtime-validation)).
+> ✅ **Scheduler logic implemented & validated** — The integrated lifecycle sim (cold-start → steering · prefill→decode transition · per-completion healing · age-cap) composes **2 active μ-batches** to the operating point (deployed 128: decode 62 / Σkv 6.15M, prefill 128 / depth-work 12.8M), at **composition 100% · Σdev <0.2%** → floor idle ≈0 by the §2 balance. At cluster scale the global scheduler holds each node pool at 100K after a ~2.2% initial edge ([Runtime Validation](#runtime-validation)).
 
 **Scheduler-aware co-design of HBM-PIM and production LLM serving stack.**
 
@@ -87,7 +87,8 @@ Limitations of existing HBM-PIM research, grouped by axis:
 - **In-house scheduler** — compatible with chunked-prefill + mixed-batch primitives ([`ARCHITECTURE.md`](ARCHITECTURE.md) Section 6):
   - **Event-driven dispatch + dependency DAG** — encodes invariants (data dependency + resource) as a graph, reducing dispatch to a ready-node selection problem
   - **2-μ-batch lookahead** — starting work for the next μ-batch early + filling idle resources with work from another μ-batch (emerges naturally)
-  - **Pool-model composition with local-greedy steering** — admission (pool refill) ‖ decode-set steering ‖ prefill steering, each hitting fixed operating-point targets independently, with an age-cap for fairness (no global statistics, no idle-feedback loop)
+  - **Pool-model composition with local-greedy steering (node level)** — admission (pool refill) ‖ decode-set steering ‖ prefill steering, each hitting fixed operating-point targets independently, with an age-cap for fairness (no global statistics, no idle-feedback loop)
+  - **Global scheduler (server-level node distribution)** — routes the full arrival pool to nodes: **greedy cold-start** (shed long requests to edge nodes + interleave-greedy to fill normal nodes to mean 100K) + **greedy healing** (per-completion like-for-like refill = toxic-fit, preserving the long-request distribution, drift 0). **Sending only the first ~2.2% to edge nodes then keeps each node's pool at the mean-100K operating point** so local steering hits — inter-node movement / eviction = 0 ([`ARCHITECTURE.md`](ARCHITECTURE.md) §7)
   - **Preemption-free deterministic admission** — full-length KV is reserved at admission, so an admitted request is *never evicted / recomputed* (zero lost work). Memory pressure is absorbed by admission backpressure (refusing new requests), not preemption, and the age-cap bounds waiting (starvation-free). The two bounds — space (KV cap) and time (age-cap) — are orthogonal: pressure on one axis is never repaid by reclaiming the other
 
 ## Approach Summary
@@ -110,9 +111,9 @@ Full body — [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Workload Coverage
 
-PULS is **not confined to a specific target workload**, because batch composition is *length-distribution-agnostic* steering — the former never looks at the pool's mean length; it combines short and long requests to hit only the four operating-point targets (decode count 123 ∧ Σkv 12.3M, prefill 256 tokens ∧ depth-work 25.6M). Hence **any distributed-server-scale workload with decode and prefill abundant in the pool** — short, long, mixed, or bimodal length distribution alike — converges to the operating point. (The balance ctx ~100K is merely the midpoint used to *derive* the KV cap, not a value imposed on the workload.)
+PULS is **not confined to a specific target workload**, because batch composition is *length-distribution-agnostic* steering — the former never looks at the pool's mean length; it combines short and long requests to hit only the four operating-point targets (deployed 128: decode count 62 ∧ Σkv 6.15M, prefill 128 tokens ∧ depth-work 12.8M; OPERATING_POINT §4.1). Hence **any distributed-server-scale workload with decode and prefill abundant in the pool** — short, long, mixed, or bimodal length distribution alike — converges to the operating point. (The balance ctx ~100K is merely the midpoint used to *derive* the KV cap, not a value imposed on the workload.)
 
-- **Condition for reaching the operating point (idle ≈ 0)** = decode and prefill are *abundant* in the pool (the large standing decode population + continuous prefill of high-concurrency distributed serving). Real-server steady state is exactly this regime. Demonstrated by composing **3 disjoint μ-batches** to the operating point, each at per-batch idle spread **<0.8%** (the last ~3.7% = the intended age-cap fairness cost) — see [Runtime Validation](#runtime-validation).
+- **Condition for reaching the operating point (idle ≈ 0)** = decode and prefill are *abundant* in the pool (the large standing decode population + continuous prefill of high-concurrency distributed serving). Real-server steady state is exactly this regime. Demonstrated by an integrated sim with **2 active μ-batch + dependency · age-cap** composing to the operating point at **composition 100% · Σdev <0.2%** — see [Runtime Validation](#runtime-validation).
 - **When the pool is thin** (low load, short-decode only), PIM or GPU-A idling is *physically normal* (not something to fix) — the operating point is the balance point that holds when the pool is abundant.
 
 ## Acceleration Sources Summary
@@ -159,7 +160,7 @@ Calibrated projection of the four acceleration sources (Aux1·Aux2·F3·F5) on L
 |---|---|---|
 | Aux1 | Mixed batching weight reuse | **2.0×** (closed-form), 1.97× (Colab T4 measured) |
 | Aux2 | KV bus traffic reduction | **4.95× speedup, 79.8% reduction** |
-| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep); pool-model sim composes **3 disjoint μ-batches to the operating point, per-batch spread <0.8% (balance manifest)** — see [Runtime Validation](#runtime-validation) |
+| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep); the integrated lifecycle sim composes **2 active μ-batches to the operating point, composition 100% · Σdev <0.2% (balance manifest)** — see [Runtime Validation](#runtime-validation) |
 | F5 | Channel-independent vs lock-step | **5.15× speedup** (KV variance dominant) |
 
 ### Aggregate Speedup
@@ -174,28 +175,33 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (including F5)
 
 ### Runtime Validation
 
-**Synthetic workload + pool-model scheduler, end-to-end simulation.** Rather than a single real trace, a synthetic workload representing the distributed-server steady state is *fixed*, and the idle value the system *naturally converges to* is reported as-is — the seed is **not** tuned to force idle ≈ 0 (tuning would be answer-fitting, hence meaningless).
+**Integrated lifecycle simulation (PULS-independent, composition-hit only).** Rather than a single real trace, a synthetic workload representing the distributed-server steady state is *fixed*, and cold-start → operation (steering · prefill→decode transition · per-completion healing · age-cap) is run in one sim to check whether the operating-point composition holds — the seed is not tuned to a predetermined answer.
 
-- **Workload (synthetic)** — prefill 20K–180K varied (sweet spot ~100K included), decode 8K–40K *long generation* (= the large standing decode pool of a distributed server). **warm-start seed 6,000** = a steady-state snapshot: each request is placed at a random lifecycle point (prefill progress or decode progress) drawn from the *workload's own distribution* — unbiased, skipping only the cold-start ramp.
-- **Method** — pool-model scheduler (admission = pool refill ∥ decode-set steering ∥ prefill steering, all independent). With an **abundant (near-infinite) pool**, the staggering window is filled to **3 μ-batches** (the 2-active + 1-slack window, forced to 3) and each batch's composition + its own theoretical-floor idle is inspected.
+- **Workload (synthetic)** — a wide, diverse-length pool (1K–1M, short/mid/long mixed), prefill and decode abundant. **warm-start** = a steady-state snapshot (each request placed at a random lifecycle point, skipping the cold-start ramp).
+- **Model — 2 active μ-batch (not 3).** A node runs only 2 μ-batches concurrently (F2/F3 overlap). When one batch's forward pass ends, its members return to the pool and **a new batch is re-selected from (the returned members + the standing surplus)** (zero memory allocation) — *no third batch is force-composed.* Completed requests are refilled like-for-like by per-completion healing, completed prefills transition to decode, age-cap = 5 for fairness. Deployed prefill 128.
 
-Three μ-batches composed at once from an abundant pool. Each is steered independently to the operating point (decode 123 / Σkv 12.3M, prefill 256 / depth-work 25.6M); per-batch idle is that batch's three-resource theoretical floor (measured idle is window-global, since the resources are shared):
+**① composition — operating-point hit ([cluster_lifecycle.cpp](implementation/analysis/cluster_lifecycle.cpp), with dependency · age-cap):**
 
-| μ-batch | decode | Σkv | prefill | depth-work | floor idle GPU-A / PIM / FFN | spread |
-|---|---|---|---|---|---|---|
-| **mb#0** | **123** | 12.30M | 256 | 25.60M | 0.0 / 0.8 / 0.0% | **0.77%** |
-| **mb#1** | **123** | 12.32M | 256 | 25.61M | 0.0 / 0.8 / 0.0% | **0.79%** |
-| **mb#2** | 108 | 12.37M | 256 | 25.58M | 0.7 / 0.0 / 3.7% | **3.74%** |
-| target | 123 | 12.3M | 256 | 25.6M | — | ~0 |
+| 2 active μ-batch (re-composed on completion) | operating-point target | hit | Σdev |
+|---|---|---|---|
+| **decode** | 62 ∧ Σkv 6.15M | **100%** | **0.20%** |
+| **prefill** | 128 tokens ∧ depth-work 12.8M | **100%** | **0.07%** |
 
-*(all three disjoint — no request shared across batches.)*
+**② floor idle — per-batch idle when hit (information *separate* from composition).** When the composition hits, the three resource times match → each batch's *theoretical floor* idle. floor idle is an idle *fraction*, hence **prefill-invariant** (§4, op-time balance) — the 256-derivation measurement = the 128 deployment alike:
+
+| 2 active μ-batch | floor idle GPU-A / PIM / FFN | spread |
+|---|---|---|
+| **mb#0** | 0.0 / 0.8 / 0.0% | 0.77% |
+| **mb#1** | 0.0 / 0.8 / 0.0% | 0.79% |
+
+→ even the most idle resource is ≤0.8% = **idle ≈ 0** — **quantitative evidence that F2 (projection ‖ PIM double-buffering) and F3 (inter-instance pipeline) manifest.** Floor proof (measured ≈ theoretical floor) in [`ARCHITECTURE.md`](ARCHITECTURE.md) §6.8.
 
 Interpretation:
 
-- **Each batch hits the operating point** — Σkv 12.3M / prefill 256 / depth-work 25.6M are met in all three, independently, from the shared pool (length-distribution-agnostic). The first two also hit decode count 123 exactly, with per-batch spread <0.8% — the three per-cycle resource times match, **quantitative evidence that F2 (projection ‖ PIM double-buffering) and F3 (inter-instance pipeline) manifest**.
-- **The last batch spikes (mb#2: count 108, spread 3.74%) — because of the age-cap.** By the time the third batch is composed, the warm-start has left most pool members "waiting", so the age-cap force-includes already-aged requests over the steering — the *intended fairness mechanism* (bounded wait, no starvation), not a dispatch failure. On a real continuous-arrival stream requests are fresh, so the age-cap fires only on genuinely-old ones and the tail vanishes (pure steering → all three at 123). Full spectrum + the floor proof (measured ≈ theoretical floor) — [`ARCHITECTURE.md`](ARCHITECTURE.md) §6.8.
-- **Throughput is sustained by construction** — the per-cycle decode budget is pinned to the operating point (123, or fewer when the KV cap binds first), so each cycle processes a fixed token quantum as long as the pool stays abundant; sustainability is therefore a structural consequence of the fixed operating point, not a separate open axis. The validation target here is the per-cycle balance (idle); drain / completion / zero KV leak are separately verified by the synthetic acceptance suite (all requests complete · KV remaining = initial · clean termination). Absolute tok/s awaits silicon-calibrated cycle time (see Honest Disclosure).
-- **Cluster scale — per-node pool 100K-centering.** At server scale (hundreds–thousands of nodes) the global arrival mean exceeds 100K, so per-node pools drift → count/Σkv break together and idle blows up. With **greedy cold-start + strategic healing** (refill freed slots from the pool by closest-to-`ideal`, inter-node swap 0), **pay only the ~2.68% initial edge cost and thereafter hold each node at the mean-100K operating point indefinitely** (per-completion healing = toxic-fit, so long requests are preserved too; drift 0, 123-batch Σ deviation < 0.75%). Principle, E sweep, and measurement in [`ARCHITECTURE.md`](ARCHITECTURE.md) §7.
+- **No age-cap tail (the 2-active structure).** The old validation's "third-batch spike (count 108 · spread 3.7%)" came from a *forced 3rd batch* where warm-start waiting members triggered the age-cap. The 2-active model never forces a 3rd batch (it only *re-composes* from returned members + surplus), so that tail vanishes structurally.
+- **Holds even with dependency · age-cap.** Adding the prefill→decode transition and the fairness age-cap = 5 does not break either composition — the logic (steering · greedy · healing · age-cap · KV-centering) is *scale-invariant*; only the operating-point constants change (prefill 256 ↔ 128 isomorphic).
+- **Throughput is sustained by construction** — the per-cycle decode budget is pinned to the operating point (62, or fewer when the KV cap binds first), so as long as the pool stays abundant each cycle processes a fixed quantum; sustainability is a structural consequence of the fixed operating point. Absolute tok/s awaits silicon-calibrated cycle time (Honest Disclosure).
+- **Cluster scale — global scheduler.** At server scale (hundreds–thousands of nodes) the global arrival mean exceeds 100K, so per-node pools drift and idle blows up. The **global scheduler** (greedy cold-start: shed long to edge + interleave-greedy · per-completion healing = toxic-fit) **pays only the ~2.2% initial edge cost and thereafter holds each node at the mean-100K operating point indefinitely** (long requests preserved, drift 0). Principle, E sweep, and on2 measurement in [`ARCHITECTURE.md`](ARCHITECTURE.md) §7 / [cluster_balance.cpp](implementation/analysis/cluster_balance.cpp).
 
 ### Honest Disclosure
 
