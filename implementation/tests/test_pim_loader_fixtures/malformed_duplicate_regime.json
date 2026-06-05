@@ -1,4 +1,0 @@
-[
-  {"regime": "FP8", "tile_cycle": 32, "fsm_freq_ghz": 1.3},
-  {"regime": "FP8", "tile_cycle": 64, "fsm_freq_ghz": 1.3}
-]

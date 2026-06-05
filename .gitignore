@@ -23,6 +23,11 @@ figures/*
 # Local LLM behavior guide (not for public exposure)
 CLAUDE.md
 
+# Python implementation/ — superseded by the generalized C++ scheduler (puls-engine/).
+# Kept LOCAL as the detailed event-sim / evaluator reference; NOT published to GitHub.
+# (puls-engine is the generalized, doc-consistent, performant replacement for the scheduler.)
+implementation/
+
 # Implementation plan documents (local working notes, code-only commits)
 implementation/plans/
 
