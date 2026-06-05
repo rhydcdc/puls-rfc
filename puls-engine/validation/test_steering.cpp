@@ -88,7 +88,7 @@ static void check_decode_invariant(const OperatingPoint& op, Variant v, const ch
 int main() {
     ModelSpec llama{/*layers*/80, /*hidden*/8192, /*heads*/64,
                     /*kv_heads*/8, /*head_dim*/128, /*ffn_inter*/28672};
-    HwSpec b200{/*tflops*/2200.0, /*mfu*/0.6, /*gpus_a*/8, /*gpus_b*/8};
+    HwSpec b200{/*tflops*/2200.0, /*mfu*/0.6};
     OperatingPoint op = derive_operating_point(llama, b200, 128);
     std::printf("op: N_dec=%d kv_target=%lld ctx=%.0f age_cap=%d idle_band=%.2f P=%d kvwork=%lld\n",
                 op.decode_count_target, op.kv_operating_target, op.ctx_balance,

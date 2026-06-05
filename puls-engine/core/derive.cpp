@@ -99,10 +99,14 @@ OperatingPoint derive_operating_point(const ModelSpec& model,
         (long long)std::llround(2.0 * (double)op.kv_operating_target * opt.footprint_headroom);
 
     // ── HBM 적합성 (CONTRACT §6 / OP §4.1) ────────────────────────────────────
+    // Instance A footprint = 활성 2 μ-batch 디코드 풀(2×N_dec+잉여) + 프리필 in-flight 의
+    // KV(FP8) + QKV/O proj 가중치(FP16). 모두 같은 64 스택(4.40 TB)을 점유.
     const double instance_a_tokens =
-        op.decode_pool * ctx
-      + op.prefill_pool * (ctx * opt.prefill_avg_depth_frac);
-    op.instance_a_tb = instance_a_tokens * (double)model.kv_bytes_per_token() / 1e12;
+        op.decode_pool * ctx                                  // = (2×N_dec+잉여) × ctx
+      + op.prefill_pool * (ctx * opt.prefill_avg_depth_frac); // 프리필 in-flight 평균 depth
+    const double kv_bytes     = instance_a_tokens * (double)model.kv_bytes_per_token();
+    const double weight_bytes = (double)model.instance_a_weight_bytes();  // QKV/O proj, 동적 정밀도
+    op.instance_a_tb = (kv_bytes + weight_bytes) / 1e12;
     op.hbm_fits      = op.instance_a_tb <= substrate::PIM_CAP_TB;
 
     return op;

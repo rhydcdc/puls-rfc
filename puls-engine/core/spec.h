@@ -39,12 +39,23 @@ struct ModelSpec {
     int num_kv_heads;
     int head_dim;
     int ffn_intermediate;
+    int weight_bytes_per_elem = 2;  // 가중치 정밀도 동적: FP8=1 / FP16=2 / FP32=4 (기본 FP16)
 
     // KV bytes/token (FP8 aggregate over layers). config.py:130-131.
     // = 2(K,V) × num_kv_heads × head_dim × 1(FP8) × num_layers
     long long kv_bytes_per_token() const {
         return (long long)substrate::KV_KV_FACTOR * num_kv_heads * head_dim
              * substrate::KV_BYTES_PER_ELEM * num_layers;
+    }
+
+    // Instance A 가중치 bytes (QKV + O projection, FP16). KV 와 같은 64 스택을 점유.
+    // QKV params/layer  = hidden × (num_heads×head_dim + 2×num_kv_heads×head_dim)
+    // O proj params/layer = hidden × hidden
+    // OPERATING_POINT §4.1: Llama70B ≈ 24 GB. 모델이 커지면 함께 커진다.
+    long long instance_a_weight_bytes() const {
+        long long qkv   = (long long)hidden * (num_heads * head_dim + 2 * num_kv_heads * head_dim);
+        long long oproj = (long long)hidden * hidden;
+        return (qkv + oproj) * num_layers * weight_bytes_per_elem;  // 동적 정밀도
     }
 };
 
@@ -54,15 +65,15 @@ struct ModelSpec {
 struct HwSpec {
     double gpu_peak_tflops;  // dense FP16 peak, per-GPU
     double gpu_mfu;          // achieved fraction (0..1)
-    int    num_gpus_a;       // Instance A tensor-parallel GPU 수
-    int    num_gpus_b;       // Instance B tensor-parallel GPU 수
+    int    num_gpus_a = 8;   // Instance A tensor-parallel GPU 수 — 변수(배포 8, 다른 구성 가능)
+    int    num_gpus_b = 8;   // Instance B tensor-parallel GPU 수 — 변수(배포 8)
 
     // 유효 연산 처리량 (FLOP/s) on n GPUs. config.py:215,269.
     double peak_flops(int num_gpus) const {
         return gpu_peak_tflops * 1e12 * gpu_mfu * num_gpus;
     }
 
-    // Instance A PIM 채널 합 (k_aggregate). pim_emulator:51.
+    // Instance A PIM 채널 합 (k_aggregate). pim_emulator:51. num_gpus_a 변수(배포 8 → 2048).
     int k_aggregate() const {
         return num_gpus_a * substrate::HBM4_STACKS_PER_GPU * substrate::PIM_CHANNELS_PER_STACK;
     }

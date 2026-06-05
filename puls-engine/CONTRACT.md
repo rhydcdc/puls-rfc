@@ -26,8 +26,10 @@ PULS를 정의하는 substrate. 모델/GPU가 바뀌어도 불변.
 - **KV 정밀도 = FP8(8비트)**: `KV_BYTES_PER_ELEM = 1`. FP16 경로 만들지 않음.
 
 ### 변수 (입력 — `core/spec.h::ModelSpec`, `HwSpec`)
-- **모델**: num_layers, hidden, num_heads, num_kv_heads, head_dim, ffn_intermediate.
-- **GPU**: gpu_peak_tflops(dense FP16 per-GPU), gpu_mfu, num_gpus_a(TP), num_gpus_b(TP).
+- **모델**: num_layers, hidden, num_heads, num_kv_heads, head_dim, ffn_intermediate,
+  **weight_bytes_per_elem**(가중치 정밀도 — FP8=1/FP16=2/FP32=4, 동적. KV 와 달리 *변수*).
+- **GPU**: gpu_peak_tflops(dense FP16 per-GPU), gpu_mfu, num_gpus_a(TP, **기본 8**), num_gpus_b(TP, **기본 8**).
+  (인스턴스당 8 GPU 는 배포 사실이라 기본값 8 — 단 *변수*로 둬서 측정 시 8 대입, 다른 구성도 산출 가능.)
 - **knob**: prefill_tokens (배포 128 — *스케일 knob*, 동작점 basis를 정함).
 
 > 함의: PIM/HBM/FP8를 고정해도 GPU·모델이 바뀌면 op-time 계수가 바뀌어 `ctx_balance`(현재 100K)·
@@ -124,12 +126,13 @@ core/
   `prefill_kv_work_target`, `age_cap`, `idle_band`(=0.10), `ctx_balance`(=문서의 ~100K).
 
 ### 5.2 핵심 타입 (spec.h / operating_point.h가 정의 — 변경 시 이 문서부터)
-- `ModelSpec{num_layers,hidden,num_heads,num_kv_heads,head_dim,ffn_intermediate}`
-- `HwSpec{gpu_peak_tflops,gpu_mfu,num_gpus_a,num_gpus_b}`
+- `ModelSpec{num_layers,hidden,num_heads,num_kv_heads,head_dim,ffn_intermediate, weight_bytes_per_elem=2}`
+- `HwSpec{gpu_peak_tflops, gpu_mfu, num_gpus_a=8, num_gpus_b=8}`  (GPU 수 = 변수, 기본 8)
 - `OperatingPoint{ctx_balance, decode_count_target, kv_operating_target, prefill_tokens,
   prefill_kv_work_target, ffn_batch, balance_time_us, decode_pool, prefill_pool, age_cap,
-  idle_band, instance_a_tb, hbm_fits}`
-- `DeriveOptions{decode_surplus=10, prefill_pool=60, age_cap=5, idle_band=0.10, staggering=2}`
+  idle_band, node_max, node_min, node_footprint_cap, edge_band, instance_a_tb, hbm_fits}`
+- `DeriveOptions{decode_surplus=10, prefill_pool=60, age_cap=5, idle_band=0.10, staggering=2,
+  footprint_headroom=1.22, prefill_avg_depth_frac=0.56, node_max_surplus=10, edge_band_tokens=1000}`
 
 ### 5.3 op-time (optime.h) — 모든 모듈이 이걸로만 시간을 잰다
 ```
@@ -188,10 +191,18 @@ t_gpu_a_us = (qkv + o_proj + prefill_attn) / peak_flops(num_gpus_a) × 1e6
 kv_bytes_per_token = 2(K,V) × num_kv_heads × head_dim × 1(FP8) × num_layers
 ```
 
-**HBM 적합성** — OPERATING_POINT §4.1
+**Instance A 가중치 (QKV/O proj, 동적 정밀도)** — OPERATING_POINT §4.1 (Llama70B ≈ 24 GB)
+```
+instance_a_weight_bytes = (hidden×(num_heads×head_dim + 2×num_kv_heads×head_dim)  // QKV
+                         + hidden×hidden)                                          // O proj
+                        × num_layers × weight_bytes_per_elem                       // 동적 FP8/16/32
+```
+
+**HBM 적합성** — OPERATING_POINT §4.1. KV(FP8) + 가중치(동적) 둘 다 64 스택을 점유.
 ```
 instance_a_tokens = decode_pool × ctx_balance + prefill_pool × (prefill 평균 진행 depth)
-instance_a_tb     = instance_a_tokens × kv_bytes_per_token / 1e12
+                    // decode_pool = 2×N_dec+잉여 → 활성 2 μ-batch 가 들어감
+instance_a_tb     = (instance_a_tokens × kv_bytes_per_token + instance_a_weight_bytes) / 1e12
 hbm_fits          = instance_a_tb ≤ substrate::PIM_CAP_TB (4.40)
 ```
 > prefill 평균 진행 depth는 OP §4.1이 ~56K(=ctx_balance×0.56 근사)로 표기 — `DeriveOptions`에

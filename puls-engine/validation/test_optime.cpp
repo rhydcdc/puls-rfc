@@ -11,7 +11,7 @@ using namespace puls;
 int main() {
     ModelSpec llama{/*layers*/80, /*hidden*/8192, /*heads*/64,
                     /*kv_heads*/8, /*head_dim*/128, /*ffn_inter*/28672};
-    HwSpec b200{/*tflops*/2200.0, /*mfu*/0.6, /*gpus_a*/8, /*gpus_b*/8};
+    HwSpec b200{/*tflops*/2200.0, /*mfu*/0.6};
 
     // ── FFN ──────────────────────────────────────────────────────────────────
     // flops = 6 × 190 × 8192 × 28672 = 267,852,840,960

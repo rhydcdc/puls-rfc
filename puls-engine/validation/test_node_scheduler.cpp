@@ -108,7 +108,7 @@ static long long node_cap_room_proxy(const OperatingPoint& op) {
 int main() {
     ModelSpec llama{/*layers*/80, /*hidden*/8192, /*heads*/64,
                     /*kv_heads*/8, /*head_dim*/128, /*ffn_inter*/28672};
-    HwSpec b200{/*tflops*/2200.0, /*mfu*/0.6, /*gpus_a*/8, /*gpus_b*/8};
+    HwSpec b200{/*tflops*/2200.0, /*mfu*/0.6};
     OperatingPoint op = derive_operating_point(llama, b200, 128);
     std::printf("op: ctx_balance=%.0f decode_pool=%d decode_count_target=%d kv_target=%lld age_cap=%d\n",
                 op.ctx_balance, op.decode_pool, op.decode_count_target,

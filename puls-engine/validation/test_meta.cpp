@@ -18,7 +18,7 @@ using namespace puls;
 int main() {
     ModelSpec llama{/*layers*/80, /*hidden*/8192, /*heads*/64,
                     /*kv_heads*/8, /*head_dim*/128, /*ffn_inter*/28672};
-    HwSpec b200{/*tflops*/2200.0, /*mfu*/0.6, /*gpus_a*/8, /*gpus_b*/8};
+    HwSpec b200{/*tflops*/2200.0, /*mfu*/0.6};
 
     // ── ① derive 가 입력 변수에 반응(하드코딩 아님) ─────────────────────────────
     // 모델 hidden 을 바꾸면 op-time 계수가 달라져 ctx_balance/N_dec 가 재도출된다.
@@ -53,19 +53,28 @@ int main() {
     static_assert(substrate::PIM_TILE_TIME_FP8_NS == 267.0, "PIM tile time FP8 = 267 ns");
     static_assert(substrate::PIM_TILE_ROWS == 32, "PIM tile rows = 32");
     static_assert(substrate::PIM_CAP_TB == 4.40, "PIM cap = 4.40 TB");
-    static_assert(substrate::KV_BYTES_PER_ELEM == 1, "FP8 KV = 1 byte/elem");
+    static_assert(substrate::KV_BYTES_PER_ELEM == 1, "FP8 KV = 1 byte/elem (고정)");
     // ModelSpec/HwSpec 의 크기 = 선언된 변수 필드만 — 고정 substrate 값이 필드로 안 샘.
-    // (substrate 상수가 spec 에 섞였다면 컴파일조차 안 되거나 필드가 늘었을 것. 구조 회귀 핀.)
-    CHECK(sizeof(ModelSpec) == sizeof(int) * 6, "ModelSpec carries only its 6 variable fields");
+    CHECK(sizeof(ModelSpec) == sizeof(int) * 7,
+          "ModelSpec = 6 dims + weight precision (변수만; substrate 비혼입)");
     static_assert(std::is_trivially_copyable<ModelSpec>::value, "ModelSpec stays a plain spec");
-    // HwSpec: 2 double + 2 int (정렬로 약간 패딩될 수 있으니 하한·상한 핀).
+    // HwSpec = 2 double + num_gpus_a/b (변수 — 배포 8, 다른 구성 가능). 정렬 패딩 하한·상한 핀.
     CHECK(sizeof(HwSpec) >= sizeof(double) * 2 + sizeof(int) * 2 &&
           sizeof(HwSpec) <= sizeof(double) * 3,
-          "HwSpec carries only its 4 variable fields (no substrate constants)");
-    // kv_bytes_per_token 은 변수 필드 + substrate 상수로 계산 — substrate 값이 spec 에 박히지 않음.
+          "HwSpec = tflops+mfu+num_gpus_a/b (variables; gpus default 8)");
+    // kv_bytes_per_token 은 변수 필드 × substrate 상수로 계산 — substrate 값이 spec 에 박히지 않음.
     long long expect_kv = (long long)2 * llama.num_kv_heads * llama.head_dim * 1 * llama.num_layers;
     CHECK(llama.kv_bytes_per_token() == expect_kv,
           "kv_bytes/token derives from variable fields x substrate constants");
+    // 가중치 정밀도는 *동적* — FP8/FP16/FP32 로 instance_a 가중치 바이트가 비례.
+    ModelSpec w_fp8 = llama;  w_fp8.weight_bytes_per_elem  = 1;
+    ModelSpec w_fp32 = llama; w_fp32.weight_bytes_per_elem = 4;
+    std::printf("weight-precision: fp8=%.1fGB fp16=%.1fGB fp32=%.1fGB\n",
+                w_fp8.instance_a_weight_bytes() / 1e9, llama.instance_a_weight_bytes() / 1e9,
+                w_fp32.instance_a_weight_bytes() / 1e9);
+    CHECK(w_fp8.instance_a_weight_bytes() * 2 == llama.instance_a_weight_bytes() &&
+          w_fp32.instance_a_weight_bytes() == llama.instance_a_weight_bytes() * 2,
+          "weight precision is dynamic (FP8/FP16/FP32 scales weight bytes)");
 
     // ── ③ canonical: per-completion 힐링(toxic-fit) — 긴 요청 보존 ───────────────
     // steering 은 batched 평균을 안 쓴다(구조). 행동검증: ideal=가장 작은 잔여라도 긴 요청이

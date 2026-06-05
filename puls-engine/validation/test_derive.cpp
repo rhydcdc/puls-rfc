@@ -10,7 +10,7 @@ using namespace puls;
 int main() {
     ModelSpec llama{/*layers*/80, /*hidden*/8192, /*heads*/64,
                     /*kv_heads*/8, /*head_dim*/128, /*ffn_inter*/28672};
-    HwSpec b200{/*tflops*/2200.0, /*mfu*/0.6, /*gpus_a*/8, /*gpus_b*/8};
+    HwSpec b200{/*tflops*/2200.0, /*mfu*/0.6};
 
     OperatingPoint op = derive_operating_point(llama, b200, 128);
     std::printf("P=128: ctx=%.0f N_dec=%d kv=%lld ffn_batch=%d X=%.2fus a_tb=%.2f fits=%d\n",
@@ -34,6 +34,26 @@ int main() {
 
     // 스케일 불변성: 256 의 N_dec ≈ 2× 128 의 N_dec
     CHECK_NEAR(op2.decode_count_target, 2 * op.decode_count_target, 6, "N_dec scales 2x with prefill");
+
+    // ── HBM4 적합성 — 가중치 포함 + 활성 2배치(2×N_dec+잉여) + 모델 스케일 ─────────
+    std::printf("HBM 70B: weight=%.1fGB a_tb=%.2f decode_pool=%d(=2x%d+%d) kv/tok=%lld\n",
+                llama.instance_a_weight_bytes() / 1e9, op.instance_a_tb,
+                op.decode_pool, op.decode_count_target,
+                op.decode_pool - 2 * op.decode_count_target, llama.kv_bytes_per_token());
+    CHECK_REL(llama.instance_a_weight_bytes() / 1e9, 24.0, 0.12, "Llama70B Instance A weight ~24GB");
+    CHECK(op.decode_pool == 2 * op.decode_count_target + 10,
+          "decode pool = 2 active microbatches (2xN_dec) + surplus");
+    CHECK(op.hbm_fits, "70B fits with weights included");
+
+    // 더 큰 모델(405B-class): KV/tok·가중치 모두 커져 HBM4 에 빠듯하게 적합(doc §4.1 ~4.24TB).
+    ModelSpec m405{/*layers*/126, /*hidden*/16384, /*heads*/128,
+                   /*kv_heads*/8, /*head_dim*/128, /*ffn_inter*/53248};
+    OperatingPoint o405 = derive_operating_point(m405, b200, 128);
+    std::printf("405B: ctx=%.0f N_dec=%d kv/tok=%.0fKiB weight=%.1fGB a_tb=%.2f fits=%d\n",
+                o405.ctx_balance, o405.decode_count_target, m405.kv_bytes_per_token() / 1024.0,
+                m405.instance_a_weight_bytes() / 1e9, o405.instance_a_tb, (int)o405.hbm_fits);
+    CHECK_REL(m405.kv_bytes_per_token() / 1024.0, 252.0, 0.02, "405B KV/tok ~252 KiB (doc §4.1)");
+    CHECK(o405.instance_a_tb > op.instance_a_tb, "bigger model uses more HBM (judged per model)");
 
     return puls_test::summary();
 }

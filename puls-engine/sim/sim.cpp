@@ -64,7 +64,7 @@ int main() {
     // ── 동작점: derive 로 산출(하드코딩 0) ───────────────────────────────────────
     ModelSpec llama{/*layers*/80, /*hidden*/8192, /*heads*/64,
                     /*kv_heads*/8, /*head_dim*/128, /*ffn_inter*/28672};
-    HwSpec b200{/*tflops*/2200.0, /*mfu*/0.6, /*gpus_a*/8, /*gpus_b*/8};
+    HwSpec b200{/*tflops*/2200.0, /*mfu*/0.6};
     const OperatingPoint op = derive_operating_point(llama, b200, /*prefill*/128);
 
     const int Z = 256;                 // 클러스터 노드 수(sim 규모 — 동작점과 무관한 sim knob)

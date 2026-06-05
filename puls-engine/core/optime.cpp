@@ -21,7 +21,7 @@ double t_pim_us(long long sum_decode_kv_tokens, const HwSpec& hw) {
 
 // FFN (Instance B). CONTRACT §6 / config.py:270-274.
 //   flops    = 6 × batch_total × hidden × ffn_intermediate
-//   t_ffn_us = flops / peak_flops(num_gpus_b) × 1e6
+//   t_ffn_us = flops / peak_flops(num_gpus_b) × 1e6  (배포 8)
 double t_ffn_us(int batch_total, const ModelSpec& m, const HwSpec& hw) {
     double flops = 6.0 * (double)batch_total * (double)m.hidden * (double)m.ffn_intermediate;
     return flops / hw.peak_flops(hw.num_gpus_b) * 1e6;
@@ -31,7 +31,7 @@ double t_ffn_us(int batch_total, const ModelSpec& m, const HwSpec& hw) {
 //   qkv          = 2 × batch_total × hidden × (hidden + 2 × num_kv_heads × head_dim)
 //   o_proj       = 2 × batch_total × hidden × hidden
 //   prefill_attn = 2 × prefill_attn_work_tokens × hidden
-//   t_gpu_a_us   = (qkv + o_proj + prefill_attn) / peak_flops(num_gpus_a) × 1e6
+//   t_gpu_a_us   = (qkv + o_proj + prefill_attn) / peak_flops(num_gpus_a) × 1e6  (배포 8)
 double t_gpu_a_us(int batch_total, long long prefill_attn_work_tokens,
                   const ModelSpec& m, const HwSpec& hw) {
     double qkv = 2.0 * (double)batch_total * (double)m.hidden

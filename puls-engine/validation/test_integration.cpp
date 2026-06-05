@@ -29,7 +29,7 @@ static std::vector<int> draw_b(std::mt19937& rng, int n) {
 int main() {
     ModelSpec llama{/*layers*/80, /*hidden*/8192, /*heads*/64,
                     /*kv_heads*/8, /*head_dim*/128, /*ffn_inter*/28672};
-    HwSpec b200{/*tflops*/2200.0, /*mfu*/0.6, /*gpus_a*/8, /*gpus_b*/8};
+    HwSpec b200{/*tflops*/2200.0, /*mfu*/0.6};
 
     // ── ① derive ──────────────────────────────────────────────────────────────
     OperatingPoint op = derive_operating_point(llama, b200, 128);
@@ -140,10 +140,10 @@ int main() {
         CHECK(other_changed == 0, "inter-node swap 0: healing touched no other node");
     }
 
-    // ── 추가: 다른 HW(gpus_a=4)로 derive→스케줄 파이프 자체정합(명중) 1 케이스 ──────
+    // ── 추가: 다른 HW(GPU 수 변수 — gpus_a/b=4)로 derive→스케줄 파이프 자체정합 1 케이스 ──
     {
-        HwSpec b200_4{/*tflops*/2200.0, /*mfu*/0.6, /*gpus_a*/4, /*gpus_b*/4};
-        OperatingPoint op4 = derive_operating_point(llama, b200_4, 128);
+        HwSpec hw_alt{/*tflops*/2200.0, /*mfu*/0.6, /*gpus_a*/4, /*gpus_b*/4};
+        OperatingPoint op4 = derive_operating_point(llama, hw_alt, 128);
         std::printf("alt-HW(gpus=4): ctx=%.0f N_dec=%d kv=%lld node_min=%d\n",
                     op4.ctx_balance, op4.decode_count_target, op4.kv_operating_target, op4.node_min);
         CHECK(op4.decode_count_target > 0 && op4.ctx_balance > 0, "alt-HW derive usable");
