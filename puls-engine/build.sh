@@ -17,6 +17,7 @@ echo "== building drivers =="
 $CXX $FLAGS runtime/main_runtime.cpp runtime/runtime.cpp $CORE -o build/puls_runtime.exe
 $CXX $FLAGS sim/sim.cpp $CORE -o build/puls_sim.exe
 $CXX $FLAGS sim/lifecycle.cpp $CORE -o build/puls_lifecycle.exe
+$CXX $FLAGS analysis/max_model.cpp $CORE -o build/max_model.exe
 
 echo "== running tests =="
 fail=0

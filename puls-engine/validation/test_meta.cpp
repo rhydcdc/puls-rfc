@@ -52,7 +52,8 @@ int main() {
     // substrate 상수가 컴파일 상수로 실재(몇 개 static 확인). 값까지 박제(CONTRACT §1).
     static_assert(substrate::PIM_TILE_TIME_FP8_NS == 267.0, "PIM tile time FP8 = 267 ns");
     static_assert(substrate::PIM_TILE_ROWS == 32, "PIM tile rows = 32");
-    static_assert(substrate::PIM_CAP_TB == 4.40, "PIM cap = 4.40 TB");
+    static_assert(substrate::HBM4_CHANNEL_DENSITY_GB_16HIGH == 16.0,
+                  "HBM4 channel density 16 Gb @16단 (JEDEC) — 용량은 산출, 하드코딩 아님");
     static_assert(substrate::KV_BYTES_PER_ELEM == 1, "FP8 KV = 1 byte/elem (고정)");
     // ModelSpec/HwSpec 의 크기 = 선언된 변수 필드만 — 고정 substrate 값이 필드로 안 샘.
     CHECK(sizeof(ModelSpec) == sizeof(int) * 7,

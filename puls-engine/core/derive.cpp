@@ -107,8 +107,15 @@ OperatingPoint derive_operating_point(const ModelSpec& model,
     const double kv_bytes     = instance_a_tokens * (double)model.kv_bytes_per_token();
     const double weight_bytes = (double)model.instance_a_weight_bytes();  // QKV/O proj, 동적 정밀도
     op.instance_a_tb = (kv_bytes + weight_bytes) / 1e12;
-    // 가용 HBM = 16단 기준(4.40 TB)을 die-stack 높이로 선형 스케일(4-die SID 단위, 4의 배수).
-    op.hbm_capacity_tb = substrate::PIM_CAP_TB * (opt.hbm_stack_height / 16.0);
+    // 가용 HBM = JEDEC primitive 산출(하드코딩 아님): 채널수 × 채널밀도 / 8 × 스택수.
+    //   channel_density 는 die-stack 높이에 선형(16단=16Gb), stack 수 = num_gpus_a × 8.
+    //   → 배포(16단·64스택) = 32×16/8 × 64 = 4.096 TB. (문서 4.40 은 오기)
+    const double channel_density_gb =
+        substrate::HBM4_CHANNEL_DENSITY_GB_16HIGH * (opt.hbm_stack_height / 16.0);
+    const double per_stack_gb =
+        substrate::PIM_CHANNELS_PER_STACK * channel_density_gb / 8.0;   // Gb → GB
+    const int    num_stacks = hw.num_gpus_a * substrate::HBM4_STACKS_PER_GPU;
+    op.hbm_capacity_tb = num_stacks * per_stack_gb / 1000.0;            // GB → TB
     op.hbm_fits        = op.instance_a_tb <= op.hbm_capacity_tb;
 
     return op;

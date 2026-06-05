@@ -65,11 +65,12 @@ int main() {
     std::printf("HBM stack: 16단 cap=%.2fTB | 12단 cap=%.2fTB | 70B@128 a_tb=%.2f | 70B@192 a_tb=%.2f(16:%d 12:%d)\n",
                 h16.hbm_capacity_tb, h12.hbm_capacity_tb, h16.instance_a_tb,
                 b16.instance_a_tb, (int)b16.hbm_fits, (int)b12.hbm_fits);
-    CHECK_REL(h16.hbm_capacity_tb, 4.40, 0.001, "16단 = 4.40 TB (4 SID)");
-    CHECK_REL(h12.hbm_capacity_tb, 3.30, 0.001, "12단 = 3.30 TB (3 SID = 3/4 of 16단)");
+    // JEDEC 산출: 16단·64스택 = 32ch×16Gb/8 × 64 = 64GB×64 = 4096GB = 4.096 TB (문서 4.40 은 오기).
+    CHECK_REL(h16.hbm_capacity_tb, 4.096, 0.005, "16단 = 4.096 TB (64stack × 64GB, JEDEC 32ch×16Gb)");
+    CHECK_REL(h12.hbm_capacity_tb, 3.072, 0.005, "12단 = 3.072 TB (×12/16)");
     CHECK(h16.hbm_fits && h12.hbm_fits, "70B@128 (2.77TB) fits both 12/16단");
-    // 경계: 12단(3.30)과 16단(4.40) 사이 점유면 16단만 적합 — die-stack 변수가 실제로 판정에 작용.
-    if (b16.instance_a_tb > 3.30 && b16.instance_a_tb < 4.40) {
+    // 경계: 12단(3.072)과 16단(4.096) 사이 점유면 16단만 적합 — die-stack 변수가 판정에 작용.
+    if (b16.instance_a_tb > 3.072 && b16.instance_a_tb < 4.096) {
         CHECK(b16.hbm_fits && !b12.hbm_fits, "boundary load fits 16단 but not 12단 (변수 작용)");
     }
 

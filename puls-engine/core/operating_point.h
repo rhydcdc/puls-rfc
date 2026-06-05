@@ -46,7 +46,7 @@ struct DeriveOptions {
     double edge_band_tokens      = 1000;  // E = 1K (OP §7.5 채택)
     double footprint_headroom    = 1.22;  // footprint 캡 여유 (OP §4.1: 30M/24.6M = 15M/12.3M)
     // HBM die-stack 높이(dies) — 4-die SID 단위로만 쌓임(4의 배수). 실용 = 12(3 SID)·16(4 SID).
-    // 용량은 die 수에 선형: cap = PIM_CAP_TB(16단=4.40) × stack_height/16. 12단 → 3.30 TB.
+    // 용량은 JEDEC 채널밀도(die 선형)에서 산출: 16단·64스택 = 4.096 TB, 12단 = 3.072 TB.
     int    hbm_stack_height      = 16;    // 배포 16단. 12 면 용량 3/4.
 };
 

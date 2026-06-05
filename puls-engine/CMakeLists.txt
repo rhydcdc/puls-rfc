@@ -32,6 +32,10 @@ target_link_libraries(puls_sim PRIVATE puls_core)
 add_executable(puls_lifecycle sim/lifecycle.cpp)
 target_link_libraries(puls_lifecycle PRIVATE puls_core)
 
+# 분석: 칩별 최대 모델 / SOTA 적합성 (derive 기반)
+add_executable(puls_max_model analysis/max_model.cpp)
+target_link_libraries(puls_max_model PRIVATE puls_core)
+
 # ── 검증 (모듈별 + 통합) — ctest ────────────────────────────────────────────
 enable_testing()
 set(PULS_TESTS
