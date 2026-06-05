@@ -252,6 +252,8 @@ Decode attention 만 이 3 조건을 동시 충족 → PIM scope 가 substrate �
 
 Instance A 의 SP-PIM aggregate 채널 수는 k_total = 2048 으로 고정. PIM 은 decode-attn 일이 존재하는 한 *항상* 가동되어, Instance A GPU 의 compute-bound 영역 (QKV · prefill_attn · O-proj) 의 HBM idle 헤드룸 위에 자연 overlap (O3 + §3.5.3). Sequence-parallel 성질 위 임의 시점 한 mb 의 decode-attn 이 모든 채널 점유 — 채널 분할 micromanagement 불필요 (Hermite identity 위 partition·serialize 동치). 잔여 TSV contention 은 시간 마진이 아니라 채널 독립 토글 (§3.2) 과 path separation (§5.3) 으로 흡수될 것으로 추정 — channel knob 부재 (TSV-saturation 폐쇄는 silicon-deferred).
 
+여기서 PIM 에 대역폭을 공급하는 출처는 둘이다. (i) **decode-KV 채널 자체** — GPU-only 서빙에선 GPU 가 decode KV 를 버스로 스트리밍하지만 (memory-bound), PULS 는 logic die 에서 in-place 처리하므로 그 트래픽이 단순 overlap 이 아니라 *구조적으로 해방*된다. (ii) **projection / prefill-KV 채널** — compute-bound 라 GPU 가 윈도우의 일부만 점유하고 (배포 동작점에서 weight-load ≈ t_gpu_a 의 9%), 나머지 시간엔 idle 로 남는다. (i) 이 더 큰 효과인데, GPU-only 서빙에선 decode 가 memory-bound 이기 때문이다.
+
 - **Attention step** — Mixed batch 의 prefill chunk 토큰은 GPU attention kernel 이, decode 토큰은 SP-PIM 이 *동시 처리*. decode 토큰 존재 시 2048 채널 lock-step 단일 op. Pure prefill 배치 (decode rows 0) 는 PIM op_time = 0.
 - **Projection step (QKV / O-proj / FFN)** — 같은 mb 의 PIM 작업 없음. Intra-instance double-buffering (§5.6) 위 *다음 mb* 의 decode-attn 이 projection 구간에 자연 overlap — P5 compute-bound timing 활성화 원칙 정합.
 
