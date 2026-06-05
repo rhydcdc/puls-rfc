@@ -29,8 +29,9 @@ struct OperatingPoint {
     long long node_footprint_cap;     // 노드 footprint(Σlen) 캡 — count 상한보다 헤드룸(OP §4.1)
 
     // HBM 적합성
-    double instance_a_tb;             // Instance A KV 메모리 합 (TB)
-    bool   hbm_fits;                  // ≤ substrate::PIM_CAP_TB
+    double instance_a_tb;             // Instance A 점유 (KV + 가중치) 합 (TB)
+    double hbm_capacity_tb;           // 가용 HBM 용량 (die-stack 높이에 비례)
+    bool   hbm_fits;                  // instance_a_tb ≤ hbm_capacity_tb
 };
 
 // derive 의 튜닝 knob (CONTRACT §4 채택값 = 기본값). 문서 수치, 추정 아님.
@@ -44,6 +45,9 @@ struct DeriveOptions {
     int    node_max_surplus      = 10;    // node_max = node_min + 이 잉여
     double edge_band_tokens      = 1000;  // E = 1K (OP §7.5 채택)
     double footprint_headroom    = 1.22;  // footprint 캡 여유 (OP §4.1: 30M/24.6M = 15M/12.3M)
+    // HBM die-stack 높이(dies) — 4-die SID 단위로만 쌓임(4의 배수). 실용 = 12(3 SID)·16(4 SID).
+    // 용량은 die 수에 선형: cap = PIM_CAP_TB(16단=4.40) × stack_height/16. 12단 → 3.30 TB.
+    int    hbm_stack_height      = 16;    // 배포 16단. 12 면 용량 3/4.
 };
 
 } // namespace puls

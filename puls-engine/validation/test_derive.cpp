@@ -55,5 +55,23 @@ int main() {
     CHECK_REL(m405.kv_bytes_per_token() / 1024.0, 252.0, 0.02, "405B KV/tok ~252 KiB (doc §4.1)");
     CHECK(o405.instance_a_tb > op.instance_a_tb, "bigger model uses more HBM (judged per model)");
 
+    // ── HBM die-stack 높이 변수화 (12 vs 16단, 4-die SID 단위) ──────────────────
+    DeriveOptions opt16; opt16.hbm_stack_height = 16;
+    DeriveOptions opt12; opt12.hbm_stack_height = 12;
+    OperatingPoint h16 = derive_operating_point(llama, b200, 128, opt16);
+    OperatingPoint h12 = derive_operating_point(llama, b200, 128, opt12);
+    OperatingPoint b16 = derive_operating_point(llama, b200, 192, opt16);  // 경계 데모
+    OperatingPoint b12 = derive_operating_point(llama, b200, 192, opt12);
+    std::printf("HBM stack: 16단 cap=%.2fTB | 12단 cap=%.2fTB | 70B@128 a_tb=%.2f | 70B@192 a_tb=%.2f(16:%d 12:%d)\n",
+                h16.hbm_capacity_tb, h12.hbm_capacity_tb, h16.instance_a_tb,
+                b16.instance_a_tb, (int)b16.hbm_fits, (int)b12.hbm_fits);
+    CHECK_REL(h16.hbm_capacity_tb, 4.40, 0.001, "16단 = 4.40 TB (4 SID)");
+    CHECK_REL(h12.hbm_capacity_tb, 3.30, 0.001, "12단 = 3.30 TB (3 SID = 3/4 of 16단)");
+    CHECK(h16.hbm_fits && h12.hbm_fits, "70B@128 (2.77TB) fits both 12/16단");
+    // 경계: 12단(3.30)과 16단(4.40) 사이 점유면 16단만 적합 — die-stack 변수가 실제로 판정에 작용.
+    if (b16.instance_a_tb > 3.30 && b16.instance_a_tb < 4.40) {
+        CHECK(b16.hbm_fits && !b12.hbm_fits, "boundary load fits 16단 but not 12단 (변수 작용)");
+    }
+
     return puls_test::summary();
 }

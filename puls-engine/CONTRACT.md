@@ -22,7 +22,9 @@
 ### 고정 (현 스펙 박제 — `core/spec.h::substrate`)
 PULS를 정의하는 substrate. 모델/GPU가 바뀌어도 불변.
 - **SP-PIM**: tile time(FP8 **267 ns**), tile rows(**32**), cross-GPU broadcast(0.5 ns), per-GPU stack 수(8), per-stack channel 수(32). 출처 config.py:123,303,304 / HWConfig.
-- **HBM4 메모리**: BW 2.0 TB/s·stack, 64 GB/stack(16-high), Instance A = 64 stack → 4.40 TB. 출처 OPERATING_POINT §4.1.
+- **HBM4 메모리**: BW 2.0 TB/s·stack, per-stack 채널 구조(32ch) 고정. **die-stack 높이는 변수**
+  — 4-die SID 단위(4의 배수), 실용 12·16단. 16단 = 4.40 TB baseline, 12단 = 3.30 TB(×12/16).
+  `DeriveOptions.hbm_stack_height`(기본 16). 출처 JEDEC JESD270-4A / OPERATING_POINT §4.1.
 - **KV 정밀도 = FP8(8비트)**: `KV_BYTES_PER_ELEM = 1`. FP16 경로 만들지 않음.
 
 ### 변수 (입력 — `core/spec.h::ModelSpec`, `HwSpec`)

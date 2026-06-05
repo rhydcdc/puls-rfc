@@ -22,7 +22,8 @@ namespace substrate {
     constexpr double HBM4_BW_PER_STACK_TBPS = 2.0;  // config.py:114
     constexpr double HBM4_CAP_PER_STACK_GB  = 64.0; // OPERATING_POINT §4.1 (16-high 물리 상한)
     constexpr int    PIM_STACKS_TOTAL       = 64;   // Instance A SP-PIM = 64 stack
-    constexpr double PIM_CAP_TB             = 4.40; // 64 stack × 64 GB
+    constexpr double PIM_CAP_TB             = 4.40; // 16단(16-high) 기준 baseline.
+                                                    // die-stack 높이로 스케일 — DeriveOptions.hbm_stack_height.
 
     // KV 저장 = FP8 (8비트). 고정. FP16 경로 없음.
     constexpr int    KV_BYTES_PER_ELEM = 1;  // FP8 = 1 byte
