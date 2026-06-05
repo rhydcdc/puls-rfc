@@ -135,8 +135,9 @@ core/
 - `OperatingPoint{ctx_balance, decode_count_target, kv_operating_target, prefill_tokens,
   prefill_kv_work_target, ffn_batch, balance_time_us, decode_pool, prefill_pool, age_cap,
   idle_band, node_max, node_min, node_footprint_cap, edge_band, instance_a_tb, hbm_fits}`
-- `DeriveOptions{decode_surplus=10, prefill_pool=60, age_cap=5, idle_band=0.10, staggering=2,
-  footprint_headroom=1.22, prefill_avg_depth_frac=0.56, node_max_surplus=10, edge_band_tokens=1000}`
+- `DeriveOptions{decode_surplus=10, prefill_pool=60, age_cap=5, idle_band=0.10,
+  prefill_avg_depth_frac=0.56, node_max_surplus=10, edge_band_tokens=1000,
+  footprint_headroom=1.22, hbm_stack_height=16}`
 
 ### 5.3 op-time (optime.h) — 모든 모듈이 이걸로만 시간을 잰다
 ```

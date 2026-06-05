@@ -120,7 +120,7 @@ int main() {
     {
         WorkloadSource src(/*seed*/12345);
         NodeScheduler node(op, src);
-        for (int i = 0; i < op.decode_pool; ++i) node.admit_centered(/*fresh*/true);
+        for (int i = 0; i < op.decode_pool; ++i) node.admit_centered();
 
         double mean = node.mean_live_kv();
         std::printf("[1] centering: pool=%zu mean_live_kv=%.0f (ctx_balance=%.0f, ratio=%.3f)\n",
@@ -136,7 +136,7 @@ int main() {
     {
         WorkloadSource src(/*seed*/777);
         NodeScheduler node(op, src);
-        for (int i = 0; i < op.decode_pool; ++i) node.admit_centered(/*fresh*/true);
+        for (int i = 0; i < op.decode_pool; ++i) node.admit_centered();
         int filled = (int)node.pool().size();
 
         int total_completions = 0;
@@ -163,7 +163,7 @@ int main() {
 
         PhasedSource src(/*seed*/2024, HORIZON);
         NodeScheduler node(op, src);
-        for (int i = 0; i < op.decode_pool; ++i) node.admit_centered(/*fresh*/true); // 자연 분포 seed.
+        for (int i = 0; i < op.decode_pool; ++i) node.admit_centered(); // 자연 분포 seed.
         src.end_seeding();            // 이후 admit/heal 은 best-of-K near-ideal(=ideal=hole).
 
         // 초기 풀 스냅샷(대조군 시뮬과 공유) + early toxic.
@@ -219,7 +219,7 @@ int main() {
     {
         WorkloadSource src(/*seed*/555);
         NodeScheduler node(op, src);
-        for (int i = 0; i < op.decode_pool; ++i) node.admit_centered(/*fresh*/true);
+        for (int i = 0; i < op.decode_pool; ++i) node.admit_centered();
         for (int r = 0; r < 10; ++r) node.advance_round();   // warmup
 
         double mean_early = node.mean_live_kv();

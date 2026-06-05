@@ -63,6 +63,8 @@ OperatingPoint derive_operating_point(const ModelSpec& model,
     // ── 세 자원 균형: ctx 에 대해 이분(잔차 부호 변화 추적) ───────────────────
     double lo = 1.0e3, hi = 4.0e5;
     const bool neg_at_lo = balance_residual(lo, P, model, hw) < 0.0;
+    // bracket 보장: hi 의 부호가 lo 와 같으면 sign change 까지 확장(극단 모델/HW 도 saturate 없이).
+    for (int g = 0; g < 24 && (balance_residual(hi, P, model, hw) < 0.0) == neg_at_lo; ++g) hi *= 2.0;
     for (int i = 0; i < 200; ++i) {
         const double mid = 0.5 * (lo + hi);
         const bool neg = balance_residual(mid, P, model, hw) < 0.0;

@@ -21,10 +21,9 @@ static long long node_cap_room(const OperatingPoint& op) {
 }
 
 // 센터링 admit: ideal = ctx_balance×(cnt+1) − liveSum 으로 풀 live KV 평균을 ctx_balance 에 센터.
-// 풀이 떠 있으면 ideal↓ → 작은 것을 당겨 평균을 끌어내린다. fresh=true → dec=0(힐링 경로).
-// fresh=false(콜드스타트)도 dec=0 으로 두며, 콜드스타트 랜덤 진행은 sim 드라이버가 별도 주입한다
-// (NodeScheduler 는 RNG 없음 — 랜덤은 RequestSource 책임).
-void NodeScheduler::admit_centered(bool fresh) {
+// 풀이 떠 있으면 ideal↓ → 작은 것을 당겨 평균을 끌어내린다. 새 디코더는 dec=0 으로 admit
+// (콜드스타트의 랜덤 진행이 필요하면 sim 드라이버가 별도 주입 — NodeScheduler 는 RNG 없음).
+void NodeScheduler::admit_centered() {
     long long live_sum = sum_live_kv();
     int cnt = static_cast<int>(pool_.size());
     double ideal = op_.ctx_balance * (cnt + 1) - static_cast<double>(live_sum);
@@ -34,7 +33,7 @@ void NodeScheduler::admit_centered(bool fresh) {
         NodeDecoder q;
         q.prompt = r.prompt;
         q.dtot = r.dtot;
-        q.dec = 0;  // fresh: 힐링 / cold: 진행 랜덤은 드라이버 주입.
+        q.dec = 0;  // 갓 admit — 진행 0 (콜드스타트 랜덤 진행은 드라이버 주입).
         q.wait = 0;
         pool_.push_back(q);
     }

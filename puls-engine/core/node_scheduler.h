@@ -22,8 +22,8 @@ class NodeScheduler {
 public:
     NodeScheduler(const OperatingPoint& op, RequestSource& src);
 
-    // 센터링 admit: ideal = ctx_balance×(cnt+1) − liveSum. fresh=true → dec=0(힐링).
-    void admit_centered(bool fresh);
+    // 센터링 admit: ideal = ctx_balance×(cnt+1) − liveSum. 새 디코더는 dec=0 으로 admit.
+    void admit_centered();
 
     // 디코드 한 μ-batch 구성(steering+age-cap). used 공유로 2회 호출 → disjoint 246 advance.
     // 반환 = 선택 인덱스. 진행/wait 갱신은 advance_round 가 일괄 수행.

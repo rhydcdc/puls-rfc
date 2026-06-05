@@ -24,7 +24,6 @@ namespace substrate {
     //   stack 수 = num_gpus_a × HBM4_STACKS_PER_GPU (배포 8×8 = 64 stack)
     //   → 16단·64스택 = 32×16/8 × 64 = 64 GB × 64 = 4096 GB = **4.096 TB**.
     //   (문서 OPERATING_POINT §4.1 의 "4.40 TB" 는 산술 오기 — 64GB×64=4.096TB 가 맞음.)
-    constexpr double HBM4_BW_PER_STACK_TBPS         = 2.0;  // config.py:114
     constexpr double HBM4_CHANNEL_DENSITY_GB_16HIGH = 16.0; // JEDEC 채널밀도 상한 (16단)
 
     // KV 저장 = FP8 (8비트). 고정. FP16 경로 없음.

@@ -40,7 +40,6 @@ struct DeriveOptions {
     int    prefill_pool          = 60;    // depth-diversity 하한 50 + 마진 10
     int    age_cap               = 5;     // OP §3 sweep knee
     double idle_band             = 0.10;  // 진단 밴드 placeholder
-    int    staggering            = 2;     // 동시 active μ-batch
     double prefill_avg_depth_frac= 0.56;  // prefill in-flight 평균 depth/ctx (OP §4.1 ~56K)
     int    node_max_surplus      = 10;    // node_max = node_min + 이 잉여
     double edge_band_tokens      = 1000;  // E = 1K (OP §7.5 채택)

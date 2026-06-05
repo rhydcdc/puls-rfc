@@ -78,7 +78,7 @@ public:
         while (static_cast<int>(node_.pool().size()) < op_.decode_pool &&
                queue_.waiting() > 0 && guard++ < budget) {
             std::size_t before = node_.pool().size();
-            node_.admit_centered(/*fresh=*/false);
+            node_.admit_centered();
             if (node_.pool().size() == before) break;  // 적합 요청 없음 — 중단
         }
     }
