@@ -6,6 +6,8 @@
 - 정량 source decomposition (Aux1·Aux2·F3·F5) — [`README.md`](README.md#results) 참조
 - F1·F2 ablation + 절대 metric (TTFT / TPOT / throughput) — 후속 calibration 으로 연기 / silicon 부재로 out of scope
 
+> **일반화 완료 (2026-06).** 본 문서 수치(배포 prefill 128 → decode 62·6.15M·ctx≈100K, Instance A ≈2.77 TB)는 **Llama-3 70B + B200 + HBM4 16단** 기준 *구체 예시*다. 동작점을 만드는 *방법*(세 자원 균형 도출 + steering·cold-start·healing·age-cap)은 모델·GPU 무관 일반화되어 C++ 스케줄러 [`puls-engine/`](puls-engine/CONTRACT.md)로 구현·검증(189 checks)됐으며, 임의 모델·GPU 스펙에 대해 **HBM 용량 한도 내 동작점을 산출**한다. 고정 = HBM4·SP-PIM·KV FP8; 변수 = 모델·GPU 스펙·prefill·die-stack·가중치 정밀도.
+
 ## Table of Contents
 
 - [1. Key Observations](#1-key-observations)
@@ -451,7 +453,7 @@ prefill: 128 토큰을 depth-합 12.8M 되게 동일 steering + age-cap 분배.
 
 **ctx 100K = 하드웨어 상수, 경험적 추측 아님.** 삼중 균형을 풀면 op-time 계수 비로 `ctx_balance = (K2+1)/K1`(PIM tile rate ÷ FFN flops/tok ÷ prefill-attn flops/tok·depth ÷ proj flops/tok); *prefill 이 약분돼 사라짐* → 균형 ctx 가 **모든** prefill 에서 100K(§5 스윕 B 실증). 역할은 타깃 *도출*(배포 128: Σkv 6.15M = 62 × 100K; 도출 256: 12.3M = 123 × 100K)이지 워크로드에 평균을 *강제* 하는 게 아니다. 이것이 길이분산 무관성의 근거 — 개별 요청 길이가 어떻게 분산되든 도출된 두 타깃만 맞춘다.
 
-**prefill 배포 128 (도출 256, vs 512).** prefill 은 균형 ctx 가 아니라 *스케일 knob* X — 작을수록 산출주기·HBM 절반씩 줄고 TTFT / throughput 불변(X 가 prefill 에 선형이라 청크·cycle 상쇄), 단 FFN batch 가 MFU knee 위여야. 512→256→**128**: 산출주기 X 101→51→**25.5 µs**, HBM aggregate(decode) 60M→30M→**15M** = 9.8→4.92→**2.46 TB**(FP8 160KiB/tok). **128 만 64 공식 스택(4.40 TB)에 적합**(256·512 초과 — OPERATING_POINT §4.1). 유일 risk = FFN GEMM MFU 포화: wave-quant 추정상 batch ~128 포화, 128 배포의 batch = 62 + 128 = **190(> knee, 48% margin)** 이라 포화하나 256(379)보다 여유 적음; 모델 MFU = 0.6 고정이라 knee 미관측(silicon 부재). **배포 128, MFU 실측서 190 부족 시 256 복귀**(512 batch 759 더 안전, vLLM 수렴).
+**prefill 배포 128 (도출 256, vs 512).** prefill 은 균형 ctx 가 아니라 *스케일 knob* X — 작을수록 산출주기·HBM 절반씩 줄고 TTFT / throughput 불변(X 가 prefill 에 선형이라 청크·cycle 상쇄), 단 FFN batch 가 MFU knee 위여야. 512→256→**128**: 산출주기 X 101→51→**25.5 µs**, HBM aggregate(decode) 60M→30M→**15M** = 9.8→4.92→**2.46 TB**(FP8 160KiB/tok). **128 만 64 공식 스택(4.096 TB)에 적합**(256·512 초과 — OPERATING_POINT §4.1). 유일 risk = FFN GEMM MFU 포화: wave-quant 추정상 batch ~128 포화, 128 배포의 batch = 62 + 128 = **190(> knee, 48% margin)** 이라 포화하나 256(379)보다 여유 적음; 모델 MFU = 0.6 고정이라 knee 미관측(silicon 부재). **배포 128, MFU 실측서 190 부족 시 256 복귀**(512 batch 759 더 안전, vLLM 수렴).
 
 > **맺음말 (superseded).** 이전 초안의 idle-fraction-feedback + hysteresis-deadband admission 은 이 풀 모델로 대체됐다. deadband width 는 `2σ_total` 이었으나 σ 는 hardware jitter 모델 없는 self-authored framework 에서 측정 불가(§9 / OI4)라 feedback variant 는 애초에 작동 메커니즘이 아니었다. 풀 모델은 steering 으로 고정 타깃에 직접 명중; ±10% 밴드는 제어 입력이 아니라 진단용 idle-SLA 라벨로만 남는다.
 

@@ -4,6 +4,10 @@
 
 **Scheduler-aware co-design of HBM-PIM and production LLM serving stack.**
 
+## Generalized scheduler (puls-engine)
+
+> **Generalization complete (2026-06).** This RFC's numbers (prefill 128 → decode 62 · 6.15M · ctx ≈ 100K, Instance A ≈ 2.77 TB) are the *canonical instantiation* for **Llama-3 70B + B200 + HBM4 16-high**. The scheduling *method* (three-resource balance derivation + steering · cold-start · healing · age-cap) is generalized over model/GPU as the C++ scheduler **[`puls-engine/`](puls-engine/CONTRACT.md)** (189 checks), which derives the operating point for any AI model · GPU within the HBM capacity limit. Fixed: HBM4 · SP-PIM · KV FP8. Variable: model spec · GPU spec · prefill · die-stack · weight precision.
+
 > **Disclosure** — Personal research project by a single undergraduate author. No institutional / vendor affiliation.
 >
 > Self-study work in progress. Feedback, critique, and mentorship are warmly welcomed (GitHub Issues / Discussions).

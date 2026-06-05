@@ -15,6 +15,14 @@ projection+prefill-attn / FFN=인스턴스 B)의 시간을 맞춰 인스턴스 �
 > **★ 분산이 이미 작다** — Σdev 디코드 **0.20%**·프리필 **0.07%** (±10% 밴드 ≪, 실현 idle ~0).
 > on2 의 band-pass(밴드 안/밖)보다 *이 편차 크기*가 동작점의 실질 지표 (on2 미달분도 힐링이 메움).
 
+> **일반화 완료 (2026-06).** 본 문서의 수치(배포 prefill 128 → decode 62·6.15M·ctx≈100K,
+> Instance A ≈2.77 TB 등)는 **Llama-3 70B + B200 + HBM4 16단** 기준의 *구체 예시(canonical
+> instantiation)*다. 이 동작점을 만드는 *방법*(세 자원 균형 도출 + steering·cold-start·healing·
+> age-cap)은 모델·GPU 무관하게 일반화되어 C++ 스케줄러
+> [`puls-engine/`](puls-engine/CONTRACT.md)로 구현·검증됐으며(189 checks), 임의의 모델·GPU
+> 스펙에 대해 **HBM 용량 한도 내에서 동작점을 산출**한다. 고정 = HBM4·SP-PIM·KV FP8; 변수 =
+> 모델 스펙·GPU 스펙·prefill·die-stack·가중치 정밀도.
+
 ---
 
 ## 1. 고정값 (순서대로) — prefill **256** 도출 기준 (배포 동작점 = **128**, §4.1)
@@ -124,7 +132,7 @@ proj flops/tok). **prefill 이 약분돼 사라짐** → 모든 prefill 에서 �
 knob — 작을수록 산출주기·HBM 이 절반씩 줄고 TTFT·throughput 은 불변, 단 FFN batch 가 MFU knee
 위여야 한다. 한 칸씩 내릴 때(512→256→128):
 - **산출주기 X**: 101 → 51 → **25.5µs** (X·L 8.1 → 4.1 → **2.0ms**).
-- **HBM(aggregate)**: 60M → 30M → **15M** = 9.8 → 4.92 → **2.46TB**. **128 만 64 공식 스택(4.40TB)에
+- **HBM(aggregate)**: 60M → 30M → **15M** = 9.8 → 4.92 → **2.46TB**. **128 만 64 공식 스택(4.096TB)에
   적합**(256·512 는 초과) — §4.1. FP8 160KiB/tok.
 - **TTFT 동일** — X 가 prefill 에 선형(X/prefill≈0.198 일정)이라 청크·cycle 이 상쇄,
   TTFT = prompt × 0.198 × L (prefill 무관).
@@ -146,7 +154,7 @@ calibration; 10% 는 그 placeholder. (15%/20% 도 동작 가능 — calibration
 ## 4.1 HBM4 메모리 적합성 & **prefill 128 배포 동작점** (2026-06-03 라이프사이클 검증)
 
 **노드 메모리 = Instance A 의 SP-PIM 2048 channel = HBM4 64 스택.** 공식 16-high 상한 =
-32 ch × 16 Gb = **64 GB/스택** → 64 스택 = **4.40 TB**. (옛 표기 "80GB/stack·5TB" 는 스펙
+32 ch × 16 Gb = **64 GB/스택** → 64 스택 = **4.096 TB**. (옛 표기 "80GB/stack·5TB" 는 스펙
 초과 오기 — 정정. 80GB 면 64 스택 5.12TB 로 역산했으나 16-high 물리 상한은 64GB.)
 
 **KV 는 FP8 저장** (160 KiB/tok = Llama-3 70B: 80층 × 8 KV head × 128 head_dim × 2(K·V)
@@ -158,12 +166,14 @@ Instance A 는 QKV/O proj(~24GB)만.
 | decode 풀 (×100K) | 30M tok | **13.4M** (풀 134) |
 | prefill in-flight (×~56K) | 8.4M tok | **3.4M** (풀 60) |
 | Instance A 합 | 38.4M → 6.3 TB | **16.8M → 2.75 TB** |
-| 64 스택(4.40TB) | **초과** ✗ | **적합** ✓ (잉여 1.65 TB) |
+| 64 스택(4.096TB) | **초과** ✗ | **적합** ✓ (잉여 1.65 TB) |
 
-→ **prefill 256 은 64 공식 스택에 안 들어가고**(decode 30M 만 4.92TB > 4.40TB), **prefill 128(70B)은
-2.75 TB 로 들어가며 1.65 TB 남는다.** 더 큰 모델은 KV/tok 이 커져 4.40TB 를 더 소비하지만,
-405B(252 KiB/tok)도 같은 풀 구성서 Instance A ≈ 4.24 TB 로 **여전히 적합**(여유 빠듯, ~160층급이 한계).
-ctx 100K 는 하드웨어 상수라 불변(§4); prefill 은 *스케일 knob* 이므로 알고리즘은 그대로다.
+→ **prefill 256 은 64 공식 스택에 안 들어가고**(decode 30M 만 4.92TB > 4.096TB), **prefill 128(70B)은
+2.75 TB 로 들어가며 1.65 TB 남는다.** 더 큰 모델은 KV/tok 이 커져 4.096TB 를 더 소비하는데,
+405B 는 균형 ctx 가 라마70B 의 100K 가 아니라 **≈247K 로 재도출**된다(FFN·proj 연산이 무거워져
+PIM 과 균형 맞추려 ctx 가 위로 이동). 그 동작점에선 Instance A ≈ **18.85 TB → 64 스택(4.096 TB)
+대폭 초과(불가)**. 즉 'ctx 100K 불변'은 라마70B 한정 근사이고, **모델별 재도출이 일반화의
+정답**(puls-engine 산출)이다. prefill 은 *스케일 knob* 이므로 알고리즘은 그대로다.
 
 **노드별 풀 구성 (라이프사이클 실측 확정):**
 

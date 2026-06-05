@@ -1632,6 +1632,11 @@ pre.code-block .var { color: #f9a8d4; }
         <div class="section-lede">The transformer layer is split at the attention/FFN boundary into two instances connected by an NVLink pipeline. This split is the prerequisite for everything in the scheduler policy that follows — KV cache permanence, fixed-shape handoff, and the Instance A internal joint GPU·PIM scheduling.</div>
       </div>
 
+      <div class="callout info">
+        <span class="callout-title">GENERALIZED (2026-06)</span>
+        The numbers in this policy are a concrete example calibrated on <b>Llama-3 70B + B200 + HBM4 (16-high)</b>. The <b>method</b> for constructing the operating point is model- and GPU-independent: it is implemented and validated in the C++ scheduler <b>puls-engine</b> (189 checks) and is derived for any model / GPU within the HBM capacity bound. See <a href="../puls-engine/CONTRACT.md">puls-engine/CONTRACT.md</a>.
+      </div>
+
       <div class="figure-container">
         <div class="title">PULS Instance Disaggregation</div>
         <div class="subtitle">14-step transformer layer flow split across <b>Instance A (Attention)</b> and <b>Instance B (FFN)</b>, connected by an inter-instance NVLink pipeline.</div>

@@ -4,6 +4,10 @@
 
 **Scheduler-aware co-design of HBM-PIM and production LLM serving stack.**
 
+## 일반화 스케줄러 (puls-engine)
+
+> **일반화 완료 (2026-06).** 본 RFC 수치(prefill 128 → decode 62·6.15M·ctx≈100K, Instance A ≈2.77 TB)는 **Llama-3 70B + B200 + HBM4 16단** 기준 *구체 예시*다. 스케줄링 *방법*(세 자원 균형 도출 + steering·cold-start·healing·age-cap)은 모델·GPU 무관 일반화되어 C++ 스케줄러 **[`puls-engine/`](puls-engine/CONTRACT.md)** (189 checks)로 구현됐으며, 임의 AI 모델·GPU 에 대해 **HBM 용량 한도 내 동작점을 산출**한다. 고정: HBM4·SP-PIM·KV FP8. 변수: 모델·GPU 스펙·prefill·die-stack·가중치 정밀도.
+
 > **Disclosure** — 학부생 단일 저자의 개인 연구 프로젝트. 소속 기관·vendor 연계 없음.
 >
 > 혼자 공부하며 배우는 과정이며, 피드백 · 지적 · 가르침을 적극 환영합니다 (GitHub Issues / Discussions).

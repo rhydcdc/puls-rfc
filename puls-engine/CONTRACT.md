@@ -82,7 +82,8 @@ core/
   op-time 공식으로 균형을 수치/대수로 푼다 = 공식 발명 0, 문서의 *방법*을 그대로 코드화.
 - 도출 사슬(OPERATING_POINT §1·§2): prefill_tokens(knob) → 균형시간 X → FFN batch →
   N_dec = FFN_batch − prefill → kv_target = N_dec × ctx_balance → prefill_kv_work = prefill × ctx_balance.
-- HBM 적합성(§4.1): decode 풀·prefill in-flight 메모리 → Instance A 합(TB) ≤ 4.40 TB.
+- HBM 적합성(§4.1): decode 풀·prefill in-flight KV + 가중치 → Instance A 합(TB) ≤ HBM 용량
+  (JEDEC 산출, 16단·64스택 = 4.096 TB; die-stack·num_gpus_a 에 비례).
 
 ### ② 노드 스케줄러 (`node_scheduler` + `steering`)
 - **decode μ-batch steering**: `ideal=(kv_target−S)/(count_target−n)` closest-to-ideal 그리디,
@@ -208,7 +209,9 @@ instance_a_weight_bytes = (hidden×(num_heads×head_dim + 2×num_kv_heads×head_
 instance_a_tokens = decode_pool × ctx_balance + prefill_pool × (prefill 평균 진행 depth)
                     // decode_pool = 2×N_dec+잉여 → 활성 2 μ-batch 가 들어감
 instance_a_tb     = (instance_a_tokens × kv_bytes_per_token + instance_a_weight_bytes) / 1e12
-hbm_fits          = instance_a_tb ≤ substrate::PIM_CAP_TB (4.40)
+hbm_capacity_tb   = (num_gpus_a×8 stack) × (32ch × 채널밀도(16Gb@16단, die 선형)/8) / 1000
+                    // JEDEC 산출 — 16단·64스택 = 4.096 TB (문서 §4.1 "4.40" 은 오기)
+hbm_fits          = instance_a_tb ≤ hbm_capacity_tb
 ```
 > prefill 평균 진행 depth는 OP §4.1이 ~56K(=ctx_balance×0.56 근사)로 표기 — `DeriveOptions`에
 > `prefill_avg_depth_frac=0.56`로 명시 노출(문서 수치, 추정 아님).
