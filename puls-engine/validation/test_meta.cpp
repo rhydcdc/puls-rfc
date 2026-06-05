@@ -124,5 +124,20 @@ int main() {
     CHECK_REL(p256.kv_operating_target, 2.0 * (double)p128.kv_operating_target, 0.10,
               "kv_target scales ~2x with prefill");
 
+    // ── ⑤ footprint 캡 헤드룸 (회귀 핀) ─────────────────────────────────────────
+    // cold-start/heal 의 footprint 캡은 count 상한(node_max×ctx)보다 헤드룸이 있어야
+    // 노드가 긴 꼬리를 담은 채 node_max 까지 차서 on2 가 유지된다. node_max×ctx 로 조이면
+    // on2 가 88%로 회귀(측정). 문서값 15M@128 / 30M@256 = 2×kv_target×1.22(OP §4.1).
+    {
+        const long long tight = (long long)base.node_max * (long long)base.ctx_balance;
+        std::printf("footprint-cap: cap=%lld tight(node_max*ctx)=%lld ratio=%.3f\n",
+                    base.node_footprint_cap, tight,
+                    (double)base.node_footprint_cap / (double)tight);
+        CHECK(base.node_footprint_cap > tight,
+              "footprint cap has headroom over node_max*ctx (else on2 regresses ~88%)");
+        CHECK_REL(base.node_footprint_cap, 2.0 * (double)base.kv_operating_target * 1.22, 0.02,
+                  "footprint cap ~= 2x kv_target x headroom (OP 4.1: 15M@128 / 30M@256)");
+    }
+
     return puls_test::summary();
 }

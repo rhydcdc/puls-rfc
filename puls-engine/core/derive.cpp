@@ -93,6 +93,10 @@ OperatingPoint derive_operating_point(const ModelSpec& model,
     op.node_min   = 2 * n_dec;                       // 2 μ-batch 바닥
     op.node_max   = op.node_min + opt.node_max_surplus;
     op.edge_band  = opt.edge_band_tokens;
+    // footprint 캡 = 2 μ-batch KV(2×kv_target) + 여유. count 상한(node_max)보다 헤드룸을 둬
+    // 긴 꼬리 다양성을 보존(없으면 노드가 134 전에 막혀 on2↓). OP §4.1: 30M@256 / 15M@128.
+    op.node_footprint_cap =
+        (long long)std::llround(2.0 * (double)op.kv_operating_target * opt.footprint_headroom);
 
     // ── HBM 적합성 (CONTRACT §6 / OP §4.1) ────────────────────────────────────
     const double instance_a_tokens =

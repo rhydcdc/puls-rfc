@@ -2,7 +2,7 @@
 // 근거: cluster_routing.py(gate/cold_start/heal/disjoint_onpoint_batches)
 //       + cluster_balance.cpp(gate/place_greedy/onpoint_k). canonical(§4): per-completion 힐링
 //       (ideal=hole, batched 금지). 동작점 상수는 전부 op 에서 — 리터럴 0(§9-5).
-//   cap = node_max × ctx_balance (노드 footprint 캡 = NODE_MAX×ctx, 레퍼런스의 30M 등가).
+//   footprint 캡 = op.node_footprint_cap (count 상한 node_max 보다 헤드룸 — OP §4.1 30M@256/15M@128).
 #include "core/global_scheduler.h"
 
 #include <algorithm>
@@ -34,14 +34,13 @@ GateResult gate(std::vector<int> draw, const OperatingPoint& op) {
 
 // ── cold-start 분배 ───────────────────────────────────────────────────────────
 // arrival순(seed shuffle), 각 길이를 min|추가후 mean − ctx_balance| 노드에 그리디 적재.
-// can_fit = (nd.total+len ≤ cap) ∧ (nd.count() < node_max). cap = node_max×ctx_balance.
+// can_fit = (nd.total+len ≤ cap) ∧ (nd.count() < node_max). cap = op.node_footprint_cap(헤드룸).
 // nodes 는 호출자가 크기 Z 로 미리 생성. 못 배치한 수(leftover) 반환.
 int cold_start(std::vector<int> kept, std::vector<ClusterNode>& nodes,
                const OperatingPoint& op, unsigned seed) {
     std::mt19937 g(seed);
     std::shuffle(kept.begin(), kept.end(), g);
-    const long long cap =
-        static_cast<long long>(op.node_max) * static_cast<long long>(op.ctx_balance);
+    const long long cap = op.node_footprint_cap;  // count 상한보다 헤드룸(OP §4.1)
     int leftover = 0;
     for (int len : kept) {
         int best = -1;
@@ -70,8 +69,7 @@ int cold_start(std::vector<int> kept, std::vector<ClusterNode>& nodes,
 // cap_room ≤ 0 이면 중단. src.pull_near 가 prompt≥0 이면 admit. pull 수 반환.
 int heal_node(ClusterNode& node, const std::vector<int>& departed,
               const OperatingPoint& op, RequestSource& src) {
-    const long long cap =
-        static_cast<long long>(op.node_max) * static_cast<long long>(op.ctx_balance);
+    const long long cap = op.node_footprint_cap;  // count 상한보다 헤드룸(OP §4.1)
     int pulls = 0;
     for (int hole : departed) {
         const long long cap_room = cap - node.total;

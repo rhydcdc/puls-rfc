@@ -23,9 +23,10 @@ struct OperatingPoint {
     double idle_band;                 // ±밴드 (0.10) — idle-SLA 라벨
 
     // 클러스터 라우팅 경계
-    int node_max;                     // 노드당 decode 풀 상한
+    int node_max;                     // 노드당 decode 풀 *개수* 상한
     int node_min;                     // = 2×N_dec (2 μ-batch 바닥)
     double edge_band;                 // 게이트 mean band E (tokens)
+    long long node_footprint_cap;     // 노드 footprint(Σlen) 캡 — count 상한보다 헤드룸(OP §4.1)
 
     // HBM 적합성
     double instance_a_tb;             // Instance A KV 메모리 합 (TB)
@@ -42,6 +43,7 @@ struct DeriveOptions {
     double prefill_avg_depth_frac= 0.56;  // prefill in-flight 평균 depth/ctx (OP §4.1 ~56K)
     int    node_max_surplus      = 10;    // node_max = node_min + 이 잉여
     double edge_band_tokens      = 1000;  // E = 1K (OP §7.5 채택)
+    double footprint_headroom    = 1.22;  // footprint 캡 여유 (OP §4.1: 30M/24.6M = 15M/12.3M)
 };
 
 } // namespace puls
