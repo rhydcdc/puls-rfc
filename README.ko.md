@@ -1,6 +1,6 @@
 # PULS — PIM-Unified LLM Serving
 
-> ✅ **스케줄러 로직 구현·검증 완료** — 통합 lifecycle sim(콜드스타트 → steering · prefill→decode 전이 · per-completion 힐링 · age-cap)이 **2 active μ-batch**를 동작점(배포 128: decode 62 / Σkv 6.15M, prefill 128 / depth-work 12.8M)에 구성, **composition 100% 명중 · Σdev <0.2%** → §2 균형으로 idle ≈0. 클러스터 스케일은 글로벌 스케줄러로 초반 ~2.2% 엣지 후 노드 풀 100K 유지 ([Runtime Validation](#runtime-validation)).
+> ✅ **스케줄러 로직 구현·검증 완료** — 통합 lifecycle sim(콜드스타트 → steering · prefill→decode 전이 · per-completion 힐링 · age-cap)이 **2 active μ-batch**를 동작점(배포 128: decode 62 / Σkv 6.15M, prefill 128 / depth-work 12.8M)에 구성, **composition 100% 명중 · Σdev ≈0.38%(decode)/0.06%(prefill)** → §2 균형으로 idle ≈0. 클러스터 스케일은 글로벌 스케줄러로 초반 ~2.2% 엣지 후 노드 풀 100K 유지 (라마70B + B200 기준 균형값) ([Runtime Validation](#runtime-validation)).
 
 **Scheduler-aware co-design of HBM-PIM and production LLM serving stack.**
 
@@ -21,6 +21,7 @@
 ## 목차
 
 **Background**
+- [일반화 스케줄러 (puls-engine)](#일반화-스케줄러-puls-engine)
 - [Processing-in-Memory 아키텍처의 특징](#processing-in-memory-아키텍처의-특징)
 - [문제 의식](#문제-의식)
 
@@ -33,6 +34,7 @@
 
 **Results**
 - [Results](#results)
+- [Runtime Validation](#runtime-validation)
 - [Limitations / Disclosure](#limitations--disclosure)
 - [Forward-looking: HBF-class 분리 Substrate](#forward-looking-hbf-class-분리-substrate)
 
@@ -114,7 +116,7 @@
 
 PULS 는 **특정 타겟 워크로드에 한정되지 않는다.** 배치 구성이 *길이분산 무관* steering 이기 때문이다 — former 는 풀의 평균 길이를 보지 않고, 짧은·긴 요청을 **조합**해 동작점 네 타깃(배포 128: decode 개수 62 ∧ Σkv 6.15M, prefill 128 토큰 ∧ depth-work 12.8M; OPERATING_POINT §4.1)만 맞춘다. 따라서 **decode 와 prefill 이 풀에 풍부한 어떤 분산-서버-스케일 워크로드든** — 길이 분포가 짧든 길든 혼합이든 bimodal 이든 — 동작점에 수렴한다 (균형 ctx ~100K 는 KV 캡 유도용 중간값일 뿐, 워크로드 강제값 아님).
 
-- **동작점(idle≈0) 도달 조건** = 풀에 decode·prefill 이 *풍부* (고동시성 분산 서빙의 대량 상주 decode 풀 + 지속 prefill). 실서버 정상상태가 정확히 이 영역. [Runtime Validation](#runtime-validation) 에서 **2 active μ-batch + 종속성·age-cap** 를 한 sim 에 넣고 동작점에 구성, composition **100% 명중·Σdev <0.2%** 로 실증.
+- **동작점(idle≈0) 도달 조건** = 풀에 decode·prefill 이 *풍부* (고동시성 분산 서빙의 대량 상주 decode 풀 + 지속 prefill). 실서버 정상상태가 정확히 이 영역. [Runtime Validation](#runtime-validation) 에서 **2 active μ-batch + 종속성·age-cap** 를 한 sim 에 넣고 동작점에 구성, composition **100% 명중·Σdev ≈0.38%(decode)/0.06%(prefill)** 로 실증.
 - **풀이 얕으면**(저부하·짧은 decode 만) PIM 또는 GPU-A 가 노는 건 *물리적 정상*(고칠 대상 아님) — 동작점은 풀이 풍부할 때의 균형점이다.
 
 ## 가속 Source 요약
@@ -159,7 +161,7 @@ Llama-3 70B + DGX B200 + HBM4 substrate 위 4 가속 source (Aux1·Aux2·F3·F5)
 |---|---|---|
 | Aux1 | Mixed batching 가중치 재사용 | **2.0×** (closed-form), 1.97× (Colab T4 측정) |
 | Aux2 | KV bus traffic 감소 | **4.95× speedup, 79.8% 감소** |
-| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep); 통합 lifecycle sim 이 **2 active μ-batch 를 동작점에 구성, composition 100%·Σdev <0.2% (balance 발현)** — [Runtime Validation](#runtime-validation) |
+| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep); 통합 lifecycle sim 이 **2 active μ-batch 를 동작점에 구성, composition 100%·Σdev ≈0.38%(decode)/0.06%(prefill) (balance 발현)** — [Runtime Validation](#runtime-validation) |
 | F5 | Channel-independent vs lock-step | **5.15× speedup** (KV variance dominant) |
 
 ### Aggregate Speedup
@@ -179,19 +181,19 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (F5 포함)**.
 - **워크로드(합성)** — wide·다양 길이 풀(1K\~1M, short/mid/long 혼합), prefill·decode 풍부. **warm-start** = 정상상태 스냅샷(각 요청을 생애 랜덤 지점에 배치, cold-start 램프 생략).
 - **모델 — 2 active μ-batch (3 아님).** 한 노드는 2 μ-batch 만 동시 active(F2/F3 overlap). 한 배치의 forward pass 가 끝나면 그 멤버가 풀로 돌아오고 **(반환분 + 상주 잉여)에서 다시 1 배치 재선택**(메모리 할당 0) — *3번째 배치를 강제 구성하지 않는다.* 완료 요청은 per-completion 힐링으로 같은 크기 보충, prefill 완료는 decode 로 전이, 공정성 age-cap = 5. 배포 prefill 128.
 
-**composition — 동작점 명중 ([cluster_lifecycle.cpp](implementation/analysis/cluster_lifecycle.cpp), 종속성·age-cap 포함):**
+**composition — 동작점 명중 ([puls-engine/sim/lifecycle.cpp](puls-engine/sim/lifecycle.cpp), 종속성·age-cap 포함):**
 
 | 2 active μ-batch (완료시 재구성) | 동작점 타깃 | 명중 | Σdev |
 |---|---|---|---|
-| **decode** | 62 ∧ Σkv 6.15M | **100%** | **0.20%** |
-| **prefill** | 128 토큰 ∧ depth-work 12.8M | **100%** | **0.07%** |
+| **decode** | 62 ∧ Σkv 6.15M | **100%** | **0.38%** |
+| **prefill** | 128 토큰 ∧ depth-work 12.8M | **100%** | **0.06%** |
 
 해석:
 
 - **age-cap 꼬리 없음 (2-active 구조).** 옛 검증의 "3번째 배치 튐(108개·spread 3.7%)"은 *강제된 3rd 배치*에서 warm-start 대기 멤버가 age-cap 을 유발한 것. 2-active 모델은 3rd 를 강제하지 않고 (완료분 + 잉여)로 *재구성*만 하므로 그 꼬리가 구조적으로 사라진다.
 - **종속성·age-cap 넣고도 유지.** prefill→decode 전이와 공정성 age-cap = 5 를 다 넣어도 두 composition 이 무너지지 않음 — 로직(steering · greedy · healing · age-cap · KV-센터링)은 *스케일 불변*, 동작점만 상수(prefill 256↔128 동형).
 - **throughput 은 설계상 지속** — per-cycle decode 예산이 동작점에 고정(62, KV 캡에 먼저 닿으면 그 이하)이라 풀이 풍부한 한 매 cycle 이 고정 토큰 양을 처리 → 지속성은 동작점 고정의 구조적 귀결. 절대 tok/s 는 silicon 보정 cycle 시간 필요(Honest Disclosure).
-- **클러스터 스케일 — 글로벌 스케줄러.** 서버스케일(노드 수백–수천)에선 글로벌 도착 평균이 100K 보다 높아 노드별 풀이 drift → idle 폭발. **글로벌 스케줄러**(greedy 콜드스타트: 긴 것 엣지 shed + interleave-greedy · per-completion 힐링 = toxic-fit)로 **초반 ~2.2% 엣지 비용만 감수하면 그 뒤로 각 노드를 평균 100K 동작점에 무한정 유지**(긴 요청 보존, drift 0). 원리·E 스윕·on2 측정은 [`ARCHITECTURE.md`](ARCHITECTURE.md) §7 / [cluster_balance.cpp](implementation/analysis/cluster_balance.cpp).
+- **클러스터 스케일 — 글로벌 스케줄러.** 서버스케일(노드 수백–수천)에선 글로벌 도착 평균이 100K 보다 높아 노드별 풀이 drift → idle 폭발. **글로벌 스케줄러**(greedy 콜드스타트: 긴 것 엣지 shed + interleave-greedy · per-completion 힐링 = toxic-fit)로 **초반 ~2.2% 엣지 비용만 감수하면 그 뒤로 각 노드를 평균 100K 동작점에 무한정 유지**(긴 요청 보존, drift 0). 원리·E 스윕·on2 측정은 [`ARCHITECTURE.md`](ARCHITECTURE.md) §7 / [puls-engine/core/global_scheduler.cpp](puls-engine/core/global_scheduler.cpp).
 
 ### Honest Disclosure
 
@@ -223,7 +225,10 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (F5 포함)**.
 - [`README.md`](README.md) — 본 문서 (entry point)
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — 아키텍처 본문 (motivation, design principles, substrate, instance disaggregation, scheduler integration, 풀 모델 admission + 2-active 구성 검증 §6.8, layer flow, prior art 비교)
 - [`OPERATING_POINT.md`](OPERATING_POINT.md) — Phase-2 동작점 & 배치 구성 canonical spec (풀 모델, steering 타깃, 동작점 구성 근거)
+- [`puls-engine/`](puls-engine/CONTRACT.md) — 모델·HW 일반화 C++ 스케줄러 (derive · steering · node/global scheduler · lifecycle sim, 189 checks)
 - [`LICENSE`](LICENSE) — Apache 2.0
+
+빌드·검증: `cd puls-engine && bash build.sh` → 189 checks.
 
 ## License
 

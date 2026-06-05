@@ -1915,11 +1915,11 @@ pre.code-block .var { color: #f9a8d4; }
             <tr><td>④</td><td><b>decode count N_dec</b> (control target)</td><td><b>62</b> (= 190 − 128)</td><td>Instance B</td></tr>
             <tr><td>⑤</td><td><b>decode-KV sum</b> (control target)</td><td><b>6.15M</b></td><td>Instance A (PIM)</td></tr>
             <tr><td>+</td><td>prefill KV-work (control target)</td><td><b>12.8M</b> (= 128 × depth)</td><td>GPU-A</td></tr>
-            <tr><td>+</td><td>balance ctx</td><td><b>~100K</b> (hardware constant)</td><td>&mdash;</td></tr>
+            <tr><td>+</td><td>balance ctx</td><td><b>~100K</b> (Llama-3 70B + B200 balance point; model/GPU-dependent, re-derived by puls-engine)</td><td>&mdash;</td></tr>
           </tbody>
         </table>
 
-        <p>The <i>count</i> (62) is independent of KV length (FFN sees only token count); the <i>KV sum</i> (6.15M) is the sum of lengths (PIM sees only the sum). ctx 100K is a hardware constant (prefill cancels out of the triple balance) used only to <i>derive</i> the targets — never imposed on the workload.</p>
+        <p>The <i>count</i> (62) is independent of KV length (FFN sees only token count); the <i>KV sum</i> (6.15M) is the sum of lengths (PIM sees only the sum). ctx 100K is the Llama-3 70B + B200 balance value (model/GPU-dependent, re-derived by puls-engine; prefill cancels out of the triple balance) used only to <i>derive</i> the targets — never imposed on the workload.</p>
 
         <h2 class="h-sub">Local-greedy steering + age-cap (the <code class="inline">former</code> algorithm)</h2>
 
@@ -1973,14 +1973,14 @@ pre.code-block .var { color: #f9a8d4; }
           <thead><tr><th style="width: 240px;">what</th><th>result</th></tr></thead>
           <tbody>
             <tr><td>Cold-start edge cost</td><td><b>~2.2%</b> shed to edge → normal nodes centered at mean 100K</td></tr>
-            <tr><td>Batch composition (the operating point)</td><td>decode <b>100%</b> hit · Σdev <b>0.20%</b> · prefill 100% · Σdev 0.07%</td></tr>
+            <tr><td>Batch composition (the operating point)</td><td>decode <b>100%</b> hit · Σdev <b>0.38%</b> · prefill 100% · Σdev 0.07%</td></tr>
             <tr><td>Lifecycle stability (healing)</td><td><b>drift 0</b> — long-request fraction preserved 8.2% → 7.4% (toxic-fit), held indefinitely</td></tr>
           </tbody>
         </table>
 
         <div class="callout note">
           <span class="callout-title">TWO-SIM SPLIT</span>
-          The multi-node distribution (cold-start + healing) is proven by <code class="inline">cluster_balance.cpp</code> (<b>256 nodes</b>; healing over the last 150 of 300 rounds); the single-node lifecycle (steering · prefill→decode transition · healing · age-cap 5, both compositions at 100%) by <code class="inline">cluster_lifecycle.cpp</code> (<b>16 nodes</b>; last 500 of 1000 rounds = 8,000 node-rounds). Together they are <code class="inline">ARCHITECTURE.md §7</code>.
+          The multi-node distribution (cold-start + healing) is proven by <code class="inline">../puls-engine/core/global_scheduler.cpp</code> (<b>256 nodes</b>; healing over the last 150 of 300 rounds); the single-node lifecycle (steering · prefill→decode transition · healing · age-cap 5, both compositions at 100%) by <code class="inline">../puls-engine/sim/lifecycle.cpp</code> (<b>16 nodes</b>; last 500 of 1000 rounds = 8,000 node-rounds). Together they are <code class="inline">ARCHITECTURE.md §7</code>.
         </div>
 
       </div>
@@ -2193,7 +2193,7 @@ pre.code-block .var { color: #f9a8d4; }
           <span class="source-id">F3</span>
           <span class="source-name">Inter-Instance A↔B Pipeline</span>
           <span class="source-badge calibrated">Calibrated</span>
-          <span class="source-headline">2-active compose · composition 100% · Σdev &lt;0.2%</span>
+          <span class="source-headline">2-active compose · composition 100% · Σdev 0.38%</span>
         </div>
         <div class="source-figure">
           <div class="f3-wrap">
@@ -2447,7 +2447,7 @@ pre.code-block .var { color: #f9a8d4; }
           <tbody>
             <tr><td class="source-id-cell">F1</td><td>SP-PIM attention (2048-ch Q-replicate)</td><td><span class="status-def">Deferred</span></td><td class="mono">—</td><td>Impl-11 (Blackwell attn kernel calibration)</td></tr>
             <tr><td class="source-id-cell">F2</td><td>Projection ‖ PIM double-buffering</td><td><span class="status-def">Deferred</span></td><td class="mono">—</td><td>Impl-11 (isolated cycle ratio)</td></tr>
-            <tr><td class="source-id-cell">F3</td><td>Inter-instance A↔B pipeline</td><td><span class="status-cal">Calibrated</span></td><td class="mono">0.92–0.99 closed-form · lifecycle 2-μ-batch composition 100% · Σdev &lt;0.2%</td><td>closed-form ctx sweep · integrated lifecycle (2-active, deployed 128)</td></tr>
+            <tr><td class="source-id-cell">F3</td><td>Inter-instance A↔B pipeline</td><td><span class="status-cal">Calibrated</span></td><td class="mono">0.92–0.99 closed-form · lifecycle 2-μ-batch composition 100% · Σdev 0.38%</td><td>closed-form ctx sweep · integrated lifecycle (2-active, deployed 128)</td></tr>
             <tr><td class="source-id-cell">F4</td><td>μ-batch staggering</td><td><span class="status-abs">Absorbed</span></td><td class="mono">—</td><td>Precondition for F2·F3; contained in their measurements</td></tr>
             <tr><td class="source-id-cell">F5</td><td>Channel-independent vs lock-step</td><td><span class="status-cal">Calibrated</span></td><td class="mono">5.15× speedup</td><td>LongBench λ=3.40, 10-req sum trace-grounded</td></tr>
             <tr><td class="source-id-cell">Aux1</td><td>Mixed batching weight reuse</td><td><span class="status-cal">Calibrated</span></td><td class="mono">2.0× closed-form · 1.97× T4 measured</td><td>Llama-3 70B FFN single-layer, Colab T4</td></tr>
@@ -2484,14 +2484,14 @@ pre.code-block .var { color: #f9a8d4; }
       <div class="result-block">
         <h3 class="result-block-title">Runtime validation — 2 active μ-batch (integrated lifecycle)</h3>
         <p style="font-size:12.5px; color:var(--color-muted); margin: 6px 0 12px 0;">
-          One integrated sim (<code class="inline">cluster_lifecycle.cpp</code>) runs cold-start → steering · prefill→decode transition · per-completion healing · age-cap 5 on a wide synthetic pool. A node runs <b>2 active μ-batches</b>; when one finishes its forward pass it is <b>re-composed from (returned members + surplus)</b> — <i>no 3rd batch is force-composed</i>. Deployed prefill 128. Statistics are over the <b>last 500 of 1000 rounds × 16 nodes = 8,000 node-rounds</b> (16,000 decode · 8,000 prefill batches).
+          One integrated sim (<code class="inline">../puls-engine/sim/lifecycle.cpp</code>) runs cold-start → steering · prefill→decode transition · per-completion healing · age-cap 5 on a wide synthetic pool. A node runs <b>2 active μ-batches</b>; when one finishes its forward pass it is <b>re-composed from (returned members + surplus)</b> — <i>no 3rd batch is force-composed</i>. Deployed prefill 128. Statistics are over the <b>last 500 of 1000 rounds × 16 nodes = 8,000 node-rounds</b> (16,000 decode · 8,000 prefill batches).
         </p>
 
         <p style="font-size:12.5px; margin: 4px 0 6px 0;"><b>composition — operating-point hit (with dependency · age-cap)</b></p>
         <table class="result-table">
           <thead><tr><th>2 active μ-batch</th><th>operating-point target</th><th>hit</th><th>Σdev</th></tr></thead>
           <tbody>
-            <tr><td class="mono"><b>decode</b></td><td class="mono">62 ∧ Σkv 6.15M</td><td class="mono"><b>100%</b></td><td class="mono"><b>0.20%</b></td></tr>
+            <tr><td class="mono"><b>decode</b></td><td class="mono">62 ∧ Σkv 6.15M</td><td class="mono"><b>100%</b></td><td class="mono"><b>0.38%</b></td></tr>
             <tr><td class="mono"><b>prefill</b></td><td class="mono">128 ∧ depth-work 12.8M</td><td class="mono"><b>100%</b></td><td class="mono"><b>0.07%</b></td></tr>
           </tbody>
         </table>
