@@ -36,10 +36,6 @@ target_link_libraries(puls_lifecycle PRIVATE puls_core)
 add_executable(puls_max_model analysis/max_model.cpp)
 target_link_libraries(puls_max_model PRIVATE puls_core)
 
-# 분석: Instance A GPU 수 스케일로 405B 수용점 (3자원 균형)
-add_executable(puls_gpu_scale_405b analysis/gpu_scale_405b.cpp)
-target_link_libraries(puls_gpu_scale_405b PRIVATE puls_core)
-
 # 분석: 아키텍처 효율 (동작점 idle/pipeline-eff/PIM-숨음/균형, 일반화)
 add_executable(puls_efficiency analysis/efficiency.cpp)
 target_link_libraries(puls_efficiency PRIVATE puls_core)

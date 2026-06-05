@@ -18,7 +18,6 @@ $CXX $FLAGS runtime/main_runtime.cpp runtime/runtime.cpp $CORE -o build/puls_run
 $CXX $FLAGS sim/sim.cpp $CORE -o build/puls_sim.exe
 $CXX $FLAGS sim/lifecycle.cpp $CORE -o build/puls_lifecycle.exe
 $CXX $FLAGS analysis/max_model.cpp $CORE -o build/max_model.exe
-$CXX $FLAGS analysis/gpu_scale_405b.cpp $CORE -o build/gpu_scale_405b.exe
 $CXX $FLAGS analysis/efficiency.cpp $CORE -o build/efficiency.exe
 
 echo "== running tests =="
