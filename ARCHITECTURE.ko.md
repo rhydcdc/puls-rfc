@@ -224,7 +224,7 @@ GPU 가 기존 DRAM 명령 (RD/WR) 의 **RFU (Reserved For Future use) bit 1 개
 - **유일한 채널 = HBM** — PIM 은 HBM4 logic die, GPU 는 별도 die 에 위치하여 직접 P2P 통신선 없음.
 - **Write → Read 프로토콜** — PIM 이 결과 O 를 HBM 의 정해진 주소에 **write** → GPU 가 computed wait 로 정시에 그 주소를 **read**.
 - **GPU 측 정합 자연 산출** — GPU 내부 kernel 간 데이터 전달도 동일 방식 (global memory 경유) → 별도 DMA 엔진 · doorbell 메커니즘 불요.
-- **PIM-GPU TSV 대역폭 contention 마진** — PIM (HBM4 logic die 내부) 과 Instance A GPU 가 HBM TSV 대역폭 공유로, 동시 full-load 동작 시 상호 throttling 가능. PIM decode-attn 예측 시간 위 GPU prefill chunk 산출 시 10% conservative 시간 마진 (`PIM_SLACK_SAFETY_MARGIN = 0.9`) 적용 → contention 방지.
+- **PIM-GPU TSV 대역폭 contention** — PIM (HBM4 logic die 내부) 과 Instance A GPU 가 셀어레이 / TSV 경로를 공유한다; 외부 버스는 GPU 전용으로, decode KV 는 logic die 에서 in-place 처리되어 버스로 나가지 않는다 (path separation, §5.3). 따라서 경합은 (있다면) 셀어레이 / TSV 에서 생기며, 두 축으로 완화될 것으로 추정된다: 채널 독립 토글 (§3.2) 이 decode-KV / weight / prefill-KV 를 비중첩 채널에 두고 (공간), GPU 의 compute-bound projection 이 윈도우 대부분에서 TSV 를 idle 로 남긴다 (시간, §5.3). op-time 균형이 이미 t_pim ≤ t_gpu_a 를 주므로 (OPERATING_POINT §2) 어떤 산식에도 시간 마진이 들어가지 않는다 — 한때 둔 10% 헤지 (`PIM_SLACK_SAFETY_MARGIN`) 는 제거됐다. TSV-saturation 의 정량적 폐쇄는 silicon-deferred 로 남는다.
 
 ## 4. Op Partitioning
 
@@ -250,7 +250,7 @@ Decode attention 만 이 3 조건을 동시 충족 → PIM scope 가 substrate �
 
 ### 5.1 Phase-aware Channel Activation
 
-Instance A 의 SP-PIM aggregate 채널 수는 k_total = 2048 으로 고정. PIM 은 decode-attn 일이 존재하는 한 *항상* 가동되어, Instance A GPU 의 compute-bound 영역 (QKV · prefill_attn · O-proj) 의 HBM idle 헤드룸 위에 자연 overlap (O3 + §3.5.3). Sequence-parallel 성질 위 임의 시점 한 mb 의 decode-attn 이 모든 채널 점유 — 채널 분할 micromanagement 불필요 (Hermite identity 위 partition·serialize 동치). 잔여 TSV contention 은 10% margin `PIM_SLACK_SAFETY_MARGIN = 0.9` 으로 보수 흡수 — channel knob 부재.
+Instance A 의 SP-PIM aggregate 채널 수는 k_total = 2048 으로 고정. PIM 은 decode-attn 일이 존재하는 한 *항상* 가동되어, Instance A GPU 의 compute-bound 영역 (QKV · prefill_attn · O-proj) 의 HBM idle 헤드룸 위에 자연 overlap (O3 + §3.5.3). Sequence-parallel 성질 위 임의 시점 한 mb 의 decode-attn 이 모든 채널 점유 — 채널 분할 micromanagement 불필요 (Hermite identity 위 partition·serialize 동치). 잔여 TSV contention 은 시간 마진이 아니라 채널 독립 토글 (§3.2) 과 path separation (§5.3) 으로 흡수될 것으로 추정 — channel knob 부재 (TSV-saturation 폐쇄는 silicon-deferred).
 
 - **Attention step** — Mixed batch 의 prefill chunk 토큰은 GPU attention kernel 이, decode 토큰은 SP-PIM 이 *동시 처리*. decode 토큰 존재 시 2048 채널 lock-step 단일 op. Pure prefill 배치 (decode rows 0) 는 PIM op_time = 0.
 - **Projection step (QKV / O-proj / FFN)** — 같은 mb 의 PIM 작업 없음. Intra-instance double-buffering (§5.6) 위 *다음 mb* 의 decode-attn 이 projection 구간에 자연 overlap — P5 compute-bound timing 활성화 원칙 정합.
