@@ -1,12 +1,8 @@
 # PULS — PIM-Unified LLM Serving
 
-> ✅ **스케줄러 로직 — 일반화·구현·검증 완료** ([`puls-engine`](puls-engine/CONTRACT.md), 189 checks). 동작점은 모델·GPU 스펙에서 *도출*되며, 균형점에서 composition 100% 명중. 배포 수치·Σdev·클러스터 스케일 검증은 [일반화 스케줄러](#일반화-스케줄러-puls-engine) · [Runtime Validation](#runtime-validation).
+> ✅ **스케줄러 로직 — 일반화·구현·검증 완료** ([`puls-engine`](puls-engine/CONTRACT.md), 189 checks). 동작점은 모델·GPU 스펙에서 *도출*된다 — 고정: HBM4·SP-PIM·KV FP8 / 변수: 모델·GPU 스펙·prefill·die-stack·가중치 정밀도. 균형점에서 composition 100% 명중. 배포 수치·Σdev·클러스터 스케일 검증은 [Runtime Validation](#runtime-validation).
 
 **Scheduler-aware co-design of HBM-PIM and production LLM serving stack.**
-
-## 일반화 스케줄러 (puls-engine)
-
-> **일반화 완료 (2026-06).** 본 RFC 수치(prefill 128 → decode 62·6.15M·ctx≈100K, Instance A ≈2.77 TB)는 **Llama-3 70B + B200 + HBM4 16단** 기준 *구체 예시*다. 스케줄링 *방법*(세 자원 균형 도출 + steering·cold-start·healing·age-cap)은 모델·GPU 무관 일반화되어 C++ 스케줄러 **[`puls-engine/`](puls-engine/CONTRACT.md)** (189 checks)로 구현됐으며, 임의 AI 모델·GPU 에 대해 **HBM 용량 한도 내 동작점을 산출**한다. 고정: HBM4·SP-PIM·KV FP8. 변수: 모델·GPU 스펙·prefill·die-stack·가중치 정밀도.
 
 > **Disclosure** — 학부생 단일 저자의 개인 연구 프로젝트. 소속 기관·vendor 연계 없음.
 >
@@ -21,7 +17,6 @@
 ## 목차
 
 **Background**
-- [일반화 스케줄러 (puls-engine)](#일반화-스케줄러-puls-engine)
 - [Processing-in-Memory 아키텍처의 특징](#processing-in-memory-아키텍처의-특징)
 - [문제 의식](#문제-의식)
 
@@ -36,7 +31,6 @@
 - [Results](#results)
 - [Runtime Validation](#runtime-validation)
 - [Limitations / Disclosure](#limitations--disclosure)
-- [Forward-looking: HBF-class 분리 Substrate](#forward-looking-hbf-class-분리-substrate)
 
 ## Processing-in-Memory 아키텍처의 특징
 
@@ -152,7 +146,6 @@ Llama-3 70B + DGX B200 + HBM4 substrate 위 4 가속 source (Aux1·Aux2·F3·F5)
 | η_HBM_external | 0.74 (fix) + sensitivity sweep {0.70, 0.74, 0.80} |
 | PIM tile time | 267 ns (compute-bound, FP8 KV) |
 | RTL FSM | 1.3 GHz · 347 cycles |
-| MFU | 0.6 default + sensitivity sweep {0.5, 0.6, 0.7} |
 | Model | Llama-3 70B (L=80, hidden=8192, FFN intermediate=28672) |
 
 ### Per-source Acceleration
@@ -192,33 +185,19 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (F5 포함)**.
 
 - **age-cap 꼬리 없음 (2-active 구조).** 옛 검증의 "3번째 배치 튐(108개·spread 3.7%)"은 *강제된 3rd 배치*에서 warm-start 대기 멤버가 age-cap 을 유발한 것. 2-active 모델은 3rd 를 강제하지 않고 (완료분 + 잉여)로 *재구성*만 하므로 그 꼬리가 구조적으로 사라진다.
 - **종속성·age-cap 넣고도 유지.** prefill→decode 전이와 공정성 age-cap = 5 를 다 넣어도 두 composition 이 무너지지 않음 — 로직(steering · greedy · healing · age-cap · KV-센터링)은 *스케일 불변*, 동작점만 상수(prefill 256↔128 동형).
-- **throughput 은 설계상 지속** — per-cycle decode 예산이 동작점에 고정(62, KV 캡에 먼저 닿으면 그 이하)이라 풀이 풍부한 한 매 cycle 이 고정 토큰 양을 처리 → 지속성은 동작점 고정의 구조적 귀결. 절대 tok/s 는 silicon 보정 cycle 시간 필요(Honest Disclosure).
+- **throughput 은 설계상 지속** — per-cycle decode 예산이 동작점에 고정(62, KV 캡에 먼저 닿으면 그 이하)이라 풀이 풍부한 한 매 cycle 이 고정 토큰 양을 처리 → 지속성은 동작점 고정의 구조적 귀결. 절대 tok/s 는 silicon 보정 cycle 시간 필요.
 - **클러스터 스케일 — 글로벌 스케줄러.** 서버스케일(노드 수백–수천)에선 글로벌 도착 평균이 100K 보다 높아 노드별 풀이 drift → idle 폭발. **글로벌 스케줄러**(greedy 콜드스타트: 긴 것 엣지 shed + interleave-greedy · per-completion 힐링 = toxic-fit)로 **초반 ~2.2% 엣지 비용만 감수하면 그 뒤로 각 노드를 평균 100K 동작점에 무한정 유지**(긴 요청 보존, drift 0). 원리·E 스윕·on2 측정은 [`ARCHITECTURE.md`](ARCHITECTURE.md) §7 / [puls-engine/core/global_scheduler.cpp](puls-engine/core/global_scheduler.cpp).
-
-### Honest Disclosure
-
-- **HBM4 substrate** = hypothetical projection (현재 production 부재; ARCH §3.1 literal 정합).
-- **η_HBM_external** = H100 HBM3 측정값을 HBM4 로 확장 (Framing A).
-- **F1·F2 ablation + 비교 baseline (vLLM / Sarathi-Serve)** = 후속 calibration 으로 연기 (calibration-heavy).
-- **Runtime Validation = 합성 워크로드** — 분산-서버 정상상태(대량 상주 decode 풀 + 지속 prefill)를 대표하는 합성 분포 + warm-start seed(비편향, cold-start 램프 생략). 실 1M-ctx trace 의 cold-start 전체 prefill 은 수억 step 이라 직접 시뮬 비현실적 → warm-start 가 *상주 풀* 을 대표. composition(per-cycle 균형)이 검증 대상이며, 절대 latency 아님.
-- **절대 metric** (TTFT, TPOT, throughput) = silicon 부재로 영구 out of scope.
 
 ## Limitations / Disclosure
 
-- **Hardware 미보유** — 실제 H100 / HBM4 silicon 없음. 상대적 source decomposition 은 calibrated ([Results](#results) 참조); 절대 metric (TTFT, TPOT, throughput) 은 out of scope.
-- **HBM4 추정** — JEDEC JESD270-4A spec 기반 + 자체 Ramulator2 기반 cycle-accurate 측정 (FP8 tile load / FP16 tile load / PIM compute 영역) 인용.
+- **Hardware 미보유** — 실제 H100 / HBM4 silicon 없음. 상대적 source decomposition 은 calibrated ([Results](#results) 참조).
+- **HBM4 substrate** — hypothetical projection (현재 production 부재; ARCH §3.1 literal 정합). JEDEC JESD270-4A spec + 자체 Ramulator2 cycle-accurate 측정 (FP8 / FP16 tile load · PIM compute) 인용.
+- **η_HBM_external** — H100 HBM3 측정값을 HBM4 로 확장 (Framing A).
 - **RTL substrate** — open-source flow (Yosys + ASAP7 + OpenSTA pre-CTS) 한정. Commercial signoff 영역 외.
-- **단일 vendor production trace** — 공개 long-ctx agentic production trace 가 사실상 1 종 한정. 한계 disclosure 와 함께 1M-class benchmark dataset + mid-ctx production chat trace 를 보강 axis 로 사용.
+- **Runtime Validation = 합성 워크로드** — 분산-서버 정상상태(대량 상주 decode 풀 + 지속 prefill)를 대표하는 합성 분포 + warm-start seed (cold-start 램프 생략). composition(per-cycle 균형)이 검증 대상.
+- **비교 baseline (vLLM / Sarathi-Serve) + F1·F2 ablation** — 후속 calibration 으로 연기.
+- **단일 vendor production trace** — 공개 long-ctx agentic production trace 가 사실상 1 종 한정. 1M-class benchmark dataset + mid-ctx production chat trace 를 보강 axis 로 사용.
 - **Main claim 정량 = projection** — Pre-silicon 정량 수치는 *추정* + provenance label 동반 ([Results](#results) 참조).
-
-## Forward-looking: HBF-class 분리 Substrate
-
-본 RFC main claim 영역 (HBM4 SP-PIM) 의 정합성 검증 이후, 별도 substrate 인 **HBF (High Bandwidth Flash)** 같은 분리 메모리 계층에 PIM 코어를 탑재하는 방향이 추가 검토 가치를 가진다. 구조적 효과:
-
-- **PIM 가동률 ceiling 상승** — GPU 의 HBM 점유 phase 와 독립적으로 PIM 가동 가능 → *compute-bound timing 정합 제약* (P5, TSV 경합 회피를 위해 PIM 활성화 구간을 GPU compute-bound op 실행 중에 한정해야 한다는 원칙) 이 substrate-level 분리로 자동 해소되는 방향.
-- **메모리 path 공유 해소** — GPU ↔ PIM 의 TSV / inter-bank path 경합이 substrate-level 분리로 구조적으로 회피되는 방향 (GPU 는 HBM 버스, PIM 은 HBF 버스 각자 점유).
-
-단, **HBF spec 이 현 시점 미공개** 이므로 데이터 로드 latency, KV cache 의 핫·콜드 tier 분할 정책, write endurance 제약은 정량 특정 불가능. 본 항목은 *방향성 한정* 이며 spec disclosure 이후 정량 follow-up 영역.
 
 ## Repository
 

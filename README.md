@@ -1,12 +1,8 @@
 # PULS — PIM-Unified LLM Serving
 
-> ✅ **Scheduler logic — generalized, implemented & validated** ([`puls-engine`](puls-engine/CONTRACT.md), 189 checks). The operating point is *derived* from the model · GPU spec; composition hits 100% at the balance point. Deployed numbers · Σdev · cluster-scale validation: see [Generalized scheduler](#generalized-scheduler-puls-engine) · [Runtime Validation](#runtime-validation).
+> ✅ **Scheduler logic — generalized, implemented & validated** ([`puls-engine`](puls-engine/CONTRACT.md), 189 checks). The operating point is *derived* from the model · GPU spec — Fixed: HBM4 · SP-PIM · KV FP8 / Variable: model · GPU spec · prefill · die-stack · weight precision. Composition hits 100% at the balance point. Deployed numbers · Σdev · cluster-scale validation: see [Runtime Validation](#runtime-validation).
 
 **Scheduler-aware co-design of HBM-PIM and production LLM serving stack.**
-
-## Generalized scheduler (puls-engine)
-
-> **Generalization complete (2026-06).** This RFC's numbers (prefill 128 → decode 62 · 6.15M · ctx ≈ 100K, Instance A ≈ 2.77 TB) are the *canonical instantiation* for **Llama-3 70B + B200 + HBM4 16-high**. The scheduling *method* (three-resource balance derivation + steering · cold-start · healing · age-cap) is generalized over model/GPU as the C++ scheduler **[`puls-engine/`](puls-engine/CONTRACT.md)** (189 checks), which derives the operating point for any AI model · GPU within the HBM capacity limit. Fixed: HBM4 · SP-PIM · KV FP8. Variable: model spec · GPU spec · prefill · die-stack · weight precision.
 
 > **Disclosure** — Personal research project by a single undergraduate author. No institutional / vendor affiliation.
 >
@@ -21,7 +17,6 @@ Full body — [`ARCHITECTURE.md`](ARCHITECTURE.md) (substrate, instance disaggre
 ## Table of Contents
 
 **Background**
-- [Generalized scheduler (puls-engine)](#generalized-scheduler-puls-engine)
 - [Characteristics of Processing-in-Memory Architecture](#characteristics-of-processing-in-memory-architecture)
 - [Problem Statement](#problem-statement)
 
@@ -36,7 +31,6 @@ Full body — [`ARCHITECTURE.md`](ARCHITECTURE.md) (substrate, instance disaggre
 - [Results](#results)
 - [Runtime Validation](#runtime-validation)
 - [Limitations / Disclosure](#limitations--disclosure)
-- [Forward-looking: HBF-class Disaggregated Substrate](#forward-looking-hbf-class-disaggregated-substrate)
 
 **Resources**
 - [Interactive Reading Guide](#interactive-reading-guide)
@@ -157,7 +151,6 @@ Calibrated projection of the four acceleration sources (Aux1·Aux2·F3·F5) on L
 | η_HBM_external | 0.74 (fix) + sensitivity sweep {0.70, 0.74, 0.80} |
 | PIM tile time | 267 ns (compute-bound, FP8 KV) |
 | RTL FSM | 347 cycles @ 1.3 GHz |
-| MFU | 0.6 default + sensitivity sweep {0.5, 0.6, 0.7} |
 | Model | Llama-3 70B (L=80, hidden=8192, FFN intermediate=28672) |
 
 ### Per-source Acceleration
@@ -197,33 +190,19 @@ Interpretation:
 
 - **No age-cap tail (the 2-active structure).** The old validation's "third-batch spike (count 108 · spread 3.7%)" came from a *forced 3rd batch* where warm-start waiting members triggered the age-cap. The 2-active model never forces a 3rd batch (it only *re-composes* from returned members + surplus), so that tail vanishes structurally.
 - **Holds even with dependency · age-cap.** Adding the prefill→decode transition and the fairness age-cap = 5 does not break either composition — the logic (steering · greedy · healing · age-cap · KV-centering) is *scale-invariant*; only the operating-point constants change (prefill 256 ↔ 128 isomorphic).
-- **Throughput is sustained by construction** — the per-cycle decode budget is pinned to the operating point (62, or fewer when the KV cap binds first), so as long as the pool stays abundant each cycle processes a fixed quantum; sustainability is a structural consequence of the fixed operating point. Absolute tok/s awaits silicon-calibrated cycle time (Honest Disclosure).
+- **Throughput is sustained by construction** — the per-cycle decode budget is pinned to the operating point (62, or fewer when the KV cap binds first), so as long as the pool stays abundant each cycle processes a fixed quantum; sustainability is a structural consequence of the fixed operating point. Absolute tok/s awaits silicon-calibrated cycle time.
 - **Cluster scale — global scheduler.** At server scale (hundreds–thousands of nodes) the global arrival mean exceeds 100K, so per-node pools drift and idle blows up. The **global scheduler** (greedy cold-start: shed long to edge + interleave-greedy · per-completion healing = toxic-fit) **pays only the ~2.2% initial edge cost and thereafter holds each node at the mean-100K operating point indefinitely** (long requests preserved, drift 0). Principle, E sweep, and on2 measurement in [`ARCHITECTURE.md`](ARCHITECTURE.md) §7 / [puls-engine/core/global_scheduler.cpp](puls-engine/core/global_scheduler.cpp).
-
-### Honest Disclosure
-
-- **HBM4 substrate** = hypothetical projection (current production absent; ARCH §3.1 literal alignment).
-- **η_HBM_external** = H100 HBM3 measurement extended to HBM4 (Framing A).
-- **F1·F2 ablation + comparative baseline (vLLM / Sarathi-Serve)** = deferred to subsequent calibration (calibration-heavy).
-- **Runtime Validation = synthetic workload** — a synthetic distribution representing the distributed-server steady state (large standing decode pool + continuous prefill) + an unbiased warm-start seed (skips only the cold-start ramp). Cold-start full prefill of a real 1M-ctx trace is hundreds of millions of steps, impractical to simulate directly → warm-start represents the *standing pool*. The validation target is composition (per-cycle balance), not absolute latency.
-- **Absolute metrics** (TTFT, TPOT, throughput) = silicon absent, permanently out of scope.
 
 ## Limitations / Disclosure
 
-- **No hardware in hand** — No actual H100 / HBM4 silicon. Relative source decomposition is calibrated (see [Results](#results)); absolute metrics (TTFT, TPOT, throughput) remain out of scope.
-- **HBM4 estimation** — Based on the JEDEC JESD270-4A spec + in-house Ramulator2-based cycle-accurate measurements (FP8 tile load / FP16 tile load / PIM compute regimes) as references.
+- **No hardware in hand** — No actual H100 / HBM4 silicon. Relative source decomposition is calibrated (see [Results](#results)).
+- **HBM4 substrate** — hypothetical projection (current production absent; ARCH §3.1 literal alignment). JEDEC JESD270-4A spec + in-house Ramulator2 cycle-accurate measurements (FP8 / FP16 tile load · PIM compute) as references.
+- **η_HBM_external** — H100 HBM3 measurement extended to HBM4 (Framing A).
 - **RTL substrate** — Limited to an open-source flow (Yosys + ASAP7 + OpenSTA pre-CTS). Out of scope of commercial signoff.
-- **Single-vendor production trace** — Publicly available long-context agentic production traces are effectively limited to one. Disclosed as a limitation; augmented with a 1M-class benchmark dataset + a mid-context production chat trace as supplementary axes.
+- **Runtime Validation = synthetic workload** — a synthetic distribution representing the distributed-server steady state (large standing decode pool + continuous prefill) + an unbiased warm-start seed (skips the cold-start ramp). The validation target is composition (per-cycle balance).
+- **Comparative baseline (vLLM / Sarathi-Serve) + F1·F2 ablation** — deferred to subsequent calibration.
+- **Single-vendor production trace** — Publicly available long-context agentic production traces are effectively limited to one; augmented with a 1M-class benchmark dataset + a mid-context production chat trace as supplementary axes.
 - **Main claim quantitatives = projection** — Pre-silicon numbers are *estimates* with provenance labels (see [Results](#results)).
-
-## Forward-looking: HBF-class Disaggregated Substrate
-
-Beyond the HBM4 SP-PIM main claim of this RFC, mounting PIM cores on a **separate memory tier such as HBF (High Bandwidth Flash)** is a direction worth further examination. Structural effects:
-
-- **PIM duty-cycle ceiling lift** — PIM can run independently of the GPU's HBM occupancy phase, so the *compute-bound timing alignment* constraint (P5, the requirement that PIM activate only inside compute-bound windows to avoid TSV contention) is dissolved at the substrate-topology level.
-- **Memory path sharing resolved** — The GPU ↔ PIM contention on the shared TSV / inter-bank path is structurally avoided through substrate-level separation: GPU keeps its HBM bus, PIM operates on the HBF bus.
-
-That said, **HBF specifications remain unreleased at this time**, so data load latency, hot/cold KV cache tier partitioning policy, and write endurance constraints cannot be quantitatively specified. This item is *directional only*; the quantitative follow-up belongs to the period after spec disclosure.
 
 ## Interactive Reading Guide
 
