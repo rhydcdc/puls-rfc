@@ -252,7 +252,12 @@ Decode attention 만 이 3 조건을 동시 충족 → PIM scope 가 substrate �
 
 Instance A 의 SP-PIM aggregate 채널 수는 k_total = 2048 으로 고정. PIM 은 decode-attn 일이 존재하는 한 *항상* 가동되어, Instance A GPU 의 compute-bound 영역 (QKV · prefill_attn · O-proj) 의 HBM idle 헤드룸 위에 자연 overlap (O3 + §3.5.3). Sequence-parallel 성질 위 임의 시점 한 mb 의 decode-attn 이 모든 채널 점유 — 채널 분할 micromanagement 불필요 (Hermite identity 위 partition·serialize 동치). 잔여 TSV contention 은 시간 마진이 아니라 채널 독립 토글 (§3.2) 과 path separation (§5.3) 으로 흡수될 것으로 추정 — channel knob 부재 (TSV-saturation 폐쇄는 silicon-deferred).
 
-여기서 PIM 에 대역폭을 공급하는 출처는 둘이다. (i) **decode-KV 채널 자체** — GPU-only 서빙에선 GPU 가 decode KV 를 버스로 스트리밍하지만 (memory-bound), PULS 는 logic die 에서 in-place 처리하므로 그 트래픽이 단순 overlap 이 아니라 *구조적으로 해방*된다. (ii) **projection / prefill-KV 채널** — compute-bound 라 GPU 가 윈도우의 일부만 점유하고 (배포 동작점에서 weight-load ≈ t_gpu_a 의 9%), 나머지 시간엔 idle 로 남는다. (i) 이 더 큰 효과인데, GPU-only 서빙에선 decode 가 memory-bound 이기 때문이다.
+여기서 PIM 에 대역폭을 공급하는 출처는 둘이다:
+
+- **(i) decode-KV 채널 자체** — GPU-only 서빙에선 GPU 가 decode KV 를 버스로 스트리밍하지만 (memory-bound), PULS 는 logic die 에서 in-place 처리하므로 그 트래픽이 단순 overlap 이 아니라 *구조적으로 해방*된다.
+- **(ii) projection / prefill-KV 채널** — compute-bound 라 GPU 가 윈도우의 일부만 점유하고, 나머지 시간엔 idle 로 남는다.
+
+→ **(i) 이 더 큰 효과** — GPU-only 서빙에선 decode 가 memory-bound 이기 때문이다.
 
 - **Attention step** — Mixed batch 의 prefill chunk 토큰은 GPU attention kernel 이, decode 토큰은 SP-PIM 이 *동시 처리*. decode 토큰 존재 시 2048 채널 lock-step 단일 op. Pure prefill 배치 (decode rows 0) 는 PIM op_time = 0.
 - **Projection step (QKV / O-proj / FFN)** — 같은 mb 의 PIM 작업 없음. Intra-instance double-buffering (§5.6) 위 *다음 mb* 의 decode-attn 이 projection 구간에 자연 overlap — P5 compute-bound timing 활성화 원칙 정합.
@@ -279,15 +284,6 @@ Instance A 내에서 GPU projection 이 compute-bound 상태일 때 HBM 대역�
 - **Q-replicate / KV-row sharding** — Q 를 k_total 채널 전체에 broadcast, KV row 를 채널에 sharding → 각 채널이 자기 KV slice 를 독립 sweep (§3.4 참조).
 - **시간 산출** — Prefill chunk / decode batch 양 시나리오에서 channel 당 tile 수가 결정 → tile 수 × tile 시간 = SP-PIM attention 시간.
 - **GPU baseline 대비 ratio** — §3.1 internal path BW 우위 (1 / η_HBM 배 초과) 와 ctx 종속 KV variance 의 결합으로 결정. **정량 산출은 Aux2 / F3 산식에 진입 — [`README.md`](README.md#results) 참조.**
-
-**PIM KV 대역폭이 정말 compute-bound 윈도우에 숨는가? (정량 근거).** *시간* 적합은 t_pim ≤ t_gpuA (OPERATING_POINT §2). *대역폭* 적합은 네 근거에 의존 — 셋은 spec 계산, 하나는 silicon-deferred:
-
-1. **헤드룸은 실재.** GPU-A projection 은 compute-bound: QKV arithmetic intensity ≈ 349 FLOP/byte ≫ B200 roofline ridge (2200 TFLOPS ÷ 16 TB/s ≈ 137 FLOP/byte). 그래서 projection 중 외부 HBM 버스는 ~32% 만 사용 — ~68% 유휴.
-2. **PIM 은 외부 버스를 아예 안 쓴다.** decode-attn 한 layer 가 읽는 KV = Σkv 6.15M × 2 KB (FP8 K+V, n_kv=8 · d_head=128; 배포 128) = 12.6 GB; t_pim ≈ 25 µs 안에 = **~500 TB/s — 외부 총대역 128 TB/s 의 ~4배**(비율은 prefill-invariant). 즉 KV 는 GPU 가 쓰는 버스로 *흘릴 수 없다* → PULS 는 DRAM row 에서 in-place 처리(F1 / Aux2 전제). "숨음"은 **남은 버스 대역에 끼어드는 게 아니라 경로 분리**.
-3. **내부 경로는 더 빠르나 contention 0 은 아님.** attention SFU 가 로직다이에 있어 PIM 은 같은 채널 위 GPU 접근과 **TSV / 셀어레이 경로를 여전히 공유** — contention 존재. 단 외부 버스 프로토콜을 우회해 TSV 를 η_internal 로 받음, **≈ 1/η_external ≈ 1.35배** 의 유효 속도. 그리고 채널 토글(§3.2) 자체가 가속: normal-mode 채널이 GPU 에 가중치를 *주는 동시에* PIM-mode 채널이 decode-attn 을 먹임 — weight-load ‖ KV-compute 가 직렬이 아니라 동시 진행.
-4. **silicon-deferred 폐쇄 (정직한 gap).** TSV / 셀어레이 대역폭이 GPU 잔여 weight-load 와 *동시에* PIM 전체 KV read 를 saturation 없이 버티는지는 η_internal · per-channel TSV 대역에 의존 — Ramulator2 *추정* 이지 silicon 측정 아님(OI9 / §3.5.3). 네 요인은 강한 근거이자 P5 + §3.2 아키텍처 전제이지 닫힌 측정은 아니다.
-
-즉 PIM 은 **두 축**으로 숨는다: 시간(t_pim ≤ t_gpuA, OPERATING_POINT §2) + 대역폭(in-place 내부 경로 ~1.35× + 채널 동시성, 어차피 ~68% 버스-유휴인 GPU 윈도우로) — 정량 TSV-saturation 폐쇄는 silicon 대기.
 
 구체적 스케줄링 정책의 정량 평가는 Open Empirical Work (§9 E6) 참조.
 
@@ -413,7 +409,7 @@ on event(kernel K of μ-batch X completes):
 
 ### 6.4 Admission: 동작점 (풀 모델)
 
-스케줄러는 매 μ-batch 를 구성해 세 자원(PIM = decode-attn, GPU-A = projection + prefill-attn, FFN = Instance B)의 시간을 맞춰 inter-instance · intra-instance idle 을 최소화한다. 구성은 **세 관심사의 분리**이며, 각각 자기 in-flight 풀에서 독립적으로 steering 된다 — idle fraction feedback 으로 한 cohort 를 조절하는 게 *아니다.* (이전 초안은 측정 GPU/PIM idle fraction + hysteresis deadband 로 iteration 마다 admission 을 조정했으나 그 feedback 모델은 폐기 — 맺음말 참조. 이제 스케줄러는 측정 idle 에 반응하지 않고 *고정 타깃*에 steering 으로 명중한다.)
+스케줄러는 매 μ-batch 를 구성해 세 자원(PIM = decode-attn, GPU-A = projection + prefill-attn, FFN = Instance B)의 시간을 맞춰 inter-instance · intra-instance idle 을 최소화한다. 구성은 **세 관심사의 분리**이며, 각각 자기 in-flight 풀에서 독립적으로 steering 된다.
 
 1. **Admission = 풀 보충만.** `request_queue → in-flight (PREFILL)`, aggregate KV budget(`can_admit`) 게이트만. decode/prefill 타깃은 보지 않는다. `prompt_len = 0`(decode-only)이거나 prefill 이 이미 끝난 요청은 즉시 DECODE 전이.
 2. **decode-set steering.** in-flight **DECODE 풀**에서 두 타깃을 동시 명중 — **개수 62 ∧ Σkv 6.15M** (배포 128; 도출 기준 256 은 123·12.3M) — 하도록 로컬 그리디 steering + age-cap 으로 선택. 순수 *선택*(KV admit · 큐 조작 없음; KV 는 풀 진입 시 예약). 미선택은 age(`wait++`), 선택은 리셋(`wait = 0`).

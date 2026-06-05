@@ -252,7 +252,12 @@ When the model/GPU changes, K1·K2 change so ctx_balance shifts — `puls-engine
 
 Instance A's SP-PIM aggregate channel count is fixed at k_total = 2048. PIM activates whenever decode-attn work exists, naturally overlapping with the HBM idle headroom of Instance A's GPU compute-bound stages (QKV · prefill_attn · O-proj) per O3 + §3.5.3. Because PIM is sequence-parallel across channels (§3.4), at any moment a single μ-batch's decode-attn occupies all 2048 channels — no channel-level partitioning across concurrent μ-batches is needed (Hermite identity on per-channel tile counts equates partition vs serialize). Residual TSV contention is expected to be absorbed by channel-independent toggling (§3.2) and path separation (§5.3) rather than a time margin — no fine-grained channel knob (TSV-saturation closure silicon-deferred).
 
-Two bandwidth sources feed PIM here. (i) **The decode-KV channels themselves** — in GPU-only serving the GPU streams decode KV over the bus (memory-bound), but PULS processes it in-place on the logic die, so that traffic is structurally freed rather than merely overlapped. (ii) **The projection / prefill-KV channels** — being compute-bound, the GPU touches them for only a fraction of the window (weight-load ≈ 9% of t_gpu_a at the deployed point), leaving them idle the rest of the time. Source (i) is the larger effect, since decode is memory-bound under GPU-only serving.
+Two bandwidth sources feed PIM here:
+
+- **(i) The decode-KV channels themselves** — in GPU-only serving the GPU streams decode KV over the bus (memory-bound), but PULS processes it in-place on the logic die, so that traffic is structurally freed rather than merely overlapped.
+- **(ii) The projection / prefill-KV channels** — being compute-bound, the GPU touches them for only a fraction of the window, leaving them idle the rest of the time.
+
+→ **Source (i) is the larger effect** — decode is memory-bound under GPU-only serving.
 
 - **Attention step** — In a mixed batch, prefill chunk tokens go to the GPU attention kernel and decode tokens to SP-PIM *concurrently*. With decode tokens present, all 2048 channels run a single lock-step op. For a pure-prefill batch (no decode rows), PIM op_time = 0.
 - **Projection step (QKV / O-proj / FFN)** — No same-μ-batch PIM work. Under intra-instance double-buffering (§5.6), PIM processes the *next* μ-batch's decode-attn during the projection window — aligned with P5's compute-bound timing activation.
@@ -279,15 +284,6 @@ Within Instance A, when the GPU projection is compute-bound, HBM bandwidth becom
 - **Q-replicate / KV-row sharding** — Broadcast Q to all k_total channels, shard KV rows across channels → each channel independently sweeps its own KV slice (see §3.4).
 - **Time derivation** — In both prefill chunk and decode batch scenarios, the number of tiles per channel is determined → tile count × tile time = SP-PIM attention time.
 - **Ratio vs GPU baseline** — Determined by combining the internal-path BW advantage of §3.1 (exceeds by a factor of 1 / η_HBM) with ctx-dependent KV variance. **Quantitative derivation enters Aux2 / F3 — see [`README.md`](README.md#results).**
-
-**Does PIM's KV bandwidth actually hide in the compute-bound window? (quantified grounds).** The *temporal* fit is t_pim ≤ t_gpuA (OPERATING_POINT §2). The *bandwidth* fit rests on four grounds — three computable from spec, one silicon-deferred:
-
-1. **The headroom is real.** GPU-A projection is compute-bound: QKV arithmetic intensity ≈ 349 FLOP/byte ≫ the B200 roofline ridge (2200 TFLOPS ÷ 16 TB/s ≈ 137 FLOP/byte). So during projection only ~32% of the external HBM bus is used — ~68% sits idle.
-2. **PIM does not use the external bus at all.** One decode-attn layer reads Σkv 6.15M × 2 KB (FP8 K+V, n_kv=8 · d_head=128; deployed 128) = 12.6 GB; over t_pim ≈ 25 µs that is **~500 TB/s — ~4× the 128 TB/s external aggregate** (the ratio is prefill-invariant). KV therefore *cannot* be streamed over the bus the GPU uses; PULS processes it in-place at the DRAM rows (the F1 / Aux2 premise). The "hiding" is **path separation, not fitting into leftover bus bandwidth**.
-3. **The internal path is faster, but not contention-free.** The attention SFU is on the logic die, so PIM still shares the TSV / cell-array path with GPU accesses to the same channels — contention exists. But by bypassing the external bus protocol it receives the TSV at η_internal, **≈ 1/η_external ≈ 1.35× the effective rate** of an external read. And channel-level toggling (§3.2) is itself an accelerator: normal-mode channels stream weights to the GPU *while* PIM-mode channels feed decode-attn — weight-load ‖ KV-compute proceed concurrently, not serially.
-4. **Silicon-deferred closure (honest gap).** Whether the TSV / cell-array bandwidth sustains PIM's full KV read *concurrently* with the GPU's residual weight loads, without saturation, depends on η_internal and per-channel TSV bandwidth — Ramulator2-*estimated*, not silicon-measured (OI9 / §3.5.3). The four factors are strong grounds and encode the P5 + §3.2 architectural premise; they are not a closed measurement.
-
-So PIM hides on **two axes**: temporally (t_pim ≤ t_gpuA, OPERATING_POINT §2) and on bandwidth (in-place internal path at ~1.35× + channel concurrency, into a GPU window that is anyway ~68% bus-idle) — with the quantitative TSV-saturation closure deferred to silicon.
 
 For quantitative evaluation of the concrete scheduling policy, see Open Empirical Work (§9 E6).
 
@@ -413,7 +409,7 @@ on event(kernel K of μ-batch X completes):
 
 ### 6.4 Admission: The Operating Point (Pool Model)
 
-The scheduler composes each μ-batch to drive the three resources (PIM = decode-attn, GPU-A = projection + prefill-attn, FFN = Instance B) to equal time, minimizing inter-instance and intra-instance idle. Composition is **three separate concerns**, each steered independently from its own in-flight pool — *not* one cohort regulated by idle-fraction feedback. (An earlier draft used measured GPU/PIM idle fractions + a hysteresis deadband to adjust admission per iteration; that feedback model is superseded — see the closing note. The scheduler now hits *fixed targets* by steering rather than reacting to measured idle.)
+The scheduler composes each μ-batch to drive the three resources (PIM = decode-attn, GPU-A = projection + prefill-attn, FFN = Instance B) to equal time, minimizing inter-instance and intra-instance idle. Composition is **three separate concerns**, each steered independently from its own in-flight pool.
 
 1. **Admission = pool refill only.** `request_queue → in-flight (PREFILL)`, gated solely by the aggregate KV budget (`can_admit`). It does not look at the decode/prefill targets. A request with `prompt_len = 0` (decode-only), or one whose prefill is already complete, transitions straight to DECODE.
 2. **Decode-set steering.** From the in-flight **DECODE pool**, select a set hitting two targets at once — **count 62 ∧ Σkv 6.15M** (deployed 128; the 256-derivation is 123·12.3M) — by local-greedy steering with an age-cap. Pure *selection* (no KV admission, no queue manipulation; KV is reserved at pool entry). Unselected requests age (`wait++`); selected reset (`wait = 0`).
