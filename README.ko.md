@@ -1,6 +1,6 @@
 # PULS — PIM-Unified LLM Serving
 
-> ✅ **스케줄러 로직 구현·검증 완료** — 통합 lifecycle sim(콜드스타트 → steering · prefill→decode 전이 · per-completion 힐링 · age-cap)이 **2 active μ-batch**를 동작점(배포 128: decode 62 / Σkv 6.15M, prefill 128 / depth-work 12.8M)에 구성, **composition 100% 명중 · Σdev ≈0.38%(decode)/0.06%(prefill)** → §2 균형으로 idle ≈0. 클러스터 스케일은 글로벌 스케줄러로 초반 ~2.2% 엣지 후 노드 풀 100K 유지 (라마70B + B200 기준 균형값) ([Runtime Validation](#runtime-validation)).
+> ✅ **스케줄러 로직 — 일반화·구현·검증 완료** ([`puls-engine`](puls-engine/CONTRACT.md), 189 checks). 동작점은 모델·GPU 스펙에서 *도출*되며, 균형점에서 composition 100% 명중. 배포 수치·Σdev·클러스터 스케일 검증은 [일반화 스케줄러](#일반화-스케줄러-puls-engine) · [Runtime Validation](#runtime-validation).
 
 **Scheduler-aware co-design of HBM-PIM and production LLM serving stack.**
 

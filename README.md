@@ -1,6 +1,6 @@
 # PULS — PIM-Unified LLM Serving
 
-> ✅ **Scheduler logic implemented & validated** — The integrated lifecycle sim (cold-start → steering · prefill→decode transition · per-completion healing · age-cap) composes **2 active μ-batches** to the operating point (deployed 128: decode 62 / Σkv 6.15M, prefill 128 / depth-work 12.8M), at **composition 100% · Σdev ≈0.38%(decode)/0.06%(prefill)** → idle ≈0 by the §2 balance. At cluster scale the global scheduler holds each node pool at 100K (Llama-3 70B + B200 balance point) after a ~2.2% initial edge ([Runtime Validation](#runtime-validation)).
+> ✅ **Scheduler logic — generalized, implemented & validated** ([`puls-engine`](puls-engine/CONTRACT.md), 189 checks). The operating point is *derived* from the model · GPU spec; composition hits 100% at the balance point. Deployed numbers · Σdev · cluster-scale validation: see [Generalized scheduler](#generalized-scheduler-puls-engine) · [Runtime Validation](#runtime-validation).
 
 **Scheduler-aware co-design of HBM-PIM and production LLM serving stack.**
 
