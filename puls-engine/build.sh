@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 CXX=${CXX:-g++}
 FLAGS="-std=c++17 -O2 -I. -Ivalidation"
 CORE="core/optime.cpp core/derive.cpp core/steering.cpp core/node_scheduler.cpp core/global_scheduler.cpp core/workload.cpp"
-TESTS="test_optime test_derive test_steering test_node_scheduler test_global_scheduler test_integration test_meta"
+TESTS="test_optime test_derive test_steering test_node_scheduler test_global_scheduler test_integration test_meta test_lifecycle"
 
 mkdir -p build
 echo "== building core + tests =="
@@ -16,6 +16,7 @@ done
 echo "== building drivers =="
 $CXX $FLAGS runtime/main_runtime.cpp runtime/runtime.cpp $CORE -o build/puls_runtime.exe
 $CXX $FLAGS sim/sim.cpp $CORE -o build/puls_sim.exe
+$CXX $FLAGS sim/lifecycle.cpp $CORE -o build/puls_lifecycle.exe
 
 echo "== running tests =="
 fail=0

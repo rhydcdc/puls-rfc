@@ -28,6 +28,10 @@ target_link_libraries(puls_runtime PRIVATE puls_core)
 add_executable(puls_sim sim/sim.cpp)
 target_link_libraries(puls_sim PRIVATE puls_core)
 
+# 통합 lifecycle 시뮬 (프리필→디코드 종속성 + Σdev 측정)
+add_executable(puls_lifecycle sim/lifecycle.cpp)
+target_link_libraries(puls_lifecycle PRIVATE puls_core)
+
 # ── 검증 (모듈별 + 통합) — ctest ────────────────────────────────────────────
 enable_testing()
 set(PULS_TESTS
@@ -38,6 +42,7 @@ set(PULS_TESTS
   test_global_scheduler
   test_integration
   test_meta
+  test_lifecycle
 )
 foreach(t ${PULS_TESTS})
   add_executable(${t} validation/${t}.cpp)
