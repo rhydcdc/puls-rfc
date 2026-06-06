@@ -218,6 +218,8 @@ int main(int argc, char** argv) {
     double accDecMean = 0, accDecPool = 0, accReady = 0, accPfPool = 0;
     double accAgedDec = 0, accAgedPf = 0;  // aged(wait≥age_cap) 비율 — 디코드 vs 프리필 비교.
     double accDecForced = 0, accDecSel = 0;  // 배치당 강제 개수 / 선택 개수(=62면 count 충족).
+    double accMaxDev = 0, accMissDevSum = 0; long long accMissCount = 0;  // 관측 전용: 최악 dev / miss 배치 평균 dev.
+    long long accB1cm = 0, accB1dm = 0, accB2cm = 0, accB2dm = 0;  // batch1/2 count-miss/dev-miss 누적.
     long long transitions = 0, completions = 0;
     int N = 0;
     // drift: early(WARM 직후) vs late.
@@ -230,6 +232,8 @@ int main(int argc, char** argv) {
         double rResid[3] = {0, 0, 0};
         double rAgedDec = 0, rAgedPf = 0;
         double rDecForced = 0, rDecSel = 0;
+        double rMaxDev = 0, rMissDevSum = 0; int rMissCount = 0;
+        int rB1cm = 0, rB1dm = 0, rB2cm = 0, rB2dm = 0;  // batch1/2 count-miss/dev-miss
 
         for (int z = 0; z < Z; ++z) {
             auto& dec = dec_pool[z];
@@ -282,12 +286,23 @@ int main(int argc, char** argv) {
             std::vector<int> p1 = compose_decode_batch(dec, used, op, s1, dv1, h1);
             { int f = 0; for (int i : p1) if (dec[i].wait >= op.age_cap) ++f;
               rDecForced += f; rDecSel += (double)p1.size(); }
+            int p2sz = -1;
             if ((int)dec.size() >= 2 * op.decode_count_target) {
                 std::vector<int> p2 = compose_decode_batch(dec, used, op, s2, dv2, h2);
-                (void)p2;
+                p2sz = (int)p2.size();
             }
             double dh = (h1 + h2) / 2.0;
             double dcdev = (dv1 + dv2) / 2.0;
+
+            // ── 관측 전용(기존 dev/hit 로직 불변, 읽기만): 최악 dev + miss dev + miss 분류 ──
+            if (dv1 > rMaxDev) rMaxDev = dv1;
+            if (!h1) { rMissDevSum += dv1; ++rMissCount;
+                       if ((int)p1.size() != op.decode_count_target) ++rB1cm; else ++rB1dm; }
+            if (p2sz >= 0) {
+                if (dv2 > rMaxDev) rMaxDev = dv2;
+                if (!h2) { rMissDevSum += dv2; ++rMissCount;
+                           if (p2sz != op.decode_count_target) ++rB2cm; else ++rB2dm; }
+            }
 
             // footprint 평균(진단) + class 상주 분포(steer 시점).
             double dmean = 0;
@@ -396,6 +411,10 @@ int main(int argc, char** argv) {
             accAgedPf += rAgedPf / Z;
             accDecForced += rDecForced / Z;
             accDecSel += rDecSel / Z;
+            if (rMaxDev > accMaxDev) accMaxDev = rMaxDev;
+            accMissDevSum += rMissDevSum;
+            accMissCount += rMissCount;
+            accB1cm += rB1cm; accB1dm += rB1dm; accB2cm += rB2cm; accB2dm += rB2dm;
             ++N;
             if (!early_captured) {
                 earlyDecHit = rDecHit / Z;
@@ -437,5 +456,12 @@ int main(int argc, char** argv) {
                 accDecSel / N, accDecForced / N,
                 100.0 * resid_cls[0] / N, 100.0 * resid_cls[1] / N, 100.0 * resid_cls[2] / N,
                 transitions, completions);
+    std::printf("[관측] 디코드 최악 dev=%.3f%% | miss 배치 평균 dev=%.3f%% (miss %lld 개 / 밴드 10%%)\n",
+                100.0 * accMaxDev,
+                accMissCount ? 100.0 * accMissDevSum / (double)accMissCount : 0.0,
+                accMissCount);
+    std::printf("[관측] miss 분류 — batch1: count-miss %lld / dev-miss %lld | "
+                "batch2: count-miss %lld / dev-miss %lld\n",
+                accB1cm, accB1dm, accB2cm, accB2dm);
     return 0;
 }
