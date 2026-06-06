@@ -448,7 +448,7 @@ prefill: distribute 128 tokens to depth-sum 12.8M by the same steering + age-cap
 ```
 
 - **★ Length-distribution-agnostic (the key property).** On a heavily varied pool (real traffic), short + long requests are *combined* to hit both targets. Heavy / mixed / bimodal — any distribution works, because the average is never read; only the two targets are matched. Even an age-cap-forced off-size request is corrected by steering (a forced long request lowers `ideal` → the next picks several short ones), so the batch stays (62, 6.15M). A request that arrives first is processed within ≤ AGE_CAP+1 batches.
-- **Operating parameters = target_count + target_kv + AGE_CAP.** The ±10% band [5.55M, 6.77M] is **not a control value** — it is a diagnostic idle-SLA label (band width ≈ worst-case tolerated idle: ±10% → edge idle ~8.6–10.6%). Steering hits the target, so realized idle ≈ 0; `former` does not stop on the band.
+- **Operating parameters = target_count + target_kv + AGE_CAP.** Steering hits the target directly; `former` selects by nearest-to-`ideal`, not by any tolerance gate.
 - **AGE_CAP trade-off (sweep).** cap↑ → steering freedom↑ → spread↓, but waiting (latency)↑. cap↓ → FIFO-like → fair / low-latency but spread↑. `cap1: sp 3.1%` · `cap2: sp 1.2%, wait ≤3` · `**cap5: sp 0.7%, wait 5**` · `cap∞: sp 0.8% but starvation (wait 37)`. → **AGE_CAP = 5 adopted (deployed)** — wait 5 batches ≈ 128 µs ≪ TBT, so latency-harmless, and spread 0.7% < cap2. The old node-scheduler was conservatively 2 (quantified in OPERATING_POINT §3).
 
 **ctx 100K is the Llama70B+B200 balance value (specific to this model·chip pair), not an empirical guess.** It is prefill-invariant, but if the model/GPU changes puls-engine re-derives this balance. Solving the triple balance yields `ctx_balance = (K2+1)/K1` from the op-time coefficient ratios (PIM tile rate ÷ FFN flops/tok ÷ prefill-attn flops/tok·depth ÷ proj flops/tok); *prefill cancels out*, so the balance ctx is 100K for **every** prefill (§5 sweep B confirms). Its role is to *derive* the targets (deployed 128: Σkv 6.15M = 62 × 100K; derivation 256: 12.3M = 123 × 100K), **not** to impose a mean on the workload. This is why the algorithm is length-distribution-agnostic: it matches the two derived targets, however individual request lengths are distributed.
@@ -495,13 +495,15 @@ The sole exception = the **degenerate extreme (natural transition to A-bound).**
 
 ### 6.8 2-active μ-batch composition validation
 
-**Multi-batch composition — 2 active μ-batch (deployed model).** The window holds 2 active + 1 transition slack (capacity 3). When one batch's forward pass ends, it is **only *re-composed* from (returned members + surplus), never force-composing a 3rd.** The integrated lifecycle ([lifecycle.cpp](puls-engine/sim/lifecycle.cpp)) verifies that with the prefill→decode dependency and age-cap = 5, at deployed 128, **decode (62 ∧ Σkv 6.15M) and prefill (128 ∧ depth-work 12.8M) both hit 100% · Σdev 0.38% / 0.07%, with no age-cap tail** (the logic is scale-invariant, prefill 256 ↔ 128 isomorphic). Public validation is `puls-engine` (`sim/lifecycle.cpp` · `validation/test_*.cpp`, 189 checks).
+**Multi-batch composition — 2 active μ-batch (deployed model).** The window holds 2 active + 1 transition slack (capacity 3). When one batch's forward pass ends, it is **only *re-composed* from (returned members + surplus), never force-composing a 3rd.** The integrated lifecycle ([lifecycle.cpp](puls-engine/sim/lifecycle.cpp)) verifies that with the prefill→decode dependency and age-cap = 5, at deployed 128, **decode (62 ∧ Σkv 6.15M) hits ≈99.5% · Σdev ≈1.7% and prefill (128 ∧ depth-work 12.8M) hits 100% · Σdev ≈0.1%, with no age-cap tail** (the logic is scale-invariant, prefill 256 ↔ 128 isomorphic). Public validation is `puls-engine` (`sim/lifecycle.cpp` · `validation/test_*.cpp`, 189 checks).
+
+> **(2026-06 sim-faithfulness correction)** The earlier decode 100% / Σdev 0.38% came from a healing bug in the lifecycle sim (centering admit `ideal≈ctx_balance` collapsed the pool to all-mid, starving long requests to 0% → composition trivially perfect). With canonical healing (per-completion `ideal=hole`, like-for-like) + edge gating + prompt-independent realistic decode lengths + best-of-2000 infinite-pool emulation, the distribution-preserving (≈20/70/10) diverse pool gives decode ≈99.5% / Σdev ≈1.7% (age_cap 5) — consistent with the §6.4 / OPERATING_POINT §3 age-cap sweep cap5 spread (0.7%). Prefill stays 100% / Σdev ≈0.1%.
 
 ## 7. Cluster Scale: Per-Node Pool 100K-Centering Routing
 
 The §6 operating point (deployed 128: count 62 ∧ Σkv 6.15M; the 256-derivation is 123·12.3M) is hit by steering only when a node's in-flight pool is a **diverse pool centered at ~100K** (§6.4). On a single node admission maintains that pool, but at **server scale** (hundreds–thousands of nodes) the global arrival mean exceeds 100K, so per-node pools drift above 100K. This section covers the **cluster-layer routing** that prevents that drift and seats each node at the operating point.
 
-> **Scale note.** This §7 is at the **deployed 128 operating point** (the 256-derivation is 2× every value — OPERATING_POINT §1). Node pool **134 = 2 μ-batch (124) + surplus 10** · prefill 60 (OPERATING_POINT §4.1). Measurements = [global_scheduler.cpp](puls-engine/core/global_scheduler.cpp) `PREFILL=128 NODE_MAX=134`. **The gate-shed part of edge% is prefill-invariant** (depends on the gate threshold 100K+E; total edge with leftover is 256 2.68% · 128 2.17%); on2 · Σ-dev are looser than 256 because the batch is 62 (half of 123), so variance is larger (§6.8). Cold-start is closed by the deployed lifecycle's decode composition 100% (§6.8).
+> **Scale note.** This §7 is at the **deployed 128 operating point** (the 256-derivation is 2× every value — OPERATING_POINT §1). Node pool **134 = 2 μ-batch (124) + surplus 10** · prefill 60 (OPERATING_POINT §4.1). Measurements = [global_scheduler.cpp](puls-engine/core/global_scheduler.cpp) `PREFILL=128 NODE_MAX=134`. **The gate-shed part of edge% is prefill-invariant** (depends on the gate threshold 100K+E; total edge with leftover is 256 2.68% · 128 2.17%); on2 · Σ-dev are looser than 256 because the batch is 62 (half of 123), so variance is larger (§6.8). Cold-start is closed by the deployed lifecycle's decode composition ≈99.5% (§6.8).
 
 > **Independent of the PULS core.** This routing does not change the §6 batch-composition algorithm — it is a layer above that only decides *which requests go to which node*. The sim is PULS-independent: it checks only batch-composition accuracy (count · Σkv), not op-time. With no real traffic available it uses an assumed distribution **B** (short 20% [1–16K] / mid 70% [16–256K] / long 10% [256K–1M], mean ≈ 116K) — on the same footing as the README's honest disclosure.
 
@@ -535,7 +537,7 @@ batch A's forward pass finishes
 
 So the node pool keeps **134 decoders resident at mean 100K**, and steering *selects* 62 of them each iteration to form a batch. The per-node routing target is therefore **count 124–134, mean ≈ 100K** — once met, steering pulls two disjoint 6.15M batches and the reselection (72 → 62) also holds.
 
-> **The operating point is the 62-batch, not the 134-mean.** A node's 134-mean of 100K guarantees *capacity/count* (fit 124–134 under the 15M cap), not batch composition directly. That a 62-batch hits 6.15M is the job of the steering composer + pool diversity (§6.4, length-variance-agnostic). **The deployed operating-point Σdev = 0.38%** (the integrated lifecycle's live-KV-centering composer, §6.8). For reference, the global scheduler's *standalone* toxic-fit composer (puls-engine sim) is looser (62-batch averages ~98,827 tokens, Σ-dev ~1.84% — distribution-preserving without live-KV centering); since deployed healing uses the lifecycle's live-KV centering, **0.38%** is the operating-point value.
+> **The operating point is the 62-batch, not the 134-mean.** A node's 134-mean of 100K guarantees *capacity/count* (fit 124–134 under the 15M cap), not batch composition directly. That a 62-batch hits 6.15M is the job of the steering composer + pool diversity (§6.4, length-variance-agnostic). **The deployed operating-point decode Σdev ≈ 1.7%** (the integrated lifecycle's per-completion ideal=hole composer, §6.8). This is in line with the global scheduler's *standalone* toxic-fit composer (puls-engine sim, 62-batch averages ~98,827 tokens, Σ-dev ~1.84% — distribution-preserving), since the faithful deployed healing preserves the same diverse pool; **≈1.7%** is the operating-point value (decode ≈99.5% hit).
 
 ### 7.3 Cold-start: Edge Gating + Interleave Greedy
 
@@ -576,7 +578,7 @@ Because the pool is effectively infinite, each admit nearly hits its `ideal`, so
 
 ### 7.5 Measurement — E Sweep · Stability
 
-Assumed distribution B, Z = 256 nodes, cap 15M, on-point = compose(62, 6.15M ± 10%), deployed pool 134 (`PREFILL=128 NODE_MAX=134`).
+Assumed distribution B, Z = 256 nodes, cap 15M, on-point = compose(62, 6.15M), deployed pool 134 (`PREFILL=128 NODE_MAX=134`).
 
 **Cold-start E sweep** (edge% = fraction isolated to edge, on2% = disjoint 2-batch hit rate = the real meaning of the 124 floor):
 
@@ -588,7 +590,7 @@ Assumed distribution B, Z = 256 nodes, cap 15M, on-point = compose(62, 6.15M ± 
 | 10K | 1.53 | 77.7% | 12.7K | 73.4 |
 | 20K | 0.89 | 63.3% | 19.7K | 57.0 |
 
-E ↓ → tighter centering but more edge; E ↑ → less edge but mean drifts → count floor missed. **E = 1K adopted** — edge 2.17% for near-perfect centering. The cold-start on2 < 100% is not a composition failure but a *count-floor miss* on some nodes (~105 < 124), which healing fills (on2 is somewhat lower than 256's ~98% because the batch is 62 — §6.8; the deployed lifecycle still hits decode 100%).
+E ↓ → tighter centering but more edge; E ↑ → less edge but mean drifts → count floor missed. **E = 1K adopted** — edge 2.17% for near-perfect centering. The cold-start on2 < 100% is not a composition failure but a *count-floor miss* on some nodes (~105 < 124), which healing fills (on2 is somewhat lower than 256's ~98% because the batch is 62 — §6.8; the deployed lifecycle still hits decode ≈99.5%).
 
 **Healing stability** (per-completion, completion probability p, last 150 rounds averaged):
 
@@ -598,7 +600,7 @@ E ↓ → tighter centering but more edge; E ↑ → less edge but mean drifts �
 | 3% | 133 | 97.7% | 5.1K | 93.9 | 98,828 tokens / 1.89% |
 | 5% | 133 | 96.1% | 5.3K | 92.9 | 98,827 tokens / 1.84% |
 
-After healing engages, **drift is 0** (just-post-warmup ≈ last round). Per-completion **preserves the cold-start state (diverse, mean 100K)** — the node *mean* within ±4.7–5.3K of 100K (`|mean−100K|`, centering quality), on2 ~93%, count ~133 (refill only the freed seats, within 124–134). The table's `62-batch Σ-dev 1.84%` is **the global scheduler's standalone composer (puls-engine sim)** (no live-KV centering); the **deployed operating-point Σdev = 0.38%** — the integrated lifecycle's live-KV-centering composer (§6.8). on2 below 256's ~98% is the 62-batch variance (§6.8) too; the deployed lifecycle hits **decode 100% · Σdev 0.38%** via healing + steering.
+After healing engages, **drift is 0** (just-post-warmup ≈ last round). Per-completion **preserves the cold-start state (diverse, mean 100K)** — the node *mean* within ±4.7–5.3K of 100K (`|mean−100K|`, centering quality), on2 ~93%, count ~133 (refill only the freed seats, within 124–134). The table's `62-batch Σ-dev 1.84%` is **the global scheduler's standalone composer (puls-engine sim)** (distribution-preserving); the **deployed operating-point decode Σdev ≈ 1.7%** — the integrated lifecycle's per-completion ideal=hole composer (§6.8), in line with the standalone composer since both preserve the diverse pool. on2 below 256's ~98% is the 62-batch variance (§6.8) too; the deployed lifecycle hits **decode ≈99.5% · Σdev ≈1.7%** via healing + steering.
 
 **Toxic-fit validation — long-request (≥256K) preservation** (E = 1K, p = 3%, 300 rounds):
 

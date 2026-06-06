@@ -1936,13 +1936,13 @@ pre.code-block .var { color: #f9a8d4; }
 
         <ul>
           <li><b>★ Length-distribution-agnostic.</b> On a heavily varied pool, short + long requests are <i>combined</i> to hit both targets — the average is never read. Heavy / mixed / bimodal all converge. Even an age-cap-forced off-size request is corrected by steering (a forced long request lowers <code class="inline">ideal</code> → the next picks several short ones).</li>
-          <li><b>Operating parameters = target_count + target_kv + AGE_CAP.</b> The ±10% band [5.55M, 6.77M] is <i>not</i> a control value — it is a diagnostic idle-SLA label; steering hits the target so realized idle ≈ 0.</li>
+          <li><b>Operating parameters = target_count + target_kv + AGE_CAP.</b> Steering hits the target directly; <code class="inline">former</code> selects by nearest-to-<code class="inline">ideal</code>, not by any tolerance gate.</li>
           <li><b>AGE_CAP trade-off (sweep).</b> cap↑ → steering freedom↑ → spread↓ but latency↑; cap↓ → FIFO-like → fair/low-latency but spread↑. <code class="inline">cap1: 3.1%</code> · <code class="inline">cap2: 1.2%, wait ≤3</code> · <code class="inline">cap5: 0.7%, wait 5</code> · <code class="inline">cap∞: 0.8% but starvation (wait 37)</code> → <b>AGE_CAP = 5 adopted</b> (wait 5 ≈ 128 µs ≪ TBT, so latency-harmless; spread 0.7%).</li>
         </ul>
 
         <div class="callout note">
           <span class="callout-title">SUPERSEDED</span>
-          Earlier drafts adjusted admission per iteration from measured GPU/PIM idle fractions + a hysteresis deadband. That feedback model is replaced by this pool model: the scheduler hits <i>fixed targets</i> via steering rather than reacting to measured idle (deadband σ was unmeasurable on a self-authored framework). The ±10% band survives only as a diagnostic idle-SLA label. See <code class="inline">ARCHITECTURE.md §6.4</code>.
+          Earlier drafts adjusted admission per iteration from measured GPU/PIM idle fractions + a hysteresis deadband. That feedback model is replaced by this pool model: the scheduler hits <i>fixed targets</i> via steering rather than reacting to measured idle (deadband σ was unmeasurable on a self-authored framework). See <code class="inline">ARCHITECTURE.md §6.4</code>.
         </div>
 
       </div>

@@ -10,10 +10,10 @@ projection+prefill-attn / FFN=인스턴스 B)의 시간을 맞춰 인스턴스 �
 >   **2 disjoint 배치(on2)**가 (count, Σkv) 명중 가능함을 증명.
 > - [puls-engine/sim/lifecycle.cpp](puls-engine/sim/lifecycle.cpp) — **단일 노드 생애**:
 >   콜드스타트 후 steering·전이(프리필→디코드)·per-completion 힐링·age-cap 통합, 디코드(62∧6.15M)·
->   프리필(128∧12.8M) composition 유지를 증명(배포 128, 둘 다 **100% 명중**).
+>   프리필(128∧12.8M) composition 유지를 증명(배포 128, 디코드 **≈99.5% 명중**·프리필 **100%**).
 >
-> **★ 분산이 이미 작다** — Σdev 디코드 **0.38%**·프리필 **0.07%** (±10% 밴드 ≪, 실현 idle ~0).
-> on2 의 band-pass(밴드 안/밖)보다 *이 편차 크기*가 동작점의 실질 지표 (on2 미달분도 힐링이 메움).
+> **★ 분산이 이미 작다** — Σdev 디코드 **≈1.7%**·프리필 **≈0.1%** (실현 idle ~0).
+> *이 편차 크기*가 동작점의 실질 지표 (on2 미달분도 힐링이 메움).
 
 > **일반화 완료 (2026-06).** 본 문서의 수치(배포 prefill 128 → decode 62·6.15M·ctx≈100K,
 > Instance A ≈2.77 TB 등)는 **Llama-3 70B + B200 + HBM4 16단** 기준의 *구체 예시(canonical
@@ -42,8 +42,7 @@ projection+prefill-attn / FFN=인스턴스 B)의 시간을 맞춰 인스턴스 �
 
 > **제어 타깃 = (개수 123, decode-KV 12.3M)** 둘 — steering 이 이 점에 수렴(§3). prefill 은
 > (256 토큰, depth-합 25.6M). **배포 128 에선 절반 — (62, 6.15M)·(128, 12.8M)**; 알고리즘은
-> 동일(prefill 은 *스케일 knob*, §4). **±10% 밴드 [11.1M,13.5M] 는 *제어값이 아니라 진단용
-> idle-SLA 경계*** (밴드 폭 ≈ 허용 최악 idle; steering 은 타깃 명중하므로 실현 idle ~0).
+> 동일(prefill 은 *스케일 knob*, §4). steering 은 타깃을 직접 명중하므로 실현 idle ~0.
 > **512 대안**: 모든 값 2배 (X 101µs, batch 759, N_dec 247, decodeKV 24.7M, prefillKVwork
 > 51.2M, aggregate 60M→9.8TB). 메모리는 더 필요 — 선택 근거 §4 / §4.1.
 
@@ -54,11 +53,11 @@ projection+prefill-attn / FFN=인스턴스 B)의 시간을 맞춰 인스턴스 �
 
 | 자원 | 시간 함수 | 조건 (prefill **128** 배포; 256 도출은 2배) |
 |---|---|---|
-| PIM (A attention) | f(**Σ decode KV**) | Σkv ∈ [5.55M, 6.77M] (target 6.15M) |
+| PIM (A attention) | f(**Σ decode KV**) | Σkv → target 6.15M |
 | FFN (인스턴스 B) | f(**N_dec + prefill** = batch 토큰) | N_dec ≈ 62 (batch 190) |
-| GPU-A (A proj + prefill-attn) | proj(batch) + **Σ(chunk × depth)** | prefill 128, depth합 ∈ [11.5M, 14.1M] (target 12.8M) |
+| GPU-A (A proj + prefill-attn) | proj(batch) + **Σ(chunk × depth)** | prefill 128, depth합 → target 12.8M |
 
-세 시간이 ≈25.5µs 로 모이면 overlap(F2·F3) 시 idle ≈ 0. 허용 ±10% → 가장 한가한 자원 idle ≤ ~10%.
+세 시간이 ≈25.5µs 로 모이면 overlap(F2·F3) 시 idle ≈ 0.
 
 > **PIM 숨음.** 동작점에서 **t_pim ≤ t_gpuA**(prefill 256 측정 50.43 ≤ 52.89µs;
 > 128 배포는 ~절반, 비율·margin 불변) — PIM
@@ -94,10 +93,9 @@ window=3 순차 (2 active F2/F3 overlap + 1 전이 여유).
   명중. 헤비/혼합/bimodal 무엇이든 동작 — avg 를 안 봄, 두 타깃만 맞춤. **age-cap 으로 강제된
   off-size(긴/짧은) 요청도 steering 이 보정**(긴 거 강제 들어오면 ideal↓ → 다음 짧은 거 다수)
   해서 배치는 여전히 (62, 6.15M). 먼저 들어온 요청은 ≤AGE_CAP+1 batch 안에 반드시 처리.
-- **운영 파라미터 = target_count + target_kv + AGE_CAP 셋.** 상한·하한 밴드는 제어 아님 —
-  "closest-to-ideal" 자체가 오버슈트 방지(검증: upper 가드 유무로 변종 풀 결과 불변).
+- **운영 파라미터 = target_count + target_kv + AGE_CAP 셋.** "closest-to-ideal" 자체가
+  오버슈트 방지(검증: upper 가드 유무로 변종 풀 결과 불변).
 - **로컬 자기보정**: 긴 걸 골랐으면 다음 `ideal`↓ → 짧은 걸. 두 축 동시 수렴. 전역 분포 안 봄.
-- **[5.55M,6.77M] 밴드 = 진단용 idle-SLA 라벨**(±10%→idle≤10%), 제어값 아님.
 - **검증**:
   - [`puls-engine/validation/test_steering.cpp`](puls-engine/validation/test_steering.cpp): 정규·heavy-tail·short-heavy·bimodal 전부 **N123
     Σ12.3M spread ~1%** (FIFO 는 off-avg 22~30% 실패). 원소 = 짧+중+긴 혼합(예 47+47+29).
@@ -148,11 +146,8 @@ batch = 62 + 128 = **190 (> knee 128, 48% margin)** 이라 포화하나 256(379)
 MFU=0.6 고정이라 knee 실측 불가(silicon 부재, ARCH "MFU plateau" deferred calibration) → **배포 128,
 MFU 실측서 190 부족 판명 시 256 복귀**(256 batch 379 안전, 512 batch 759 더 안전·vLLM 수렴).
 
-**오차 밴드 = ±10% (진단용 idle SLA 경계, 제어값 아님).** 밴드 폭 ≈ 허용 최악 idle: ±10%→
-edge idle ~8.6~10.6%, ±15%→~12.4~15.4%. **steering 은 타깃(62, 6.15M)에 명중하므로 실현
-idle ~0** — 밴드는 "이 안이면 idle≤10%" 라는 진단 라벨일 뿐(former 가 밴드로 stop 하지 않음).
-밴드 폭은 σ 실측 불가라 deferred
-calibration; 10% 는 그 placeholder. (15%/20% 도 동작 가능 — calibration 때 조정.)
+**steering 은 타깃(62, 6.15M)에 직접 명중하므로 실현 idle ~0** — former 는 `ideal` 에 가장
+가까운 것을 고를 뿐, 어떤 허용 밴드로도 stop 하지 않는다.
 
 ## 4.1 HBM4 메모리 적합성 & **prefill 128 배포 동작점** (2026-06-03 라이프사이클 검증)
 
@@ -182,8 +177,15 @@ knob* 이므로 알고리즘은 그대로다.
 
 | 풀 | 크기 | 구성 | 명중 | Σdev |
 |---|---|---|---|---|
-| 디코드 | **134** | 124 (= 2 μ-batch × 62) + **잉여 10** | 100% | 0.38% |
-| 프리필 | **60** | 50 (depth-diversity 하한) + **마진 10** | 100% | 0.07% |
+| 디코드 | **134** | 124 (= 2 μ-batch × 62) + **잉여 10** | ≈99.5% | ≈1.7% |
+| 프리필 | **60** | 50 (depth-diversity 하한) + **마진 10** | 100% | ≈0.1% |
+
+> **(2026-06 sim 충실화 정정)** 이전 디코드 100%/Σdev 0.38% 는 lifecycle sim 의 힐링
+> 버그(센터링 admit `ideal≈ctx_balance` → 풀 all-mid 붕괴, 긴 요청 0% → composition trivial)에서
+> 나온 값이었다. canonical 힐링(per-completion `ideal=hole`, like-for-like) + 엣지 게이팅 +
+> prompt-무관 현실 decode 길이 + best-of-2000 무한풀 근사로 정정하면, 분포 보존(≈20/70/10)된
+> 다양 풀에서 디코드 ≈99.5%/Σdev≈1.7% (age_cap 5) — §3 sweep 의 cap5 spread(0.7%)와 정합.
+> 프리필 100%/Σdev≈0.1%.
 
 - **잉여 10 (디코드)**: hit 은 잉여 0에서도 100%; 잉여는 재구성(62+잉여→62) cherry-pick 자유도로
   *Σdev(idle 마진)* 를 조이는 knob — 늘릴수록 Σdev 가 줄다 **10 부근에서 plateau**.
@@ -191,13 +193,13 @@ knob* 이므로 알고리즘은 그대로다.
 - **마진 10 (프리필)**: 프리필 풀은 advance(~12/round)+잉여가 아니라 *0→prompt 깊이 파이프라인*.
   depth-diversity 하한 ~50(40이면 99.5%), 마진 10 = 60. 프리필은 잉여 *과대* 가 위험(age-cap
   flood, ARCH §7 참조)이지 과소가 아니라, 하한 근처가 메모리 최소이자 안전.
-- **age-cap = 5**: 정의상 wait ≤ 5 batch 보장(공정성), 그 composition 비용이 ~0(위 100% 명중)
+- **age-cap = 5**: 정의상 wait ≤ 5 batch 보장(공정성), 그 composition 비용이 ~0(위 디코드 ≈99.5% 명중)
   임을 라이프사이클서 실측. §3 sweep 도 cap5 = spread knee(0.7%) — 옛 node-scheduler 2 는
   레이턴시 보수적 선택이었고 대기 5 ≈ 128µs ≪ TBT 라 이제 **5 로 통일**.
 
 **검증 = [puls-engine/sim/lifecycle.cpp](puls-engine/sim/lifecycle.cpp)** — 콜드스타트(KV
 센터링)→프리필 steering→프리필→디코드 종속성 전이→디코드 steering→per-completion 힐링→age-cap
-을 한 sim 에 통합, **종속성·age-cap 넣고도 디코드(62 ∧ 6.15M)·프리필(128 ∧ 12.8M) 동시 100% 명중**.
+을 한 sim 에 통합, **종속성·age-cap 넣고도 디코드(62 ∧ 6.15M) ≈99.5%·프리필(128 ∧ 12.8M) 100% 명중**.
 로직(steering·greedy·healing·age-cap·KV센터링)은 불변, 동작점 상수 6개만 절반 스케일.
 
 > **MFU caveat (deferred calibration).** prefill 128 → FFN batch = 62 + 128 = **190 토큰**. 포화
@@ -234,7 +236,7 @@ knob* 이므로 알고리즘은 그대로다.
 > **\*** 128 의 spread 는 sweep B 재측정이 아니라 *프리필 무관*(§4: prefill 약분돼 사라짐 →
 > 균형 ctx·spread 가 prefill 에 비의존)이라 256 과 동형으로 둔 값. 128 동작점의 *composition*
 > 은 [puls-engine/sim/lifecycle.cpp](puls-engine/sim/lifecycle.cpp) 통합 sim(§4.1)이
-> 종속성·age-cap 포함 **디코드(62∧6.15M)·프리필(128∧12.8M) 동시 100% 명중**(Σdev 0.38%/0.07%)으로 검증.
+> 종속성·age-cap 포함 **디코드(62∧6.15M) ≈99.5%·프리필(128∧12.8M) 100% 명중**(Σdev ≈1.7%/≈0.1%)으로 검증.
 
 → 균형 ctx 가 prefill 무관 100K 고정(=하드웨어 상수). prefill 은 X·배치규모만 스케일.
 (옛 REPORT 의 "512만 균형, 1024+ 실패"는 decode-KV 를 25M 에 고정한 채 prefill 만 올린 측정
@@ -261,5 +263,5 @@ knob* 이므로 알고리즘은 그대로다.
 **한 줄 요약**: prefill **128(배포)** → FFN **190토큰** → **decode (개수 62 AND KV합 6.15M) 동시
 타깃** (도출 기준 256 은 379·123·12.3M, 모두 2배). 스케줄러는 KV 길이를 알고 **로컬 그리디
 steering**(매 step 필요한 길이에 가장 가까운 디코더 선택)으로 그 두 타깃에 수렴 — 변종 풀
-spread~1%·통합 lifecycle 100% 검증(§4.1, age-cap 5). ctx 100K 는 하드웨어 상수, prefill 은 스케일
-knob(**128 배포** = HBM4 64 스택 적합 / 256 MFU 안전판). 밴드는 진단용 idle-SLA(제어값 아님).
+spread~1%·통합 lifecycle 디코드 ≈99.5% 검증(§4.1, age-cap 5). ctx 100K 는 하드웨어 상수, prefill 은 스케일
+knob(**128 배포** = HBM4 64 스택 적합 / 256 MFU 안전판).

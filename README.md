@@ -1,6 +1,6 @@
 # PULS — PIM-Unified LLM Serving
 
-> ✅ **Scheduler logic — generalized, implemented & validated** ([`puls-engine`](puls-engine/CONTRACT.md), 189 checks). The operating point is *derived* from the model · GPU spec — Fixed: HBM4 · SP-PIM · KV FP8 / Variable: model · GPU spec · prefill · die-stack · weight precision. Composition hits 100% at the balance point. Deployed numbers · Σdev · cluster-scale validation: see [Runtime Validation](#runtime-validation).
+> ✅ **Scheduler logic — generalized, implemented & validated** ([`puls-engine`](puls-engine/CONTRACT.md), 189 checks). The operating point is *derived* from the model · GPU spec — Fixed: HBM4 · SP-PIM · KV FP8 / Variable: model · GPU spec · prefill · die-stack · weight precision. Composition hits the balance point (decode ≈99.5%, prefill 100%). Deployed numbers · Σdev · cluster-scale validation: see [Runtime Validation](#runtime-validation).
 
 **Scheduler-aware co-design of HBM-PIM and production LLM serving stack.**
 
@@ -113,7 +113,7 @@ Full body — [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 PULS is **not confined to a specific target workload**, because batch composition is *length-distribution-agnostic* steering — the former never looks at the pool's mean length; it combines short and long requests to hit only the four operating-point targets (deployed 128: decode count 62 ∧ Σkv 6.15M, prefill 128 tokens ∧ depth-work 12.8M; OPERATING_POINT §4.1). Hence **any distributed-server-scale workload with decode and prefill abundant in the pool** — short, long, mixed, or bimodal length distribution alike — converges to the operating point. (The balance ctx ~100K is merely the midpoint used to *derive* the KV cap, not a value imposed on the workload.)
 
-- **Condition for reaching the operating point (idle ≈ 0)** = decode and prefill are *abundant* in the pool (the large standing decode population + continuous prefill of high-concurrency distributed serving). Real-server steady state is exactly this regime. Demonstrated by an integrated sim with **2 active μ-batch + dependency · age-cap** composing to the operating point at **composition 100% · Σdev ≈0.38%(decode)/0.06%(prefill)** — see [Runtime Validation](#runtime-validation).
+- **Condition for reaching the operating point (idle ≈ 0)** = decode and prefill are *abundant* in the pool (the large standing decode population + continuous prefill of high-concurrency distributed serving). Real-server steady state is exactly this regime. Demonstrated by an integrated sim with **2 active μ-batch + dependency · age-cap** composing to the operating point at **decode ≈99.5% · Σdev ≈1.7% / prefill 100% · Σdev ≈0.1%** — see [Runtime Validation](#runtime-validation).
 - **When the pool is thin** (low load, short-decode only), PIM or GPU-A idling is *physically normal* (not something to fix) — the operating point is the balance point that holds when the pool is abundant.
 
 ## Acceleration Sources Summary
@@ -159,7 +159,7 @@ Calibrated projection of the four acceleration sources (Aux1·Aux2·F3·F5) on L
 |---|---|---|
 | Aux1 | Mixed batching weight reuse | **2.0×** (closed-form), 1.97× (Colab T4 measured) |
 | Aux2 | KV bus traffic reduction | **4.95× speedup, 79.8% reduction** |
-| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep); the integrated lifecycle sim composes **2 active μ-batches to the operating point, composition 100% · Σdev ≈0.38%(decode)/0.06%(prefill) (balance manifest)** — see [Runtime Validation](#runtime-validation) |
+| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep); the integrated lifecycle sim composes **2 active μ-batches to the operating point, decode ≈99.5% · Σdev ≈1.7% / prefill 100% · Σdev ≈0.1% (balance manifest)** — see [Runtime Validation](#runtime-validation) |
 | F5 | Channel-independent vs lock-step | **5.15× speedup** (KV variance dominant) |
 
 ### Aggregate Speedup
@@ -183,8 +183,10 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (including F5)
 
 | 2 active μ-batch (re-composed on completion) | operating-point target | hit | Σdev |
 |---|---|---|---|
-| **decode** | 62 ∧ Σkv 6.15M | **100%** | **0.38%** |
-| **prefill** | 128 tokens ∧ depth-work 12.8M | **100%** | **0.06%** |
+| **decode** | 62 ∧ Σkv 6.15M | **≈99.5%** | **≈1.7%** |
+| **prefill** | 128 tokens ∧ depth-work 12.8M | **100%** | **≈0.1%** |
+
+> **(2026-06 sim-faithfulness correction)** The earlier decode 100% / Σdev 0.38% came from a healing bug in the lifecycle sim (centering admit `ideal≈ctx_balance` collapsed the pool to all-mid, starving long requests to 0% → composition trivially perfect). With the canonical healing (per-completion `ideal=hole`, like-for-like) + edge gating + prompt-independent realistic decode lengths + best-of-2000 infinite-pool emulation, on a distribution-preserving (≈20/70/10) diverse pool the deployment point (count 62, age_cap 5) gives decode ≈99.5% / Σdev ≈1.7% — consistent with the §3 age-cap sweep's cap5 spread (0.7%). Prefill stays 100% / Σdev ≈0.1%.
 
 Interpretation:
 

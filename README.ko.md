@@ -1,6 +1,6 @@
 # PULS — PIM-Unified LLM Serving
 
-> ✅ **스케줄러 로직 — 일반화·구현·검증 완료** ([`puls-engine`](puls-engine/CONTRACT.md), 189 checks). 동작점은 모델·GPU 스펙에서 *도출*된다 — 고정: HBM4·SP-PIM·KV FP8 / 변수: 모델·GPU 스펙·prefill·die-stack·가중치 정밀도. 균형점에서 composition 100% 명중. 배포 수치·Σdev·클러스터 스케일 검증은 [Runtime Validation](#runtime-validation).
+> ✅ **스케줄러 로직 — 일반화·구현·검증 완료** ([`puls-engine`](puls-engine/CONTRACT.md), 189 checks). 동작점은 모델·GPU 스펙에서 *도출*된다 — 고정: HBM4·SP-PIM·KV FP8 / 변수: 모델·GPU 스펙·prefill·die-stack·가중치 정밀도. 균형점에서 composition 명중(디코드 ≈99.5%, 프리필 100%). 배포 수치·Σdev·클러스터 스케일 검증은 [Runtime Validation](#runtime-validation).
 
 **Scheduler-aware co-design of HBM-PIM and production LLM serving stack.**
 
@@ -110,7 +110,7 @@
 
 PULS 는 **특정 타겟 워크로드에 한정되지 않는다.** 배치 구성이 *길이분산 무관* steering 이기 때문이다 — former 는 풀의 평균 길이를 보지 않고, 짧은·긴 요청을 **조합**해 동작점 네 타깃(배포 128: decode 개수 62 ∧ Σkv 6.15M, prefill 128 토큰 ∧ depth-work 12.8M; OPERATING_POINT §4.1)만 맞춘다. 따라서 **decode 와 prefill 이 풀에 풍부한 어떤 분산-서버-스케일 워크로드든** — 길이 분포가 짧든 길든 혼합이든 bimodal 이든 — 동작점에 수렴한다 (균형 ctx ~100K 는 KV 캡 유도용 중간값일 뿐, 워크로드 강제값 아님).
 
-- **동작점(idle≈0) 도달 조건** = 풀에 decode·prefill 이 *풍부* (고동시성 분산 서빙의 대량 상주 decode 풀 + 지속 prefill). 실서버 정상상태가 정확히 이 영역. [Runtime Validation](#runtime-validation) 에서 **2 active μ-batch + 종속성·age-cap** 를 한 sim 에 넣고 동작점에 구성, composition **100% 명중·Σdev ≈0.38%(decode)/0.06%(prefill)** 로 실증.
+- **동작점(idle≈0) 도달 조건** = 풀에 decode·prefill 이 *풍부* (고동시성 분산 서빙의 대량 상주 decode 풀 + 지속 prefill). 실서버 정상상태가 정확히 이 영역. [Runtime Validation](#runtime-validation) 에서 **2 active μ-batch + 종속성·age-cap** 를 한 sim 에 넣고 동작점에 구성, **디코드 ≈99.5% 명중·Σdev ≈1.7% / 프리필 100%·Σdev ≈0.1%** 로 실증.
 - **풀이 얕으면**(저부하·짧은 decode 만) PIM 또는 GPU-A 가 노는 건 *물리적 정상*(고칠 대상 아님) — 동작점은 풀이 풍부할 때의 균형점이다.
 
 ## 가속 Source 요약
@@ -154,7 +154,7 @@ Llama-3 70B + DGX B200 + HBM4 substrate 위 4 가속 source (Aux1·Aux2·F3·F5)
 |---|---|---|
 | Aux1 | Mixed batching 가중치 재사용 | **2.0×** (closed-form), 1.97× (Colab T4 측정) |
 | Aux2 | KV bus traffic 감소 | **4.95× speedup, 79.8% 감소** |
-| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep); 통합 lifecycle sim 이 **2 active μ-batch 를 동작점에 구성, composition 100%·Σdev ≈0.38%(decode)/0.06%(prefill) (balance 발현)** — [Runtime Validation](#runtime-validation) |
+| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep); 통합 lifecycle sim 이 **2 active μ-batch 를 동작점에 구성, 디코드 ≈99.5%·Σdev ≈1.7% / 프리필 100%·Σdev ≈0.1% (balance 발현)** — [Runtime Validation](#runtime-validation) |
 | F5 | Channel-independent vs lock-step | **5.15× speedup** (KV variance dominant) |
 
 ### Aggregate Speedup
@@ -178,8 +178,15 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (F5 포함)**.
 
 | 2 active μ-batch (완료시 재구성) | 동작점 타깃 | 명중 | Σdev |
 |---|---|---|---|
-| **decode** | 62 ∧ Σkv 6.15M | **100%** | **0.38%** |
-| **prefill** | 128 토큰 ∧ depth-work 12.8M | **100%** | **0.06%** |
+| **decode** | 62 ∧ Σkv 6.15M | **≈99.5%** | **≈1.7%** |
+| **prefill** | 128 토큰 ∧ depth-work 12.8M | **100%** | **≈0.1%** |
+
+> **(2026-06 sim 충실화 정정)** 이전 디코드 100%/Σdev 0.38% 는 lifecycle sim 의 힐링
+> 버그(센터링 admit `ideal≈ctx_balance` → 풀 all-mid 붕괴, 긴 요청 0% → composition trivial)에서
+> 나온 값이었다. canonical 힐링(per-completion `ideal=hole`, like-for-like) + 엣지 게이팅 +
+> prompt-무관 현실 decode 길이 + best-of-2000 무한풀 근사로 정정하면, 분포 보존(≈20/70/10)된
+> 다양 풀에서 디코드 ≈99.5%/Σdev≈1.7% (age_cap 5) — §3 sweep 의 cap5 spread(0.7%)와 정합.
+> 프리필 100%/Σdev≈0.1%.
 
 해석:
 
