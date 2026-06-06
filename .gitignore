@@ -1,5 +1,6 @@
 # Local-only working area (not for public exposure)
 _local/
+ideas/
 
 # OS
 .DS_Store
