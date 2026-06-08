@@ -1,6 +1,6 @@
 # Local-only working area (not for public exposure)
 _local/
-ideas/
+# ideas/ — 이제 추적(pre-positioning 프로토타입). build 바이너리는 아래 `build/` 로 계속 제외.
 
 # OS
 .DS_Store
