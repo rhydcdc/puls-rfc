@@ -1587,7 +1587,48 @@ pre.code-block .var { color: #f9a8d4; }
 }
 #sec-7 .disclosure-val b { color: #111827; }
 
-/* ============================ Responsive (basic) ============================ */
+/* ============================ §C Cluster Scheduler KPI cards ============================ */
+#sec-cluster .kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+  margin: 14px 0 18px 0;
+}
+#sec-cluster .kpi-card {
+  border: 1px solid var(--color-grid);
+  border-radius: 5px;
+  background: white;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+#sec-cluster .kpi-card .kpi-label {
+  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-subtle);
+}
+#sec-cluster .kpi-card .kpi-value {
+  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  font-size: 16px;
+  font-weight: 700;
+  color: #111827;
+  line-height: 1.15;
+}
+#sec-cluster .kpi-card .kpi-sub {
+  font-size: 10px;
+  color: var(--color-muted);
+  line-height: 1.4;
+}
+#sec-cluster .kpi-card.good { border-color: #86efac; background: #f0fdf4; }
+#sec-cluster .kpi-card.good .kpi-value { color: #166534; }
+#sec-cluster .kpi-card.accent { border-color: var(--color-pim); background: #fffaf0; }
+#sec-cluster .kpi-card.accent .kpi-value { color: #92400e; }
+
+/* Responsive (basic) */
 @media (max-width: 900px) {
   .layout { grid-template-columns: 1fr; }
   .sidebar { position: relative; height: auto; }
@@ -1609,7 +1650,7 @@ pre.code-block .var { color: #f9a8d4; }
       <li><a data-target="sec-2"><span class="nav-num">2</span>Invariants &amp; Dispatch DAG</a></li>
       <li><a data-target="sec-3"><span class="nav-num">3</span>Scheduler Usage</a></li>
       <li><a data-target="sec-4"><span class="nav-num">4</span>The Operating Point</a></li>
-      <li><a data-target="sec-cluster"><span class="nav-num">5</span>Global Scheduler</a></li>
+      <li><a data-target="sec-cluster"><span class="nav-num">5</span>Cluster Scheduler (C)</a></li>
       <li><a data-target="sec-5"><span class="nav-num">6</span>Example Dispatch Trace</a></li>
       <li><a data-target="sec-6"><span class="nav-num">7</span>Acceleration Sources</a></li>
       <li><a data-target="sec-7"><span class="nav-num">8</span>Results</a></li>
@@ -1948,39 +1989,64 @@ pre.code-block .var { color: #f9a8d4; }
       </div>
     </section>
 
-    <!-- ======== Section: Global Scheduler (cluster routing) ======== -->
+    <!-- ======== Section: Cluster Scheduler (C) ======== -->
     <section id="sec-cluster" class="doc-section">
       <div class="section-header">
         <div class="section-eyebrow">§ 7 — CLUSTER ROUTING</div>
-        <h1 class="section-title">Global Scheduler — Per-Node 100K Centering</h1>
-        <div class="section-lede">The balanced operating point exists only when a node's in-flight pool is centered at <b>mean ~100K</b> — only then does the local steering (§4) hit (62 ∧ Σkv 6.15M). At server scale (hundreds–thousands of nodes) the global arrival mean drifts above 100K, so a server-level <b>global scheduler</b> routes requests to seat each node at that operating point.</div>
+        <h1 class="section-title">Cluster Scheduler (C) — Per-Node 100K Centering</h1>
+        <div class="section-lede">The balanced operating point exists only when a node's in-flight pool is centered at <b>mean ~100K</b> — only then does the local steering (§4) hit (decode <b>62</b> ∧ Σkv <b>6.15M</b> at prefill 128). At server scale (hundreds–thousands of nodes) the global arrival mean drifts above 100K, so a cluster-level scheduler <b>C</b> routes requests to seat each node at that operating point, with a global age-cap for inter-node FIFO fairness and an on-node 3-tier multi-turn KV cache.</div>
       </div>
 
       <div class="prose">
 
         <h2 class="h-sub">Why it exists</h2>
-        <p>Without centering, each node's pool tracks the global arrival mean and drifts high: a node then fits fewer decoders, so a batch <b>falls below count 62 while Σkv rises above 6.15M</b> — both control targets break together and idle blows up. The global scheduler keeps every node centered at 100K so the per-node steering can compose the operating point.</p>
+        <p>Without centering, each node's pool tracks the global arrival mean and drifts high: a node then fits fewer decoders, so a batch <b>falls below count 62 while Σkv rises above 6.15M</b> — both control targets break together and idle blows up. <b>C</b> keeps every node centered at 100K (measured <code class="inline">poolMean 117K</code>) so the per-node steering can compose the operating point.</p>
 
-        <h2 class="h-sub">Core logic</h2>
+        <h2 class="h-sub">Design = node mechanism + (1) global age-cap + (2) 3-tier KV cache</h2>
+        <p>C is the node mechanism — <b>resident surplus</b> + <b>per-iteration steering re-selection</b> + <b>per-completion healing</b> — plus two cluster-level additions:</p>
         <ul>
-          <li><b>Edge nodes + greedy cold-start (startup).</b> Sort arrivals descending and shed the longest to dedicated <b>edge nodes</b> until the remaining mean ≤ 100K + E; then interleave-greedy pack the rest (each into the node whose mean lands closest to 100K). Long + short interleave so <b>count · cap · mean-100K</b> are satisfied at once.</li>
-          <li><b>Per-node steering + age-cap 5 (in batch).</b> On each centered node, the §4 local-greedy steering composes (62, 6.15M); the age-cap (5) guarantees fairness — bounded wait, no starvation.</li>
-          <li><b>Greedy healing (operation).</b> On each completion, refill the freed hole <b>like-for-like</b> (<code class="inline">ideal = hole</code> = toxic-fit): a long leaves → a long enters. This preserves the diverse centered pool — no eviction, no inter-node swap.</li>
+          <li><b>(1) Global age-cap (inter-node FIFO fairness).</b> A node requests <code class="inline">ideal = hole</code>; the global queue returns a near-fit, but any request older than <code class="inline">global_age_cap</code> is <b>force-routed</b> regardless of fit. Bounded wait, no starvation across nodes.</li>
+          <li><b>(2) On-node multi-turn 3-tier KV cache.</b> <b>HBM hit / SSD reload / recompute.</b> When a conversation's <code class="inline">length &gt; 16000</code> and residual HBM fits, its KV is cached in HBM; <code class="inline">evict_age</code> idle turns demote it (SSD at <code class="inline">offload_bw</code>), <code class="inline">gone_age</code> turns trigger recompute.</li>
         </ul>
 
-        <h2 class="h-sub">Confirmed numbers (deployed 128)</h2>
+        <h2 class="h-sub">C config (locked)</h2>
         <table class="doc-table">
-          <thead><tr><th style="width: 240px;">what</th><th>result</th></tr></thead>
+          <thead><tr><th style="width: 200px;">parameter</th><th style="width: 120px;">value</th><th>role</th></tr></thead>
           <tbody>
-            <tr><td>Cold-start edge cost</td><td><b>~2.2%</b> shed to edge → normal nodes centered at mean 100K</td></tr>
-            <tr><td>Batch composition (the operating point)</td><td>decode <b>100%</b> hit · Σdev <b>0.38%</b> · prefill 100% · Σdev 0.07%</td></tr>
-            <tr><td>Lifecycle stability (healing)</td><td><b>drift 0</b> — long-request fraction preserved 8.2% → 7.4% (toxic-fit), held indefinitely</td></tr>
+            <tr><td><code>decode_surplus</code></td><td class="mono"><b>25</b></td><td>resident surplus per node → <code>decode_pool</code> <b>149</b></td></tr>
+            <tr><td><code>global_age_cap</code></td><td class="mono"><b>25</b></td><td>inter-node FIFO cap — oldest-beyond-cap force-routed</td></tr>
+            <tr><td><code>eligibility</code></td><td class="mono"><b>16000</b></td><td>HBM-cache threshold (mid · long): <code>length &gt; 16000</code></td></tr>
+            <tr><td><code>evict_age</code></td><td class="mono"><b>200</b></td><td>idle turns before HBM → SSD demotion</td></tr>
+            <tr><td><code>contention β</code></td><td class="mono"><b>0.5</b></td><td>conservative PIM-exposure penalty weight (β-robust)</td></tr>
+            <tr><td><code>offload_bw</code></td><td class="mono"><b>2e7</b></td><td>SSD reload bandwidth ≈ 10 GB/s</td></tr>
+            <tr><td><code>node_age_cap</code></td><td class="mono"><b>5</b></td><td>on-node steering fairness cap</td></tr>
           </tbody>
         </table>
 
+        <h2 class="h-sub">C KPI (measured)</h2>
+        <div class="kpi-grid">
+          <div class="kpi-card good"><span class="kpi-label">Σdev</span><span class="kpi-value">1.35%</span><span class="kpi-sub">worst 16.9%</span></div>
+          <div class="kpi-card"><span class="kpi-label">TBT mean</span><span class="kpi-value">2056 µs</span><span class="kpi-sub">p99 2191 µs</span></div>
+          <div class="kpi-card"><span class="kpi-label">TTFT mean</span><span class="kpi-value">0.74M µs</span><span class="kpi-sub">p99 8.94M µs</span></div>
+          <div class="kpi-card good"><span class="kpi-label">SLO goodput</span><span class="kpi-value">3.79M</span><span class="kpi-sub">tok/s (TBT goodput 3.90M)</span></div>
+          <div class="kpi-card good"><span class="kpi-label">TTFT-met</span><span class="kpi-value">97.1%</span><span class="kpi-sub">within SLO</span></div>
+          <div class="kpi-card good"><span class="kpi-label">cache HBM-hit</span><span class="kpi-value">92.0%</span><span class="kpi-sub">3-tier multi-turn</span></div>
+          <div class="kpi-card accent"><span class="kpi-label">PIM-exposed</span><span class="kpi-value">73.5%</span><span class="kpi-sub">expo 20µs/μbatch ≈ 0.25µs/layer ≈ 1% of 25.5µs</span></div>
+          <div class="kpi-card"><span class="kpi-label">max_wait</span><span class="kpi-value">26</span><span class="kpi-sub">rounds · forced 1626</span></div>
+          <div class="kpi-card"><span class="kpi-label">poolMean</span><span class="kpi-value">117K</span><span class="kpi-sub">centered ~100K</span></div>
+        </div>
+
+        <h2 class="h-sub">Contention · dependency TBT model</h2>
+        <p>Per-layer TBT folds the GPU·PIM dependency and the bus-contention penalty into one recurrence, summed over <b>80 layers</b>:</p>
+        <pre class="code-block"><span class="cmt"># per-layer instance-A cost (GPU attention + PIM decode, with contention)</span>
+<span class="var">instance_a</span> = max(<span class="var">t_pim</span>, <span class="var">t_gpu_a</span>) + <span class="var">β</span>·max(0, <span class="var">t_pim</span> − <span class="var">t_gpu_a</span>)
+<span class="cmt"># TBT = the slower of instance-A and the FFN lane, across all layers</span>
+<span class="var">TBT</span> = max(<span class="var">instance_a</span>, <span class="var">t_ffn</span>) × <span class="var">80</span>   <span class="cmt"># layers</span></pre>
+        <p><b>Contention-free</b> ⟺ <code class="inline">t_pim ≤ t_gpu_a</code> — the PIM decode read hides entirely in the GPU-A shadow, so the penalty term vanishes. <code class="inline">β = 0.5</code> is the <b>conservative</b> assumption label; C is <b>β-robust</b> (goodput stays fixed across the full β range). The operating point sits on the <b>PIM-hiding edge</b> (derive balances <code class="inline">t_pim ≈ t_gpu_a</code>), so exposure is frequent (<b>73.5%</b>) but each exposure costs only <b>~1%</b> of the <b>~25.5 µs</b> per-layer budget (≈ 0.25 µs/layer) — yielding TBT mean <b>2056 µs</b> against the ~2.0 ms (80×25.5µs) budget.</p>
+
         <div class="callout note">
-          <span class="callout-title">TWO-SIM SPLIT</span>
-          The multi-node distribution (cold-start + healing) is proven by <code class="inline">../puls-engine/core/global_scheduler.cpp</code> (<b>256 nodes</b>; healing over the last 150 of 300 rounds); the single-node lifecycle (steering · prefill→decode transition · healing · age-cap 5, both compositions at 100%) by <code class="inline">../puls-engine/sim/lifecycle.cpp</code> (<b>16 nodes</b>; last 500 of 1000 rounds = 8,000 node-rounds). Together they are <code class="inline">ARCHITECTURE.md §7</code>.
+          <span class="callout-title">OPERATING POINT</span>
+          Invariant across this section: <b>Llama-3 70B + DGX B200</b>, prefill <b>128</b> → decode <b>62</b>, Σ KV <b>6.15M</b>, balanced ctx <b>~100K</b>, ~25.5 µs/layer → TBT ~2.0 ms over 80 layers.
         </div>
 
       </div>
@@ -2491,8 +2557,8 @@ pre.code-block .var { color: #f9a8d4; }
         <table class="result-table">
           <thead><tr><th>2 active μ-batch</th><th>operating-point target</th><th>hit</th><th>Σdev</th></tr></thead>
           <tbody>
-            <tr><td class="mono"><b>decode</b></td><td class="mono">62 ∧ Σkv 6.15M</td><td class="mono"><b>100%</b></td><td class="mono"><b>0.38%</b></td></tr>
-            <tr><td class="mono"><b>prefill</b></td><td class="mono">128 ∧ depth-work 12.8M</td><td class="mono"><b>100%</b></td><td class="mono"><b>0.07%</b></td></tr>
+            <tr><td class="mono"><b>decode</b></td><td class="mono">62 ∧ Σkv 6.15M</td><td class="mono"><b>≈99.5%</b></td><td class="mono"><b>≈1.2%</b></td></tr>
+            <tr><td class="mono"><b>prefill</b></td><td class="mono">128 ∧ depth-work 12.8M</td><td class="mono"><b>100%</b></td><td class="mono"><b>≈0.1%</b></td></tr>
           </tbody>
         </table>
 

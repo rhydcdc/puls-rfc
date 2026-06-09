@@ -36,12 +36,12 @@ struct OperatingPoint {
 
 // derive 의 튜닝 knob (CONTRACT §4 채택값 = 기본값). 문서 수치, 추정 아님.
 struct DeriveOptions {
-    int    decode_surplus        = 10;    // 잉여(재구성 자유도) — OP §4.1
+    int    decode_surplus        = 25;    // 잉여(재구성 자유도) — C 동작점(캐시 ON U-knee, OP §4.1)
     int    prefill_pool          = 60;    // depth-diversity 하한 50 + 마진 10
     int    age_cap               = 5;     // OP §3 sweep knee
     double idle_band             = 0.10;  // 진단 밴드 placeholder
     double prefill_avg_depth_frac= 0.56;  // prefill in-flight 평균 depth/ctx (OP §4.1 ~56K)
-    int    node_max_surplus      = 10;    // node_max = node_min + 이 잉여
+    int    node_max_surplus      = 10;    // node_max = node_min + 이 잉여 (라우팅 목표; 노드가 decode_pool 까지 로컬 top-up)
     double edge_band_tokens      = 1000;  // E = 1K (OP §7.5 채택)
     double footprint_headroom    = 1.22;  // footprint 캡 여유 (OP §4.1: 30M/24.6M = 15M/12.3M)
     // HBM die-stack 높이(dies) — 4-die SID 단위로만 쌓임(4의 배수). 실용 = 12(3 SID)·16(4 SID).

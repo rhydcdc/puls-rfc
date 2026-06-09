@@ -20,6 +20,15 @@ add_library(puls_core STATIC
 )
 target_include_directories(puls_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
+# ── 흡수된 클러스터 레이어(C): 글로벌 age-cap 큐 + 멀티턴 3-tier 캐시 + pre-position + 멀티턴 워크로드 ──
+add_library(puls_cluster STATIC
+  scheduler/queue.cpp
+  scheduler/cache.cpp
+  scheduler/preposition.cpp
+  sim/workload_mt.cpp
+)
+target_link_libraries(puls_cluster PUBLIC puls_core)
+
 # ── 실 서빙 런타임 드라이버 ─────────────────────────────────────────────────
 add_executable(puls_runtime runtime/main_runtime.cpp runtime/runtime.cpp)
 target_link_libraries(puls_runtime PRIVATE puls_core)
@@ -40,6 +49,12 @@ target_link_libraries(puls_max_model PRIVATE puls_core)
 add_executable(puls_efficiency analysis/efficiency.cpp)
 target_link_libraries(puls_efficiency PRIVATE puls_core)
 
+# 클러스터 드라이버: C(채택) / A(ablation) / B(pre-position 대조군) — derive 동작점 위 실 KPI.
+foreach(d csched baseline prepo)
+  add_executable(${d} sim/${d}.cpp)
+  target_link_libraries(${d} PRIVATE puls_cluster)
+endforeach()
+
 # ── 검증 (모듈별 + 통합) — ctest ────────────────────────────────────────────
 enable_testing()
 set(PULS_TESTS
@@ -56,5 +71,19 @@ set(PULS_TESTS
 foreach(t ${PULS_TESTS})
   add_executable(${t} validation/${t}.cpp)
   target_link_libraries(${t} PRIVATE puls_core)
+  add_test(NAME ${t} COMMAND ${t})
+endforeach()
+
+# 클러스터 레이어 검증: 큐 강제 라우팅 · 3-tier 캐시 · 컨텐션 TBT · pre-position · 멀티턴 워크로드.
+set(PULS_CLUSTER_TESTS
+  test_queue
+  test_cache
+  test_kpi
+  test_preposition
+  test_workload_mt
+)
+foreach(t ${PULS_CLUSTER_TESTS})
+  add_executable(${t} validation/${t}.cpp)
+  target_link_libraries(${t} PRIVATE puls_cluster)
   add_test(NAME ${t} COMMAND ${t})
 endforeach()
