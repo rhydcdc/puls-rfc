@@ -136,9 +136,10 @@ core/
 - `OperatingPoint{ctx_balance, decode_count_target, kv_operating_target, prefill_tokens,
   prefill_kv_work_target, ffn_batch, balance_time_us, decode_pool, prefill_pool, age_cap,
   idle_band, node_max, node_min, node_footprint_cap, edge_band, instance_a_tb, hbm_fits}`
-- `DeriveOptions{decode_surplus=10, prefill_pool=60, age_cap=5, idle_band=0.10,
+- `DeriveOptions{decode_surplus=25, prefill_pool=60, age_cap=5, idle_band=0.10,
   prefill_avg_depth_frac=0.56, node_max_surplus=10, edge_band_tokens=1000,
   footprint_headroom=1.22, hbm_stack_height=16}`
+  - `decode_surplus=25` = **C 표준 동작점**(캐시 ON U-knee → decode_pool = 2×62+25 = **149** 상주, 재선택 자유도). `node_max_surplus=10` 은 글로벌 라우팅 목표(**node_max 134**)로 별개 — 노드가 decode_pool 149 까지 로컬 healing 으로 top-up(node_max=149 로 올리면 forced 폭발, 측정 확인).
 
 ### 5.3 op-time (optime.h) — 모든 모듈이 이걸로만 시간을 잰다
 ```
@@ -246,9 +247,10 @@ hbm_fits          = instance_a_tb ≤ hbm_capacity_tb
 
 ## 8. 빌드
 
-- C++17, CMake. `core` static lib + `runtime`/`sim` 실행파일 + `validation` ctest 타겟.
+- C++17, CMake. `core` static lib + `cluster` static lib + `runtime`/`sim` 실행파일 + `validation` ctest 타겟.
+- 드라이버: `runtime`(실 서빙) · `sim`(콜드스타트) · `lifecycle`(프리필→디코드) · `csched`/`baseline`/`prepo`(클러스터 C/ablation/대조).
 - 외부 의존 0(표준 라이브러리만). 결정론: 시드 고정 RNG(sim/validation만).
-- 빌드 산출물은 `puls-engine/build/`(gitignore).
+- 빌드 산출물은 `puls-engine/build/`(gitignore). `bash build.sh` → 14 ctest(core 9 + cluster 5) 통과.
 
 ---
 
@@ -261,3 +263,20 @@ hbm_fits          = instance_a_tb ≤ hbm_capacity_tb
 5. 동작점 수치 리터럴(100000, 62, 6150000, 128…) 금지 — 전부 derive 산출/DeriveOptions.
    (substrate 고정 상수와 DeriveOptions 기본값만 리터럴 허용.)
 6. inter-node swap 0, 완료 순간만 churn(무축출).
+
+---
+
+## 10. 흡수된 클러스터 레이어 (C — 글로벌 age-cap · 멀티턴 캐시 · 컨텐션 TBT)
+
+연구 프로토타입에서 검증된 **승리 설계 C**를 엔진에 흡수한 레이어. `core` 노드 메커니즘(steering·admission·per-completion 힐링) 위에 **추가 모듈**로 얹히며, core 는 무수정 재사용한다.
+
+- **모듈**:
+  - `scheduler/queue.{h,cpp}` — `GlobalQueue`: 길이-fit 라우팅(`pull_near`) + **글로벌 age-cap 강제**(`pull_slot`: wait>cap 인 가장 오래된 것 강제 주입). 노드 age-cap(steering)과 별개의 *클러스터* 공정성.
+  - `scheduler/cache.{h,cpp}` — `ClusterCache`: **3-tier 멀티턴 KV 캐시**(HBM hit / SSD reload / recompute). 적격 = `len > eligibility` ∧ 노드 잔여 HBM. `evict_age` idle → SSD 강등, `gone_age` → 소멸.
+  - `scheduler/preposition.{h,cpp}` — pre-position(대조군 B 전용).
+  - `sim/{harness,kpi,metrics}.h` · `sim/workload_mt.{h,cpp}` — **컨텐션·의존성 TBT**(`instance_a_latency = max(t_pim,t_gpu_a)+β·max(0,t_pim−t_gpu_a)`, `TBT = max(instance_a,t_ffn)×layers`) + 실 KPI(TBT/TTFT/SLO goodput/PIM-노출) + 멀티턴 워크로드(`max_tokens=uniform[256,4096]`).
+  - `sim/{csched,baseline,prepo}.cpp` — 드라이버 C(채택)/A(잉여25 ablation)/B(pre-position 대조).
+  - `validation/test_{queue,cache,kpi,preposition,workload_mt}.cpp` — 큐 강제·3-tier 비용·컨텐션 TBT·pre-position·멀티턴 검증.
+- **C 표준 동작점(확정)**: `decode_surplus=25`(→ decode_pool 149, §5.2 DeriveOptions) · `global_age_cap=25` · `eligibility=16000` · `evict_age=200` · `contention β=0.5` · `offload_bw=2e7`(SSD) · `node_age_cap=5`. 재현: `csched 8000 64 16000 200 25 300 0.5 2e7 5 25` → Σdev 1.348% · hbmHit 92.0% · SLO goodput 3.79M.
+- **불변식 준수**: 동작점은 여전히 `derive_operating_point`(harness `make_deployment`)로 산출 — 모델/HW 바뀌면 자동 재도출(§9-5, 동작점 리터럴 0 확인). 클러스터 knob(eligibility·β·offload_bw·evict_age)은 *가정 라벨 sim 파라미터*로 `sim`/`scheduler` 레이어에만(§9-2 워크로드 파라미터와 동격), `core` 런타임 경로 불침투.
+- **미모델링(deferred)**: 이벤트-구동 디스패치 DAG(ARCH §6.3) — TBT 는 해석적 정상상태(더블버퍼링). 스케줄러 로직 재사용, 타이밍 층만 교체 시 도입.

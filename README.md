@@ -1,7 +1,5 @@
 # PULS — PIM-Unified LLM Serving
 
-> ✅ **Scheduler logic — generalized, implemented & validated** ([`puls-engine`](puls-engine/CONTRACT.md), 189 checks). The operating point is *derived* from the model · GPU spec — Fixed: HBM4 · SP-PIM · KV FP8 / Variable: model · GPU spec · prefill · die-stack · weight precision. Composition hits the balance point (decode ≈99.5%, prefill 100%). Deployed numbers · Σdev · cluster-scale validation: see [Runtime Validation](#runtime-validation).
-
 **Scheduler-aware co-design of HBM-PIM and production LLM serving stack.**
 
 > **Disclosure** — Personal research project by a single undergraduate author. No institutional / vendor affiliation.
@@ -13,6 +11,10 @@
 This repo is the public RFC (Request for Comments) of an in-progress prototype. It provides the entry point of the architecture + design rationale + scheduler policy, together with a calibrated projection of the four acceleration sources on real long-context traces (see [Results](#results)).
 
 Full body — [`ARCHITECTURE.md`](ARCHITECTURE.md) (substrate, instance disaggregation, scheduler integration, adaptive admission, layer flow, prior art comparison, all integrated).
+
+> **Update log.**
+> - **Upgrade 1 — scheduler logic generalized.** Model/HW-variabilized `derive` + a `runtime` / `sim` / `validation` split under a single CONTRACT ([`puls-engine`](puls-engine/CONTRACT.md), 189 checks). The operating point is derived, not hand-set.
+> - **Upgrade 2 — global scheduler + instance-dependency model.** Added a **global age-cap** (cross-node FIFO fairness → forced routing) and an **on-node multi-turn KV cache**, and modeled the **intra-/inter-instance dependency** in TBT (Instance A→B dependency + PIM↔GPU-A HBM contention). The winning cluster design is **C**; its config and numbers are in [Cluster Scheduler (C)](#cluster-scheduler-c).
 
 ## Table of Contents
 
@@ -30,6 +32,7 @@ Full body — [`ARCHITECTURE.md`](ARCHITECTURE.md) (substrate, instance disaggre
 **Results**
 - [Results](#results)
 - [Runtime Validation](#runtime-validation)
+- [Cluster Scheduler (C)](#cluster-scheduler-c)
 - [Limitations / Disclosure](#limitations--disclosure)
 
 **Resources**
@@ -113,7 +116,7 @@ Full body — [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 PULS is **not confined to a specific target workload**, because batch composition is *length-distribution-agnostic* steering — the former never looks at the pool's mean length; it combines short and long requests to hit only the four operating-point targets (deployed 128: decode count 62 ∧ Σkv 6.15M, prefill 128 tokens ∧ depth-work 12.8M; OPERATING_POINT §4.1). Hence **any distributed-server-scale workload with decode and prefill abundant in the pool** — short, long, mixed, or bimodal length distribution alike — converges to the operating point. (The balance ctx ~100K is merely the midpoint used to *derive* the KV cap, not a value imposed on the workload.)
 
-- **Condition for reaching the operating point (idle ≈ 0)** = decode and prefill are *abundant* in the pool (the large standing decode population + continuous prefill of high-concurrency distributed serving). Real-server steady state is exactly this regime. Demonstrated by an integrated sim with **2 active μ-batch + dependency · age-cap** composing to the operating point at **decode ≈99.5% · Σdev ≈1.7% / prefill 100% · Σdev ≈0.1%** — see [Runtime Validation](#runtime-validation).
+- **Condition for reaching the operating point (idle ≈ 0)** = decode and prefill are *abundant* in the pool (the large standing decode population + continuous prefill of high-concurrency distributed serving). Real-server steady state is exactly this regime. Demonstrated by an integrated sim with **2 active μ-batch + dependency · age-cap** composing to the operating point at **decode ≈99.5% · Σdev ≈1.2% / prefill 100% · Σdev ≈0.1%** — see [Runtime Validation](#runtime-validation).
 - **When the pool is thin** (low load, short-decode only), PIM or GPU-A idling is *physically normal* (not something to fix) — the operating point is the balance point that holds when the pool is abundant.
 
 ## Acceleration Sources Summary
@@ -159,7 +162,7 @@ Calibrated projection of the four acceleration sources (Aux1·Aux2·F3·F5) on L
 |---|---|---|
 | Aux1 | Mixed batching weight reuse | **2.0×** (closed-form), 1.97× (Colab T4 measured) |
 | Aux2 | KV bus traffic reduction | **4.95× speedup, 79.8% reduction** |
-| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep); the integrated lifecycle sim composes **2 active μ-batches to the operating point, decode ≈99.5% · Σdev ≈1.7% / prefill 100% · Σdev ≈0.1% (balance manifest)** — see [Runtime Validation](#runtime-validation) |
+| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep); the integrated lifecycle sim composes **2 active μ-batches to the operating point, decode ≈99.5% · Σdev ≈1.2% / prefill 100% · Σdev ≈0.1% (balance manifest)** — see [Runtime Validation](#runtime-validation) |
 | F5 | Channel-independent vs lock-step | **5.15× speedup** (KV variance dominant) |
 
 ### Aggregate Speedup
@@ -183,10 +186,10 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (including F5)
 
 | 2 active μ-batch (re-composed on completion) | operating-point target | hit | Σdev |
 |---|---|---|---|
-| **decode** | 62 ∧ Σkv 6.15M | **≈99.5%** | **≈1.7%** |
+| **decode** | 62 ∧ Σkv 6.15M | **≈99.5%** | **≈1.2%** |
 | **prefill** | 128 tokens ∧ depth-work 12.8M | **100%** | **≈0.1%** |
 
-> **(2026-06 sim-faithfulness correction)** The earlier decode 100% / Σdev 0.38% came from a healing bug in the lifecycle sim (centering admit `ideal≈ctx_balance` collapsed the pool to all-mid, starving long requests to 0% → composition trivially perfect). With the canonical healing (per-completion `ideal=hole`, like-for-like) + edge gating + prompt-independent realistic decode lengths + best-of-2000 infinite-pool emulation, on a distribution-preserving (≈20/70/10) diverse pool the deployment point (count 62, age_cap 5) gives decode ≈99.5% / Σdev ≈1.7% — consistent with the §3 age-cap sweep's cap5 spread (0.7%). Prefill stays 100% / Σdev ≈0.1%.
+> **(2026-06 sim-faithfulness correction)** The earlier decode 100% / Σdev 0.38% came from a healing bug in the lifecycle sim (centering admit `ideal≈ctx_balance` collapsed the pool to all-mid, starving long requests to 0% → composition trivially perfect). With the canonical healing (per-completion `ideal=hole`, like-for-like) + edge gating + prompt-independent realistic decode lengths + best-of-2000 infinite-pool emulation, on a distribution-preserving (≈20/70/10) diverse pool the deployment point (count 62, age_cap 5) gives decode ≈99.5% / Σdev ≈1.2% — consistent with the §3 age-cap sweep's cap5 spread (0.7%). Prefill stays 100% / Σdev ≈0.1%.
 
 Interpretation:
 
@@ -194,6 +197,26 @@ Interpretation:
 - **Holds even with dependency · age-cap.** Adding the prefill→decode transition and the fairness age-cap = 5 does not break either composition — the logic (steering · greedy · healing · age-cap · KV-centering) is *scale-invariant*; only the operating-point constants change (prefill 256 ↔ 128 isomorphic).
 - **Throughput is sustained by construction** — the per-cycle decode budget is pinned to the operating point (62, or fewer when the KV cap binds first), so as long as the pool stays abundant each cycle processes a fixed quantum; sustainability is a structural consequence of the fixed operating point. Absolute tok/s awaits silicon-calibrated cycle time.
 - **Cluster scale — global scheduler.** At server scale (hundreds–thousands of nodes) the global arrival mean exceeds 100K, so per-node pools drift and idle blows up. The **global scheduler** (greedy cold-start: shed long to edge + interleave-greedy · per-completion healing = toxic-fit) **pays only the ~2.2% initial edge cost and thereafter holds each node at the mean-100K operating point indefinitely** (long requests preserved, drift 0). Principle, E sweep, and on2 measurement in [`ARCHITECTURE.md`](ARCHITECTURE.md) §7 / [puls-engine/core/global_scheduler.cpp](puls-engine/core/global_scheduler.cpp).
+
+## Cluster Scheduler (C)
+
+The winning cluster design **C** keeps the §6 node mechanism (resident **surplus** + per-iteration steering re-selection + per-completion healing) and adds two cluster-level pieces: a **global age-cap** (cross-node FIFO fairness → forced routing) and an **on-node multi-turn KV cache** (3-tier HBM / SSD / recompute, placed in the HBM left after the decode pool). The three split the labor — surplus → composition (Σdev), global age-cap → latency / fairness (and it is what lets returning sessions be served fast enough to hit the cache), cache → TTFT. The same TBT now carries the **instance-dependency model**: Instance A (PIM ‖ GPU-A) must finish before Instance B (FFN), and PIM↔GPU-A share HBM, so `TBT = max(instance_a, t_ffn) × layers` with `instance_a = max(t_pim, t_gpu_a) + β·max(0, t_pim − t_gpu_a)` (contention-free when `t_pim ≤ t_gpu_a`).
+
+> **Two modeling axes — do not conflate.** `max_tokens` models the **random EOS appearance**: each request's decode-loop length on the time axis (how many tokens until EOS — the random EOS replaced by a sampled deterministic constant), *not* an amount of KV. The **KV** (`live_kv = prompt + dec`, ≈6.2M) is the amount read **per layer** every step — PIM reads it in per-layer attention, so `TBT = (per-layer max) × 80 layers`.
+
+Measured at the deployed operating point ([puls-engine/sim/csched.cpp](puls-engine/sim/csched.cpp), 8000 iters · Z = 64 · `csched 8000 64 16000 200 25 300 0.5 2e7 5 25`):
+
+| config (locked) | value | | KPI (C, measured) | value |
+|---|---|---|---|---|
+| decode_surplus | **25** (decode_pool 149) | | Σdev (avg / worst) | **1.35% / 16.9%** |
+| global_age_cap | **25** | | TBT (mean / p99) | **2056 / 2191 µs** |
+| eligibility | **16000** (mid · long) | | TTFT (mean / p99) | **0.74M / 8.94M µs** |
+| evict_age | 200 | | SLO goodput | **3.79M tok/s** |
+| contention β | 0.5 (conservative; C is β-robust) | | TTFT-met | **97.1%** |
+| offload_bw | 2e7 (SSD ≈ 10 GB/s) | | cache HBM-hit | **92.0%** |
+| node_age_cap | 5 | | max wait | **26 rounds** |
+
+C beats both the node-local baseline (no global age-cap → `max_wait` 6471, starvation; cache off) and pure pre-positioning (no surplus → Σdev 8.3%, PIM exposed 99.6%) on every real KPI. The **derived operating point is unchanged** (62 · 6.15M · ~100K · prefill 128) — surplus / age-cap / cache / β are cluster-layer knobs swept *on top of* it, not changes to it. Full A/B/C comparison, sweeps, and the contention analysis: [`ARCHITECTURE.md`](ARCHITECTURE.md) §7.6.
 
 ## Limitations / Disclosure
 

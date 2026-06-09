@@ -20,7 +20,7 @@ int main() {
     CHECK(op.decode_count_target >= 58 && op.decode_count_target <= 66, "N_dec ~62");
     CHECK_REL(op.kv_operating_target, 6150000.0, 0.15, "kv_target ~6.15M");
     CHECK(op.ffn_batch >= 178 && op.ffn_batch <= 202, "ffn_batch ~190");
-    CHECK(op.decode_pool == 2 * op.decode_count_target + 10, "decode_pool = 2N+10");
+    CHECK(op.decode_pool == 2 * op.decode_count_target + 25, "decode_pool = 2N+25");
     CHECK(op.node_min == 2 * op.decode_count_target, "node_min = 2N");
     CHECK(op.hbm_fits, "HBM fits at prefill 128");
 
@@ -41,7 +41,7 @@ int main() {
                 op.decode_pool, op.decode_count_target,
                 op.decode_pool - 2 * op.decode_count_target, llama.kv_bytes_per_token());
     CHECK_REL(llama.instance_a_weight_bytes() / 1e9, 24.0, 0.12, "Llama70B Instance A weight ~24GB");
-    CHECK(op.decode_pool == 2 * op.decode_count_target + 10,
+    CHECK(op.decode_pool == 2 * op.decode_count_target + 25,
           "decode pool = 2 active microbatches (2xN_dec) + surplus");
     CHECK(op.hbm_fits, "70B fits with weights included");
 
@@ -68,7 +68,7 @@ int main() {
     // JEDEC 산출: 16단·64스택 = 32ch×16Gb/8 × 64 = 64GB×64 = 4096GB = 4.096 TB (문서 4.40 은 오기).
     CHECK_REL(h16.hbm_capacity_tb, 4.096, 0.005, "16단 = 4.096 TB (64stack × 64GB, JEDEC 32ch×16Gb)");
     CHECK_REL(h12.hbm_capacity_tb, 3.072, 0.005, "12단 = 3.072 TB (×12/16)");
-    CHECK(h16.hbm_fits && h12.hbm_fits, "70B@128 (2.77TB) fits both 12/16단");
+    CHECK(h16.hbm_fits && h12.hbm_fits, "70B@128 (3.02TB, 잉여25) fits both 12/16단");
     // 경계: 12단(3.072)과 16단(4.096) 사이 점유면 16단만 적합 — die-stack 변수가 판정에 작용.
     if (b16.instance_a_tb > 3.072 && b16.instance_a_tb < 4.096) {
         CHECK(b16.hbm_fits && !b12.hbm_fits, "boundary load fits 16단 but not 12단 (변수 작용)");

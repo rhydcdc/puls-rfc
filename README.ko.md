@@ -1,7 +1,5 @@
 # PULS — PIM-Unified LLM Serving
 
-> ✅ **스케줄러 로직 — 일반화·구현·검증 완료** ([`puls-engine`](puls-engine/CONTRACT.md), 189 checks). 동작점은 모델·GPU 스펙에서 *도출*된다 — 고정: HBM4·SP-PIM·KV FP8 / 변수: 모델·GPU 스펙·prefill·die-stack·가중치 정밀도. 균형점에서 composition 명중(디코드 ≈99.5%, 프리필 100%). 배포 수치·Σdev·클러스터 스케일 검증은 [Runtime Validation](#runtime-validation).
-
 **Scheduler-aware co-design of HBM-PIM and production LLM serving stack.**
 
 > **Disclosure** — 학부생 단일 저자의 개인 연구 프로젝트. 소속 기관·vendor 연계 없음.
@@ -13,6 +11,10 @@
 본 repo 는 진행 중인 prototype 의 공개 RFC (Request for Comments). Architecture + design rationale + scheduler 정책의 entry point 와 함께, real long-context trace 위 4 가속 source 의 calibrated projection 산출도 함께 제공 ([Results](#results) 참조).
 
 상세 본문 — [`ARCHITECTURE.md`](ARCHITECTURE.md) (substrate, instance disaggregation, scheduler integration, adaptive admission, layer flow, prior art 비교 통합).
+
+> **업데이트 일지.**
+> - **1차 업그레이드 — 스케줄러 로직 일반화.** 모델·HW 변수화 `derive` + 단일 CONTRACT 아래 `runtime` / `sim` / `validation` 분리 ([`puls-engine`](puls-engine/CONTRACT.md), 189 checks). 동작점은 hand-set 이 아니라 *도출*된다.
+> - **2차 업그레이드 — 글로벌 스케줄러 + 인스턴스 종속성 모델.** **글로벌 age-cap**(노드 간 FIFO 공정성 → 강제 라우팅)과 **on-node 멀티턴 KV 캐시**를 추가하고, TBT 에 **인스턴스 내/간 종속성**을 모델링(Instance A→B 종속성 + PIM↔GPU-A HBM 경합). 승리한 클러스터 설계는 **C**, config 와 수치는 [클러스터 스케줄러 (C)](#cluster-scheduler-c).
 
 ## 목차
 
@@ -30,6 +32,7 @@
 **Results**
 - [Results](#results)
 - [Runtime Validation](#runtime-validation)
+- [클러스터 스케줄러 (C)](#cluster-scheduler-c)
 - [Limitations / Disclosure](#limitations--disclosure)
 
 ## Processing-in-Memory 아키텍처의 특징
@@ -110,7 +113,7 @@
 
 PULS 는 **특정 타겟 워크로드에 한정되지 않는다.** 배치 구성이 *길이분산 무관* steering 이기 때문이다 — former 는 풀의 평균 길이를 보지 않고, 짧은·긴 요청을 **조합**해 동작점 네 타깃(배포 128: decode 개수 62 ∧ Σkv 6.15M, prefill 128 토큰 ∧ depth-work 12.8M; OPERATING_POINT §4.1)만 맞춘다. 따라서 **decode 와 prefill 이 풀에 풍부한 어떤 분산-서버-스케일 워크로드든** — 길이 분포가 짧든 길든 혼합이든 bimodal 이든 — 동작점에 수렴한다 (균형 ctx ~100K 는 KV 캡 유도용 중간값일 뿐, 워크로드 강제값 아님).
 
-- **동작점(idle≈0) 도달 조건** = 풀에 decode·prefill 이 *풍부* (고동시성 분산 서빙의 대량 상주 decode 풀 + 지속 prefill). 실서버 정상상태가 정확히 이 영역. [Runtime Validation](#runtime-validation) 에서 **2 active μ-batch + 종속성·age-cap** 를 한 sim 에 넣고 동작점에 구성, **디코드 ≈99.5% 명중·Σdev ≈1.7% / 프리필 100%·Σdev ≈0.1%** 로 실증.
+- **동작점(idle≈0) 도달 조건** = 풀에 decode·prefill 이 *풍부* (고동시성 분산 서빙의 대량 상주 decode 풀 + 지속 prefill). 실서버 정상상태가 정확히 이 영역. [Runtime Validation](#runtime-validation) 에서 **2 active μ-batch + 종속성·age-cap** 를 한 sim 에 넣고 동작점에 구성, **디코드 ≈99.5% 명중·Σdev ≈1.2% / 프리필 100%·Σdev ≈0.1%** 로 실증.
 - **풀이 얕으면**(저부하·짧은 decode 만) PIM 또는 GPU-A 가 노는 건 *물리적 정상*(고칠 대상 아님) — 동작점은 풀이 풍부할 때의 균형점이다.
 
 ## 가속 Source 요약
@@ -154,7 +157,7 @@ Llama-3 70B + DGX B200 + HBM4 substrate 위 4 가속 source (Aux1·Aux2·F3·F5)
 |---|---|---|
 | Aux1 | Mixed batching 가중치 재사용 | **2.0×** (closed-form), 1.97× (Colab T4 측정) |
 | Aux2 | KV bus traffic 감소 | **4.95× speedup, 79.8% 감소** |
-| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep); 통합 lifecycle sim 이 **2 active μ-batch 를 동작점에 구성, 디코드 ≈99.5%·Σdev ≈1.7% / 프리필 100%·Σdev ≈0.1% (balance 발현)** — [Runtime Validation](#runtime-validation) |
+| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep); 통합 lifecycle sim 이 **2 active μ-batch 를 동작점에 구성, 디코드 ≈99.5%·Σdev ≈1.2% / 프리필 100%·Σdev ≈0.1% (balance 발현)** — [Runtime Validation](#runtime-validation) |
 | F5 | Channel-independent vs lock-step | **5.15× speedup** (KV variance dominant) |
 
 ### Aggregate Speedup
@@ -178,14 +181,14 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (F5 포함)**.
 
 | 2 active μ-batch (완료시 재구성) | 동작점 타깃 | 명중 | Σdev |
 |---|---|---|---|
-| **decode** | 62 ∧ Σkv 6.15M | **≈99.5%** | **≈1.7%** |
+| **decode** | 62 ∧ Σkv 6.15M | **≈99.5%** | **≈1.2%** |
 | **prefill** | 128 토큰 ∧ depth-work 12.8M | **100%** | **≈0.1%** |
 
 > **(2026-06 sim 충실화 정정)** 이전 디코드 100%/Σdev 0.38% 는 lifecycle sim 의 힐링
 > 버그(센터링 admit `ideal≈ctx_balance` → 풀 all-mid 붕괴, 긴 요청 0% → composition trivial)에서
 > 나온 값이었다. canonical 힐링(per-completion `ideal=hole`, like-for-like) + 엣지 게이팅 +
 > prompt-무관 현실 decode 길이 + best-of-2000 무한풀 근사로 정정하면, 분포 보존(≈20/70/10)된
-> 다양 풀에서 디코드 ≈99.5%/Σdev≈1.7% (age_cap 5) — §3 sweep 의 cap5 spread(0.7%)와 정합.
+> 다양 풀에서 디코드 ≈99.5%/Σdev≈1.2% (age_cap 5) — §3 sweep 의 cap5 spread(0.7%)와 정합.
 > 프리필 100%/Σdev≈0.1%.
 
 해석:
@@ -194,6 +197,28 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (F5 포함)**.
 - **종속성·age-cap 넣고도 유지.** prefill→decode 전이와 공정성 age-cap = 5 를 다 넣어도 두 composition 이 무너지지 않음 — 로직(steering · greedy · healing · age-cap · KV-센터링)은 *스케일 불변*, 동작점만 상수(prefill 256↔128 동형).
 - **throughput 은 설계상 지속** — per-cycle decode 예산이 동작점에 고정(62, KV 캡에 먼저 닿으면 그 이하)이라 풀이 풍부한 한 매 cycle 이 고정 토큰 양을 처리 → 지속성은 동작점 고정의 구조적 귀결. 절대 tok/s 는 silicon 보정 cycle 시간 필요.
 - **클러스터 스케일 — 글로벌 스케줄러.** 서버스케일(노드 수백–수천)에선 글로벌 도착 평균이 100K 보다 높아 노드별 풀이 drift → idle 폭발. **글로벌 스케줄러**(greedy 콜드스타트: 긴 것 엣지 shed + interleave-greedy · per-completion 힐링 = toxic-fit)로 **초반 ~2.2% 엣지 비용만 감수하면 그 뒤로 각 노드를 평균 100K 동작점에 무한정 유지**(긴 요청 보존, drift 0). 원리·E 스윕·on2 측정은 [`ARCHITECTURE.md`](ARCHITECTURE.md) §7 / [puls-engine/core/global_scheduler.cpp](puls-engine/core/global_scheduler.cpp).
+
+<a id="cluster-scheduler-c"></a>
+
+## 클러스터 스케줄러 (C)
+
+승리한 클러스터 설계 **C** 는 §6 노드 메커니즘(상주 **잉여(surplus)** + iteration 마다 steering 재선택 + per-completion 힐링)을 유지하면서, 클러스터 레벨 두 조각을 추가한다 — **글로벌 age-cap**(노드 간 FIFO 공정성 → 강제 라우팅)과 **on-node 멀티턴 KV 캐시**(3-tier HBM / SSD / recompute, decode 풀을 쓰고 남은 HBM 에 배치). 셋이 역할을 나눠 맡는다 — 잉여 → composition(Σdev), 글로벌 age-cap → 지연/공정성(그리고 돌아온 세션을 캐시에 명중할 만큼 빠르게 서빙해주는 것도 이쪽), 캐시 → TTFT. 동일한 TBT 가 이제 **인스턴스 종속성 모델**을 담는다 — Instance A (PIM ‖ GPU-A) 가 Instance B (FFN) 보다 먼저 끝나야 하고, PIM↔GPU-A 가 HBM 을 공유하므로 `TBT = max(instance_a, t_ffn) × layers`, 여기서 `instance_a = max(t_pim, t_gpu_a) + β·max(0, t_pim − t_gpu_a)` (`t_pim ≤ t_gpu_a` 일 때 경합 없음).
+
+> **두 모델링 축 — 혼동 금지.** `max_tokens` 는 **랜덤 EOS 출현**을 모델링한 것 — 각 요청의 시간 축 위 decode 루프 길이(EOS 까지 몇 토큰인가, 랜덤 EOS 를 샘플된 결정론적 상수로 치환)이지 KV 양이 *아니다*. **KV**(`live_kv = prompt + dec`, ≈6.2M)는 매 step *레이어마다* 읽는 양 — PIM 이 레이어별 attention 에서 읽으므로 `TBT = (레이어당 max) × 80 layers`.
+
+배포 동작점에서 측정 ([puls-engine/sim/csched.cpp](puls-engine/sim/csched.cpp), 8000 iters · Z = 64 · `csched 8000 64 16000 200 25 300 0.5 2e7 5 25`):
+
+| config (잠금) | 값 | | KPI (C, 실측) | 값 |
+|---|---|---|---|---|
+| decode_surplus | **25** (decode_pool 149) | | Σdev (avg / worst) | **1.35% / 16.9%** |
+| global_age_cap | **25** | | TBT (mean / p99) | **2056 / 2191 µs** |
+| eligibility | **16000** (mid · long) | | TTFT (mean / p99) | **0.74M / 8.94M µs** |
+| evict_age | 200 | | SLO goodput | **3.79M tok/s** |
+| contention β | 0.5 (보수적; C 는 β-robust) | | TTFT-met | **97.1%** |
+| offload_bw | 2e7 (SSD ≈ 10 GB/s) | | cache HBM-hit | **92.0%** |
+| node_age_cap | 5 | | max wait | **26 rounds** |
+
+C 는 노드-로컬 baseline(글로벌 age-cap 없음 → `max_wait` 6471, starvation; 캐시 off)과 순수 pre-positioning(잉여 없음 → Σdev 8.3%, PIM exposed 99.6%)을 모든 실 KPI 에서 능가한다. **도출된 동작점은 그대로**(62 · 6.15M · ~100K · prefill 128) — 잉여 / age-cap / 캐시 / β 는 그 *위에서* 스윕하는 클러스터-레이어 knob 이지 동작점 변경이 아니다. 전체 A/B/C 비교·스윕·경합 분석은 [`ARCHITECTURE.md`](ARCHITECTURE.md) §7.6.
 
 ## Limitations / Disclosure
 

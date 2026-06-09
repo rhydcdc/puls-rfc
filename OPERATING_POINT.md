@@ -12,11 +12,11 @@ projection+prefill-attn / FFN=인스턴스 B)의 시간을 맞춰 인스턴스 �
 >   콜드스타트 후 steering·전이(프리필→디코드)·per-completion 힐링·age-cap 통합, 디코드(62∧6.15M)·
 >   프리필(128∧12.8M) composition 유지를 증명(배포 128, 디코드 **≈99.5% 명중**·프리필 **100%**).
 >
-> **★ 분산이 이미 작다** — Σdev 디코드 **≈1.7%**·프리필 **≈0.1%** (실현 idle ~0).
+> **★ 분산이 이미 작다** — Σdev 디코드 **≈1.2%**·프리필 **≈0.1%** (실현 idle ~0).
 > *이 편차 크기*가 동작점의 실질 지표 (on2 미달분도 힐링이 메움).
 
 > **일반화 완료 (2026-06).** 본 문서의 수치(배포 prefill 128 → decode 62·6.15M·ctx≈100K,
-> Instance A ≈2.77 TB 등)는 **Llama-3 70B + B200 + HBM4 16단** 기준의 *구체 예시(canonical
+> Instance A ≈3.02 TB 등)는 **Llama-3 70B + B200 + HBM4 16단** 기준의 *구체 예시(canonical
 > instantiation)*다. 이 동작점을 만드는 *방법*(세 자원 균형 도출 + steering·cold-start·healing·
 > age-cap)은 모델·GPU 무관하게 일반화되어 C++ 스케줄러
 > [`puls-engine/`](puls-engine/CONTRACT.md)로 구현·검증됐으며(189 checks), 임의의 모델·GPU
@@ -38,7 +38,7 @@ projection+prefill-attn / FFN=인스턴스 B)의 시간을 맞춰 인스턴스 �
 | ⑤ | **decode KV 합 (제어 타깃)** | 12.3M | **6.15M** | 인스턴스 A (PIM) |
 | + | prefill KV-work (제어 타깃) | 25.6M (= 256×depth) | **12.8M** | GPU-A |
 | + | 균형 ctx | ~100K (라마70B+B200 고유, §4·§4.1) | ~100K (prefill 불변·모델/GPU 종속) | — |
-| + | aggregate KV (decode) | 30M → 4.92 TB — 64스택 **초과** | **13.4M decode + 프리필 in-flight = Instance A 합 2.77 TB**, **적합** §4.1 | — |
+| + | aggregate KV (decode) | 30M → 4.92 TB — 64스택 **초과** | **14.9M decode + 프리필 in-flight = Instance A 합 3.02 TB**, **적합** §4.1 | — |
 
 > **제어 타깃 = (개수 123, decode-KV 12.3M)** 둘 — steering 이 이 점에 수렴(§3). prefill 은
 > (256 토큰, depth-합 25.6M). **배포 128 에선 절반 — (62, 6.15M)·(128, 12.8M)**; 알고리즘은
@@ -161,13 +161,13 @@ Instance A 는 QKV/O proj(~24GB)만.
 
 | | prefill 256 | **prefill 128 (배포)** |
 |---|---|---|
-| decode 풀 (×100K) | 30M tok | **13.4M** (풀 134) |
+| decode 풀 (×100K) | 30M tok | **14.9M** (풀 149) |
 | prefill in-flight (×~56K) | 8.4M tok | **3.4M** (풀 60) |
-| Instance A 합 | 38.4M → **4.82 TB** | **16.8M → 2.77 TB** |
-| 64 스택(4.096TB) | **초과** ✗ | **적합** ✓ (잉여 1.33 TB) |
+| Instance A 합 | 38.4M → **4.82 TB** | **18.3M → 3.02 TB** |
+| 64 스택(4.096TB) | **초과** ✗ | **적합** ✓ (잉여 ~1.0 TB) |
 
 → **prefill 256 은 64 공식 스택에 안 들어가고**(decode 30M 만 4.92TB > 4.096TB), **prefill 128(70B)은
-2.77 TB 로 들어가며 1.33 TB 남는다.** 더 큰 모델은 KV/tok 이 커져 4.096TB 를 더 소비하며, 균형 ctx 도 모델별로 재도출된다 — **'ctx
+3.02 TB 로 들어가며 ~1.0 TB 남는다.** 더 큰 모델은 KV/tok 이 커져 4.096TB 를 더 소비하며, 균형 ctx 도 모델별로 재도출된다 — **'ctx
 100K 불변'은 라마70B 한정 근사이고, 모델별 재도출이 일반화의 정답**(puls-engine 산출)이다.
 **어느 규모(예: 405B 급) 이상은 단일 노드(64 스택)에 안 들어가며, 그 경우 노드 간 분산 서빙(TP)이
 필요하다 — 다만 노드 간 통신 비용은 실측 불가라 본 RFC 의 산출 범위 밖이다.** prefill 은 *스케일
@@ -177,19 +177,19 @@ knob* 이므로 알고리즘은 그대로다.
 
 | 풀 | 크기 | 구성 | 명중 | Σdev |
 |---|---|---|---|---|
-| 디코드 | **134** | 124 (= 2 μ-batch × 62) + **잉여 10** | ≈99.5% | ≈1.7% |
+| 디코드 | **149** | 124 (= 2 μ-batch × 62) + **잉여 25** | ≈99.5% | ≈1.2% |
 | 프리필 | **60** | 50 (depth-diversity 하한) + **마진 10** | 100% | ≈0.1% |
 
 > **(2026-06 sim 충실화 정정)** 이전 디코드 100%/Σdev 0.38% 는 lifecycle sim 의 힐링
 > 버그(센터링 admit `ideal≈ctx_balance` → 풀 all-mid 붕괴, 긴 요청 0% → composition trivial)에서
 > 나온 값이었다. canonical 힐링(per-completion `ideal=hole`, like-for-like) + 엣지 게이팅 +
 > prompt-무관 현실 decode 길이 + best-of-2000 무한풀 근사로 정정하면, 분포 보존(≈20/70/10)된
-> 다양 풀에서 디코드 ≈99.5%/Σdev≈1.7% (age_cap 5) — §3 sweep 의 cap5 spread(0.7%)와 정합.
+> 다양 풀에서 디코드 ≈99.5%/Σdev≈1.2% (age_cap 5) — §3 sweep 의 cap5 spread(0.7%)와 정합.
 > 프리필 100%/Σdev≈0.1%.
 
-- **잉여 10 (디코드)**: hit 은 잉여 0에서도 100%; 잉여는 재구성(62+잉여→62) cherry-pick 자유도로
-  *Σdev(idle 마진)* 를 조이는 knob — 늘릴수록 Σdev 가 줄다 **10 부근에서 plateau**.
-  대형 모델 적재 위해 최소화하되 성능 확보 = 10.
+- **잉여 25 (디코드)**: hit 은 잉여 0에서도 100%; 잉여는 재구성(62+잉여→62) cherry-pick 자유도로
+  *Σdev(idle 마진)* 를 조이는 knob — 캐시 ON 시 U-knee 가 더 깊어 **25 부근에서 plateau**.
+  대형 모델 적재 위해 최소화하되 성능 확보 = 25.
 - **마진 10 (프리필)**: 프리필 풀은 advance(~12/round)+잉여가 아니라 *0→prompt 깊이 파이프라인*.
   depth-diversity 하한 ~50(40이면 99.5%), 마진 10 = 60. 프리필은 잉여 *과대* 가 위험(age-cap
   flood, ARCH §7 참조)이지 과소가 아니라, 하한 근처가 메모리 최소이자 안전.
@@ -236,7 +236,7 @@ knob* 이므로 알고리즘은 그대로다.
 > **\*** 128 의 spread 는 sweep B 재측정이 아니라 *프리필 무관*(§4: prefill 약분돼 사라짐 →
 > 균형 ctx·spread 가 prefill 에 비의존)이라 256 과 동형으로 둔 값. 128 동작점의 *composition*
 > 은 [puls-engine/sim/lifecycle.cpp](puls-engine/sim/lifecycle.cpp) 통합 sim(§4.1)이
-> 종속성·age-cap 포함 **디코드(62∧6.15M) ≈99.5%·프리필(128∧12.8M) 100% 명중**(Σdev ≈1.7%/≈0.1%)으로 검증.
+> 종속성·age-cap 포함 **디코드(62∧6.15M) ≈99.5%·프리필(128∧12.8M) 100% 명중**(Σdev ≈1.2%/≈0.1%)으로 검증.
 
 → 균형 ctx 가 prefill 무관 100K 고정(=하드웨어 상수). prefill 은 X·배치규모만 스케일.
 (옛 REPORT 의 "512만 균형, 1024+ 실패"는 decode-KV 를 25M 에 고정한 채 prefill 만 올린 측정
