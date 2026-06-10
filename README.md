@@ -236,7 +236,7 @@ hole appears at node z
 Why it works:
 
 - Holes arrive ~every 17 rounds per node, so waiting is short and naturally bounded.
-- Waiting costs ~2 ms/round vs abandoning the cache costs an SSD reload of 160–780 rounds (~10× more) — so a separate spill cap (200, vs global 25) lets cached returns wait. Measured spill is near zero: **4 of 13,483 affinity candidates (0.03%)** — under the single global cap 25 it was 31% (4,317); the dedicated-cap separation cut it ~1,000×.
+- Waiting costs ~2 ms/round vs abandoning the cache costs an SSD reload of 160–780 rounds (~10× more) — so a separate spill cap (200, vs global 25) lets cached returns wait. Measured spill is near zero: **4 of 13,017 affinity candidates (0.03%, pool-80 canonical)** — under the single global cap 25 it was 31% (4,317); the dedicated-cap separation cut it ~1,000×.
 - Affinity returns are near-like-for-like by construction (former residents of that node, growth ≤12K, and eligibility ≥16K filters out high-growth shorts), so the distribution is almost preserved.
 - The residual mismatch is absorbed by the existing surplus + re-selection + node age-cap machinery — Σdev actually improves vs spilling (spill → global forced injection is a worse perturbation).
 

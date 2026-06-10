@@ -694,8 +694,14 @@ hole opens at node z
           (forced if a global aged exists, else nearest to ideal=hole)
 ```
 
-- **Separate spill cap = 200 rounds (vs global age-cap 25).** A cached return's waiting is *rewarded* — ~2 ms/round of waiting avoids a 160–780-round SSD reload (~10× cheaper) — so it deserves its own bound. Sweep: spill 25→200 takes physical hits 67%→99.7% **and** improves Σdev 1.57%→1.38% (spilled requests became global forced off-fit injections — a worse perturbation than affinity's near-like-for-like). Even with no cap, waits self-bound at ~380 rounds (0.77 s ≪ TTFT SLO) because holes keep arriving (~17 rounds/node). Measured spill is near zero: **4 of 13,483 affinity candidates (0.03%)** — under the single global cap 25 it was 31% (4,317); the dedicated-cap separation cut it ~1,000×.
-- **Why composition survives.** Affinity returns are former residents of that very node grown by ≤12K (new message + generation), and eligibility ≥16K excludes high-growth shorts → near-like-for-like by construction; the residual is absorbed by the existing surplus + re-selection + node age-cap machinery — re-confirming surplus re-selection as a *general-purpose perturbation absorber*.
+- **Separate spill cap = 200 rounds (vs global age-cap 25).**
+  - *Why its own bound:* a cached return's waiting is *rewarded* — ~2 ms/round of waiting avoids a 160–780-round SSD reload (~10× cheaper). A fresh request's waiting has no such reward — two different economics, so one shared cap was the wrong knob.
+  - *Sweep* (pool-60-era record — verdict carries over): spill 25→200 takes physical hits **67%→99.7%** *and* improves Σdev **1.57%→1.38%** — spilled requests became global forced off-fit injections, a worse perturbation than affinity's near-like-for-like admits.
+  - *Self-bounding:* even with no cap, waits stop at ~380 rounds (0.77 s ≪ TTFT SLO) because holes keep arriving (~17 rounds/node).
+  - *Measured spill ≈ zero:* **4 of 13,017 affinity candidates (0.03%, pool-80 canonical)** — vs 31% (4,317) under the single global cap 25; the dedicated-cap separation cut it ~1,000×.
+- **Why composition survives.**
+  - Affinity returns are former residents of that very node grown by ≤12K (new message + generation), and eligibility ≥16K excludes high-growth shorts → near-like-for-like by construction.
+  - The residual is absorbed by the existing surplus + re-selection + node age-cap machinery — re-confirming surplus re-selection as a *general-purpose perturbation absorber*.
 
 **Dependency + contention TBT (the instance-dependency model).** This refines the §6.4 pool-time model and the §3.5 shared-path contention into the actual TBT:
 
