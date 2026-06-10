@@ -117,8 +117,10 @@ struct SimConfig {
     int    gone_age              = 3000;    // SSD 소멸 라운드 (고정 가정)
     int    global_age_cap        = 2000;    // 글로벌 풀 대기 상한 라운드 (스윕) — Plan2 재튜닝: 100 은
                                             //   강제 61%로 과도해 Σdev↑. 2000(강제~소수)으로 상향, knee 는 §4 스윕.
-    // 재로드 속도 라벨(바이트/라운드). Plan3 교정: SSD ~10 GB/s = 2e7 B/round (옛 5e9 = HBM급 오기).
-    double offload_bw_bytes_per_round = 2.0e7;
+    // 재로드 속도 라벨(바이트/라운드). 2026-06 교정: 2e7(≈10 GB/s)은 recompute 손익분기
+    //   (prefill 128 tok/round × 163,840 B/tok = 2.1e7 B/round) 5% 아래라 SSD 티어가 수학적으로
+    //   무력했음 — 현실 NVMe 어레이 ~50 GB/s = 1e8 로 상향 (가정 라벨, 스윕 가능).
+    double offload_bw_bytes_per_round = 1.0e8;
 
     // HBM 컨텐션 β (Plan3 §3): A_time = max(pim,gpua) + β·max(0, pim−gpua). 0=무컨텐션. 스윕 knob.
     double contention_beta = 0.5;

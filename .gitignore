@@ -1,6 +1,8 @@
 # Local-only working area (not for public exposure)
 _local/
 # ideas/ — 이제 추적(pre-positioning 프로토타입). build 바이너리는 아래 `build/` 로 계속 제외.
+# ideas/experiments/ — 로컬 실험 작업장(엔진 사본 + REPORT_X) — 비공개, 푸시 금지.
+ideas/experiments/
 
 # OS
 .DS_Store
