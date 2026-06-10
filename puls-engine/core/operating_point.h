@@ -37,7 +37,11 @@ struct OperatingPoint {
 // derive 의 튜닝 knob (CONTRACT §4 채택값 = 기본값). 문서 수치, 추정 아님.
 struct DeriveOptions {
     int    decode_surplus        = 25;    // 잉여(재구성 자유도) — C 동작점(캐시 ON U-knee, OP §4.1)
-    int    prefill_pool          = 60;    // depth-diversity 하한 50 + 마진 10
+    int    prefill_pool          = 80;    // 2-active(라운드당 2×128, 요청-disjoint) 기준 재도출.
+                                          //   배치1 그리디가 ideal 근처 깊이를 선점해 배치2 잔여
+                                          //   커버리지가 빈약 → 옛 60(하한50+마진10)은 배치2 가
+                                          //   96.3%/1.84% 미달. 80 = knee(99.1%/0.54%, KPI 무감
+                                          //   구간) ∧ 캐시 침범 최소(+0.18 TB). E8 스윕.
     int    age_cap               = 5;     // OP §3 sweep knee
     double idle_band             = 0.10;  // 진단 밴드 placeholder
     double prefill_avg_depth_frac= 0.56;  // prefill in-flight 평균 depth/ctx (OP §4.1 ~56K)
