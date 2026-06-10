@@ -223,19 +223,12 @@ static int test_contention_model() {
               "beta=0 regression: TBT == max(t_pim,t_gpu_a,t_ffn) * num_layers (old formula)");
     }
 
-    // ── ④ reload BW = SSD-class, recompute 손익분기 위 (SimConfig 기본값 재교정) ──
-    // 2026-06: 분기점 = prefill 128 tok/round × kv_bpt ≈ 2.1e7 B/round. 옛 2e7 은 그 5% 아래라
-    // reload 가 전 구간 recompute 에 지배당함(티어 2 무력) — 현실 NVMe 어레이 ~50 GB/s = 1e8 로
-    // 상향. 가드 = 정확값 ∧ 분기점 초과 ∧ HBM 급(≫1e10) 아님.
+    // ── ④ reload BW = SSD-class (SimConfig 기본값 교정) ─────────────────────
+    // 100K-token KV(@kv_bytes_per_token)는 len*kv_bpt/2e7 라운드 = 수백 라운드(현실적)에 재로드.
     {
         proto::SimConfig cfg;
-        CHECK(cfg.offload_bw_bytes_per_round == 1.0e8,
-              "SimConfig default offload_bw is realistic SSD-class (1e8 B/round)");
-        const double breakeven = 128.0 * 163840.0;  // prefill_tokens × kv_bytes_per_token (배포)
-        CHECK(cfg.offload_bw_bytes_per_round > breakeven,
-              "offload_bw above recompute break-even (tier-2 not dominated)");
-        CHECK(cfg.offload_bw_bytes_per_round < 1.0e10,
-              "offload_bw stays SSD-class (not HBM-class)");
+        CHECK(cfg.offload_bw_bytes_per_round == 2.0e7,
+              "SimConfig default offload_bw is SSD-class (2e7 B/round)");
     }
     return 0;
 }

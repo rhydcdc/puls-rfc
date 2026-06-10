@@ -13,8 +13,9 @@ This repo is the public RFC (Request for Comments) of an in-progress prototype. 
 Full body — [`ARCHITECTURE.md`](ARCHITECTURE.md) (substrate, instance disaggregation, scheduler integration, adaptive admission, layer flow, prior art comparison, all integrated).
 
 > **Update log.**
-> - **Upgrade 1 — scheduler logic generalized.** Model/HW-variabilized `derive` + a `runtime` / `sim` / `validation` split under a single CONTRACT ([`puls-engine`](puls-engine/CONTRACT.md), 189 checks). The operating point is derived, not hand-set.
+> - **Upgrade 1 — scheduler logic generalized.** Model/HW-variabilized `derive` + a `runtime` / `sim` / `validation` split under a single CONTRACT ([`puls-engine`](puls-engine/CONTRACT.md), 196 checks). The operating point is derived, not hand-set.
 > - **Upgrade 2 — global scheduler + instance-dependency model.** Added a **global age-cap** (cross-node FIFO fairness → forced routing) and an **on-node multi-turn KV cache**, and modeled the **intra-/inter-instance dependency** in TBT (Instance A→B dependency + PIM↔GPU-A HBM contention). The winning cluster design is **C**; its config and numbers are in [Cluster Scheduler (C)](#cluster-scheduler-c).
+> - **Upgrade 3 — physical cache affinity + honest accounting.** Multi-turn returns are now routed to the node that physically holds their KV in HBM (affinity queue, 1st priority on hole; separate spill cap 200 vs global age-cap 25 — waiting has a reward for cached returns), the cache budget is dynamically debited by multi-turn pool-KV inflation (~0.24 TB measured), the SSD reload constant is corrected to a realistic NVMe-array value (2e7 → 1e8 B/round; the old value sat 5% below the recompute break-even 2.1e7, making tier 2 mathematically useless), and a per-request token-gap KPI ([PAUSE]) closes the pause-cost blind spot of batch-level TBT. Physical cache hits 1.7% → 99.7%. Numbers in [Cluster Scheduler (C)](#cluster-scheduler-c).
 
 ## Table of Contents
 
@@ -25,7 +26,7 @@ Full body — [`ARCHITECTURE.md`](ARCHITECTURE.md) (substrate, instance disaggre
 **The Proposal**
 - [The PULS Proposal](#the-puls-proposal)
 - [Approach Summary](#approach-summary)
-- [Target Workload](#target-workload)
+- [Workload Coverage](#workload-coverage)
 - [Acceleration Sources Summary](#acceleration-sources-summary)
 - [Role of Mixed Batching](#role-of-mixed-batching)
 
@@ -108,14 +109,20 @@ Limitations of existing HBM-PIM research, grouped by axis:
   - **Channel-level PIM / GPU toggle** — Each of the 32 channels per HBM4 stack can be independently toggled between PIM and normal mode
   - **SP-PIM cross-GPU cooperation (Q-replicate parallelization)** — Instance A's 8 GPU × 256 channel = 2048 channels in total cooperatively process a single attention operation in lock-step. The same Q vector is broadcast to all 2048 channels and KV rows are sharded across channels, so each channel independently sweeps its own KV slice → a single attention operation executes in parallel across 2048 channels
   - **Row-wise accumulation inside the logic-die SFU** — Intermediate attention results (softmax accumulator, row max) accumulate inside the SFU, avoiding logic die ↔ DRAM die round-trip traffic
-- **Interceptor host↔PIM interface** — A direct consequence of confining PIM to the single decode-attention operation. By **claiming a single RFU (Reserved For Future use) bit of the existing JEDEC HBM4 RD/WR commands as PIM_toggle**, the host↔PIM interface is absorbed into the standard DRAM command set. No separate interrupt required. Based on the FSM's deterministic cycles, **computed wait** lets the GPU precompute when the result is to be read. The only channel between PIM and GPU is HBM (PIM write → GPU read, the same pattern as inter-kernel data passing through global memory on the GPU) ([`ARCHITECTURE.md`](ARCHITECTURE.md) Section 3.5).
+- **Interceptor host↔PIM interface** — A direct consequence of confining PIM to the single decode-attention operation ([`ARCHITECTURE.md`](ARCHITECTURE.md) Section 3.5):
+  - By **claiming a single RFU (Reserved For Future use) bit of the existing JEDEC HBM4 RD/WR commands as PIM_toggle**, the host↔PIM interface is absorbed into the standard DRAM command set. No separate interrupt required.
+  - Based on the FSM's deterministic cycles, **computed wait** lets the GPU precompute when the result is to be read.
+  - The only channel between PIM and GPU is HBM (PIM write → GPU read, the same pattern as inter-kernel data passing through global memory on the GPU).
 
 Full body — [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Workload Coverage
 
-PULS is **not confined to a specific target workload**, because batch composition is *length-distribution-agnostic* steering — the former never looks at the pool's mean length; it combines short and long requests to hit only the four operating-point targets (deployed 128: decode count 62 ∧ Σkv 6.15M, prefill 128 tokens ∧ depth-work 12.8M; OPERATING_POINT §4.1). Hence **any distributed-server-scale workload with decode and prefill abundant in the pool** — short, long, mixed, or bimodal length distribution alike — converges to the operating point. (The balance ctx ~100K is merely the midpoint used to *derive* the KV cap, not a value imposed on the workload.)
+PULS is **not confined to a specific target workload**, because batch composition is *length-distribution-agnostic* steering:
 
+- **Steering never looks at the pool's mean length** — it combines short and long requests to hit only the four operating-point targets (deployed 128: decode count 62 ∧ Σkv 6.15M, prefill 128 tokens ∧ depth-work 12.8M; OPERATING_POINT §4.1).
+- Hence **any distributed-server-scale workload with decode and prefill abundant in the pool** — short, long, mixed, or bimodal length distribution alike — converges to the operating point.
+- (The balance ctx ~100K is merely the midpoint used to *derive* the KV cap, not a value imposed on the workload.)
 - **Condition for reaching the operating point (idle ≈ 0)** = decode and prefill are *abundant* in the pool (the large standing decode population + continuous prefill of high-concurrency distributed serving). Real-server steady state is exactly this regime. Demonstrated by an integrated sim with **2 active μ-batch + dependency · age-cap** composing to the operating point at **decode ≈99.5% · Σdev ≈1.2% / prefill 100% · Σdev ≈0.1%** — see [Runtime Validation](#runtime-validation).
 - **When the pool is thin** (low load, short-decode only), PIM or GPU-A idling is *physically normal* (not something to fix) — the operating point is the balance point that holds when the pool is abundant.
 
@@ -141,7 +148,7 @@ PULS is **not confined to a specific target workload**, because batch compositio
 
 ## Results
 
-Calibrated projection of the four acceleration sources (Aux1·Aux2·F3·F5) on Llama-3 70B + DGX B200 + HBM4 substrate, plus a runtime validation pass on a long-context production trace.
+Calibrated projection of the four acceleration sources (Aux1·Aux2·F3·F5) on Llama-3 70B + DGX B200 + HBM4 substrate, plus a runtime validation pass (integrated lifecycle sim on a synthetic distributed-server steady-state workload).
 
 > **Visualized companion** — Per-source schematic figures + numerical breakdown + runtime validation + honest disclosure are organized in the interactive reading guide as **§6 Acceleration Sources** and **§7 Results**: [`docs/scheduler_policy.html`](docs/scheduler_policy.html) ([online](https://rhydcdc.github.io/puls-rfc/scheduler_policy.html#sec-7)).
 
@@ -180,9 +187,12 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (including F5)
 **Integrated lifecycle simulation (PULS-independent, composition-hit only).** Rather than a single real trace, a synthetic workload representing the distributed-server steady state is *fixed*, and cold-start → operation (steering · prefill→decode transition · per-completion healing · age-cap) is run in one sim to check whether the operating-point composition holds — the seed is not tuned to a predetermined answer.
 
 - **Workload (synthetic)** — a wide, diverse-length pool (1K–1M, short/mid/long mixed), prefill and decode abundant. **warm-start** = a steady-state snapshot (each request placed at a random lifecycle point, skipping the cold-start ramp).
-- **Model — 2 active μ-batch (not 3).** A node runs only 2 μ-batches concurrently (F2/F3 overlap). When one batch's forward pass ends, its members return to the pool and **a new batch is re-selected from (the returned members + the standing surplus)** (zero memory allocation) — *no third batch is force-composed.* Completed requests are refilled like-for-like by per-completion healing, completed prefills transition to decode, age-cap = 5 for fairness. Deployed prefill 128.
+- **Model — 2 active μ-batch (not 3).**
+  - A node runs only 2 μ-batches concurrently (F2/F3 overlap).
+  - When one batch's forward pass ends, its members return to the pool and **a new batch is re-selected from (the returned members + the standing surplus)** (zero memory allocation) — *no third batch is force-composed.*
+  - Completed requests are refilled like-for-like by per-completion healing, completed prefills transition to decode, age-cap = 5 for fairness. Deployed prefill 128.
 
-**composition — operating-point hit ([puls-engine/sim/lifecycle.cpp](puls-engine/sim/lifecycle.cpp), with dependency · age-cap):**
+**composition — operating-point hit ([puls-engine/sim/lifecycle.cpp](puls-engine/sim/lifecycle.cpp), with dependency · age-cap; repro: `puls_lifecycle 4000 64 5 2000`):**
 
 | 2 active μ-batch (re-composed on completion) | operating-point target | hit | Σdev |
 |---|---|---|---|
@@ -195,28 +205,60 @@ Interpretation:
 
 - **No age-cap tail (the 2-active structure).** The old validation's "third-batch spike (count 108 · spread 3.7%)" came from a *forced 3rd batch* where warm-start waiting members triggered the age-cap. The 2-active model never forces a 3rd batch (it only *re-composes* from returned members + surplus), so that tail vanishes structurally.
 - **Holds even with dependency · age-cap.** Adding the prefill→decode transition and the fairness age-cap = 5 does not break either composition — the logic (steering · greedy · healing · age-cap · KV-centering) is *scale-invariant*; only the operating-point constants change (prefill 256 ↔ 128 isomorphic).
-- **Throughput is sustained by construction** — the per-cycle decode budget is pinned to the operating point (62, or fewer when the KV cap binds first), so as long as the pool stays abundant each cycle processes a fixed quantum; sustainability is a structural consequence of the fixed operating point. Absolute tok/s awaits silicon-calibrated cycle time.
-- **Cluster scale — global scheduler.** At server scale (hundreds–thousands of nodes) the global arrival mean exceeds 100K, so per-node pools drift and idle blows up. The **global scheduler** (greedy cold-start: shed long to edge + interleave-greedy · per-completion healing = toxic-fit) **pays only the ~2.2% initial edge cost and thereafter holds each node at the mean-100K operating point indefinitely** (long requests preserved, drift 0). Principle, E sweep, and on2 measurement in [`ARCHITECTURE.md`](ARCHITECTURE.md) §7 / [puls-engine/core/global_scheduler.cpp](puls-engine/core/global_scheduler.cpp).
+- **Throughput is sustained by construction.**
+  - The per-cycle decode budget is pinned to the operating point (62, or fewer when the KV cap binds first), so as long as the pool stays abundant each cycle processes a fixed quantum; sustainability is a structural consequence of the fixed operating point.
+  - Absolute tok/s awaits silicon-calibrated cycle time.
+- **Cluster scale — global scheduler.**
+  - At server scale (hundreds–thousands of nodes) the global arrival mean exceeds 100K, so per-node pools drift and idle blows up.
+  - The **global scheduler** (greedy cold-start: shed long to edge + interleave-greedy · per-completion healing = toxic-fit) **pays only the ~2.2% initial edge cost and thereafter holds each node at the mean-100K operating point indefinitely** (long requests preserved, drift 0).
+  - Principle, E sweep, and on2 measurement in [`ARCHITECTURE.md`](ARCHITECTURE.md) §7 / [puls-engine/core/global_scheduler.cpp](puls-engine/core/global_scheduler.cpp).
 
 ## Cluster Scheduler (C)
 
-The winning cluster design **C** keeps the §6 node mechanism (resident **surplus** + per-iteration steering re-selection + per-completion healing) and adds two cluster-level pieces: a **global age-cap** (cross-node FIFO fairness → forced routing) and an **on-node multi-turn KV cache** (3-tier HBM / SSD / recompute, placed in the HBM left after the decode pool). The three split the labor — surplus → composition (Σdev), global age-cap → latency / fairness (and it is what lets returning sessions be served fast enough to hit the cache), cache → TTFT. The same TBT now carries the **instance-dependency model**: Instance A (PIM ‖ GPU-A) must finish before Instance B (FFN), and PIM↔GPU-A share HBM, so `TBT = max(instance_a, t_ffn) × layers` with `instance_a = max(t_pim, t_gpu_a) + β·max(0, t_pim − t_gpu_a)` (contention-free when `t_pim ≤ t_gpu_a`).
+The winning cluster design **C** keeps the §6 node mechanism (resident **surplus** + per-iteration steering re-selection + per-completion healing) and adds two cluster-level pieces: a **global age-cap** (cross-node FIFO fairness → forced routing) and an **on-node multi-turn KV cache** (3-tier HBM / SSD / recompute, placed in the HBM left after the decode pool).
+
+- **The three split the labor** — surplus → composition (Σdev), global age-cap → latency / fairness (and it is what lets returning sessions be served fast enough to hit the cache), cache → TTFT.
+- **Surplus re-selection also proved to be a *general-purpose absorber*** of arbitrary batch perturbations — age-cap forced injections and affinity length-mismatches alike — which is what let cache affinity be added with zero new machinery.
+- **The same TBT now carries the instance-dependency model** — Instance A (PIM ‖ GPU-A) must finish before Instance B (FFN), and PIM↔GPU-A share HBM, so `TBT = max(instance_a, t_ffn) × layers` with `instance_a = max(t_pim, t_gpu_a) + β·max(0, t_pim − t_gpu_a)` (contention-free when `t_pim ≤ t_gpu_a`).
 
 > **Two modeling axes — do not conflate.** `max_tokens` models the **random EOS appearance**: each request's decode-loop length on the time axis (how many tokens until EOS — the random EOS replaced by a sampled deterministic constant), *not* an amount of KV. The **KV** (`live_kv = prompt + dec`, ≈6.2M) is the amount read **per layer** every step — PIM reads it in per-layer attention, so `TBT = (per-layer max) × 80 layers`.
 
-Measured at the deployed operating point ([puls-engine/sim/csched.cpp](puls-engine/sim/csched.cpp), 8000 iters · Z = 64 · `csched 8000 64 16000 200 25 300 0.5 2e7 5 25`):
+**Cache affinity (multi-turn returns).** Returns whose KV is HBM-cached are queued at the holding node and admitted with 1st priority when a hole appears — making **99.7%** of hits physical (the old accounting counted any-node hits; physically only 1.7% ≈ 1/Z landed on the holder).
+
+```
+hole appears at node z
+  1st priority: z's affinity queue non-empty → admit the longest-waiting member (length · cap_room ignored)
+  2nd priority: queue empty → queue.pull_slot(hole) as usual
+          (forced if a global aged member exists, else nearest to ideal=hole)
+```
+
+Why it works:
+
+- Holes arrive ~every 17 rounds per node, so waiting is short and naturally bounded.
+- Waiting costs ~2 ms/round vs abandoning the cache costs an SSD reload of 160–780 rounds (~10× more) — so a separate spill cap (200, vs global 25) lets cached returns wait. Measured spill is near zero: **4 of 13,483 affinity candidates (0.03%)** — under the single global cap 25 it was 31% (4,317); the dedicated-cap separation cut it ~1,000×.
+- Affinity returns are near-like-for-like by construction (former residents of that node, growth ≤12K, and eligibility ≥16K filters out high-growth shorts), so the distribution is almost preserved.
+- The residual mismatch is absorbed by the existing surplus + re-selection + node age-cap machinery — Σdev actually improves vs spilling (spill → global forced injection is a worse perturbation).
+
+Measured at the deployed operating point ([puls-engine/sim/csched.cpp](puls-engine/sim/csched.cpp), 8000 iters · Z = 64 · `csched 8000 64 16000 200 25 300 0.5 1e8 5 25`):
 
 | config (locked) | value | | KPI (C, measured) | value |
 |---|---|---|---|---|
-| decode_surplus | **25** (decode_pool 149) | | Σdev (avg / worst) | **1.35% / 16.9%** |
-| global_age_cap | **25** | | TBT (mean / p99) | **2056 / 2191 µs** |
-| eligibility | **16000** (mid · long) | | TTFT (mean / p99) | **0.74M / 8.94M µs** |
-| evict_age | 200 | | SLO goodput | **3.79M tok/s** |
-| contention β | 0.5 (conservative; C is β-robust) | | TTFT-met | **97.1%** |
-| offload_bw | 2e7 (SSD ≈ 10 GB/s) | | cache HBM-hit | **92.0%** |
-| node_age_cap | 5 | | max wait | **26 rounds** |
+| decode_surplus | **25** (decode_pool 149) | | Σdev (avg / worst) | **1.38% / 22.6%** |
+| global_age_cap | **25** | | TBT (mean / p99) | **2058 / 2194 µs** |
+| aff_spill | **200** | | TTFT (mean / p99) | **0.76M / 8.77M µs** |
+| affinity / dyncache | **on** | | SLO goodput | **3.80M tok/s** |
+| eligibility | **16000** (mid · long) | | TTFT-met | **97.2%** |
+| evict_age | 200 | | cache HBM-hit | **91.1% (physical 99.7%)** |
+| contention β | 0.5 (conservative; C is β-robust) | | max wait | **24 rounds** |
+| offload_bw | 1e8 (SSD ≈ 50 GB/s NVMe array) | | worst token gap | **6 rounds** (= node age-cap+1) |
+| node_age_cap | 5 | | | |
 
-C beats both the node-local baseline (no global age-cap → `max_wait` 6471, starvation; cache off) and pure pre-positioning (no surplus → Σdev 8.3%, PIM exposed 99.6%) on every real KPI. The **derived operating point is unchanged** (62 · 6.15M · ~100K · prefill 128) — surplus / age-cap / cache / β are cluster-layer knobs swept *on top of* it, not changes to it. Full A/B/C comparison, sweeps, and the contention analysis: [`ARCHITECTURE.md`](ARCHITECTURE.md) §7.6.
+- **[PAUSE] KPI — per-request token gap.** Invisible to batch-level TBT (TBT p99 identical across the node-cap sweep); the node age-cap bounds the worst gap at exactly cap+1 rounds (cap 5 → 12.2 ms, 3.4% of tokens paused, mean gap 1.12) — a pure tail-bound knob.
+
+- **C beats both alternatives on every real KPI** — the node-local baseline A (no global age-cap → TTFT 0.94M · `max_wait` 4551, unbounded starvation, length-biased; cache off) and pure pre-positioning B (no surplus → Σdev 20.1%, PIM exposed 82.5%, goodput 2.15M tok/s).
+- **With the realistic SSD constant A recovers substantially** (TTFT 1.75M → 0.94M), so C's remaining edge rests on bounded waiting (24 vs 4551), composition, and the physically-real cache tier — smaller but more defensible.
+- The **derived operating point is unchanged** (62 · 6.15M · ~100K · prefill 128) — surplus / age-cap / cache / β are cluster-layer knobs swept *on top of* it, not changes to it.
+- Full A/B/C comparison, sweeps, and the contention analysis: [`ARCHITECTURE.md`](ARCHITECTURE.md) §7.6.
 
 ## Limitations / Disclosure
 
@@ -241,11 +283,11 @@ The core scheduler policy of PULS ([`ARCHITECTURE.md`](ARCHITECTURE.md) §6) is 
 - [`README.md`](README.md) — this document (entry point)
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — architecture body (motivation, design principles, substrate, instance disaggregation, scheduler integration, pool-model admission + 2-active composition validation §6.8, layer flow, prior-art comparison)
 - [`OPERATING_POINT.md`](OPERATING_POINT.md) — canonical Phase-2 operating-point & batch-composition spec (pool model, steering targets, operating-point basis)
-- [`puls-engine/`](puls-engine/CONTRACT.md) — model/HW-generalized C++ scheduler (derive · steering · node/global scheduler · lifecycle sim, 189 checks)
+- [`puls-engine/`](puls-engine/CONTRACT.md) — model/HW-generalized C++ scheduler (derive · steering · node/global scheduler · lifecycle sim, 196 checks)
 - [`docs/scheduler_policy.html`](docs/scheduler_policy.html) — interactive reading guide (companion to ARCHITECTURE.md §6)
 - [`LICENSE`](LICENSE) — Apache 2.0
 
-Build & validate: `cd puls-engine && bash build.sh` → 189 checks.
+Build & validate: `cd puls-engine && bash build.sh` → 196 checks.
 
 ## License
 

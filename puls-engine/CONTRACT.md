@@ -272,11 +272,11 @@ hbm_fits          = instance_a_tb ≤ hbm_capacity_tb
 
 - **모듈**:
   - `scheduler/queue.{h,cpp}` — `GlobalQueue`: 길이-fit 라우팅(`pull_near`) + **글로벌 age-cap 강제**(`pull_slot`: wait>cap 인 가장 오래된 것 강제 주입). 노드 age-cap(steering)과 별개의 *클러스터* 공정성.
-  - `scheduler/cache.{h,cpp}` — `ClusterCache`: **3-tier 멀티턴 KV 캐시**(HBM hit / SSD reload / recompute). 적격 = `len > eligibility` ∧ 노드 잔여 HBM. `evict_age` idle → SSD 강등, `gone_age` → 소멸.
+  - `scheduler/cache.{h,cpp}` — `ClusterCache`: **3-tier 멀티턴 KV 캐시**(HBM hit / SSD reload / recompute). 적격 = `len > eligibility` ∧ 노드 잔여 HBM. `evict_age` idle → SSD 강등, `gone_age` → 소멸. **`peek`**(부작용 없는 조회 — 어피니티 라우팅 판단) + **`enforce_budget`**(노드별 동적 예산 — 멀티턴 인플레이션으로 풀 실 KV 가 설계 footprint 를 초과한 만큼 캐시 차감, HBM 바이트 폐루프).
   - `scheduler/preposition.{h,cpp}` — pre-position(대조군 B 전용).
   - `sim/{harness,kpi,metrics}.h` · `sim/workload_mt.{h,cpp}` — **컨텐션·의존성 TBT**(`instance_a_latency = max(t_pim,t_gpu_a)+β·max(0,t_pim−t_gpu_a)`, `TBT = max(instance_a,t_ffn)×layers`) + 실 KPI(TBT/TTFT/SLO goodput/PIM-노출) + 멀티턴 워크로드(`max_tokens=uniform[256,4096]`).
-  - `sim/{csched,baseline,prepo}.cpp` — 드라이버 C(채택)/A(잉여25 ablation)/B(pre-position 대조).
+  - `sim/{csched,baseline,prepo}.cpp` — 드라이버 C(채택)/A(잉여25 ablation)/B(pre-position 대조). C 는 **캐시 어피니티**(HBM-hit 복귀 → 보유 노드 전용 대기열, hole 발생 시 1순위 admit — 길이·cap_room 무관 최고령 우선; 대기열 비었을 때만 2순위 `pull_slot`) + **어피니티 spill cap**(대기 > cap 이면 글로벌 큐 spill — 글로벌 cap 과 분리: 캐시 보유 복귀는 대기의 보상이 있어 경제학이 다름) + **[PAUSE] KPI**(요청별 토큰 간격 — 잉여 일시정지 비용은 배치-단위 TBT 의 사각; node age-cap 이 최악 gap 을 cap+1 라운드로 bound) 포함.
   - `validation/test_{queue,cache,kpi,preposition,workload_mt}.cpp` — 큐 강제·3-tier 비용·컨텐션 TBT·pre-position·멀티턴 검증.
-- **C 표준 동작점(확정)**: `decode_surplus=25`(→ decode_pool 149, §5.2 DeriveOptions) · `global_age_cap=25` · `eligibility=16000` · `evict_age=200` · `contention β=0.5` · `offload_bw=2e7`(SSD) · `node_age_cap=5`. 재현: `csched 8000 64 16000 200 25 300 0.5 2e7 5 25` → Σdev 1.348% · hbmHit 92.0% · SLO goodput 3.79M.
+- **C 표준 동작점(확정, 2026-06 갱신)**: `decode_surplus=25`(→ decode_pool 149, §5.2 DeriveOptions) · `global_age_cap=25` · `eligibility=16000` · `evict_age=200` · `contention β=0.5` · `offload_bw=1e8`(현실 NVMe 어레이 — 옛 2e7 은 recompute 손익분기 2.1e7 아래라 티어 2 무력) · `node_age_cap=5` · `affinity=on` · `dyncache=on` · `aff_spill=200`. 재현: `csched 8000 64 16000 200 25 300 0.5 1e8 5 25` → Σdev 1.381% · hbmHit 91.1%(**물리 99.7%**) · SLO goodput 3.80M · TTFT 0.76M · max_wait 24 · 최악 토큰 간격 6 라운드(= node age-cap+1).
 - **불변식 준수**: 동작점은 여전히 `derive_operating_point`(harness `make_deployment`)로 산출 — 모델/HW 바뀌면 자동 재도출(§9-5, 동작점 리터럴 0 확인). 클러스터 knob(eligibility·β·offload_bw·evict_age)은 *가정 라벨 sim 파라미터*로 `sim`/`scheduler` 레이어에만(§9-2 워크로드 파라미터와 동격), `core` 런타임 경로 불침투.
 - **미모델링(deferred)**: 이벤트-구동 디스패치 DAG(ARCH §6.3) — TBT 는 해석적 정상상태(더블버퍼링). 스케줄러 로직 재사용, 타이밍 층만 교체 시 도입.

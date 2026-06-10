@@ -1634,6 +1634,47 @@ pre.code-block .var { color: #f9a8d4; }
   .sidebar { position: relative; height: auto; }
   .content { padding: 28px 24px 60px 24px; }
 }
+
+/* ============================ Language toggle (KO / EN) ============================ */
+.lang-toggle {
+  position: fixed;
+  left: 18px;
+  bottom: 18px;
+  z-index: 1000;
+  display: flex;
+  gap: 6px;
+  background: #ffffff;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 5px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.10);
+}
+.lang-toggle button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 7px;
+  padding: 5px 9px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--color-muted);
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.lang-toggle button:hover { background: var(--color-soft); }
+.lang-toggle button.active {
+  background: var(--color-soft);
+  border-color: var(--color-border);
+  color: var(--color-text);
+  font-weight: 600;
+}
+.lang-toggle svg { display: block; border-radius: 2px; }
+.lang-toggle .lbl { line-height: 1; }
+@media (max-width: 900px) {
+  .lang-toggle { left: 12px; bottom: 12px; }
+}
 </style>
 </head>
 <body>
@@ -1675,7 +1716,7 @@ pre.code-block .var { color: #f9a8d4; }
 
       <div class="callout info">
         <span class="callout-title">GENERALIZED (2026-06)</span>
-        The numbers in this policy are a concrete example calibrated on <b>Llama-3 70B + B200 + HBM4 (16-high)</b>. The <b>method</b> for constructing the operating point is model- and GPU-independent: it is implemented and validated in the C++ scheduler <b>puls-engine</b> (189 checks) and is derived for any model / GPU within the HBM capacity bound. See <a href="../puls-engine/CONTRACT.md">puls-engine/CONTRACT.md</a>.
+        The numbers in this policy are a concrete example calibrated on <b>Llama-3 70B + B200 + HBM4 (16-high)</b>. The <b>method</b> for constructing the operating point is model- and GPU-independent: it is implemented and validated in the C++ scheduler <b>puls-engine</b> (196 checks) and is derived for any model / GPU within the HBM capacity bound. See <a href="../puls-engine/CONTRACT.md">puls-engine/CONTRACT.md</a>.
       </div>
 
       <div class="figure-container">
@@ -1978,7 +2019,7 @@ pre.code-block .var { color: #f9a8d4; }
         <ul>
           <li><b>★ Length-distribution-agnostic.</b> On a heavily varied pool, short + long requests are <i>combined</i> to hit both targets — the average is never read. Heavy / mixed / bimodal all converge. Even an age-cap-forced off-size request is corrected by steering (a forced long request lowers <code class="inline">ideal</code> → the next picks several short ones).</li>
           <li><b>Operating parameters = target_count + target_kv + AGE_CAP.</b> Steering hits the target directly; <code class="inline">former</code> selects by nearest-to-<code class="inline">ideal</code>, not by any tolerance gate.</li>
-          <li><b>AGE_CAP trade-off (sweep).</b> cap↑ → steering freedom↑ → spread↓ but latency↑; cap↓ → FIFO-like → fair/low-latency but spread↑. <code class="inline">cap1: 3.1%</code> · <code class="inline">cap2: 1.2%, wait ≤3</code> · <code class="inline">cap5: 0.7%, wait 5</code> · <code class="inline">cap∞: 0.8% but starvation (wait 37)</code> → <b>AGE_CAP = 5 adopted</b> (wait 5 ≈ 128 µs ≪ TBT, so latency-harmless; spread 0.7%).</li>
+          <li><b>AGE_CAP trade-off (sweep).</b> cap↑ → steering freedom↑ → spread↓ but latency↑; cap↓ → FIFO-like → fair/low-latency but spread↑. <code class="inline">cap1: 3.1%</code> · <code class="inline">cap2: 1.2%, wait ≤3</code> · <code class="inline">cap5: 0.7%, wait 5</code> · <code class="inline">cap∞: 0.8% but starvation (wait 37)</code> → <b>AGE_CAP = 5 adopted</b> (wait 5 rounds ≈ 10 ms of paused decoding — a per-request token-gap [PAUSE], invisible to batch-level TBT and bounded at exactly cap+1 rounds ≈ 12.2 ms worst; a pure tail-bound knob; spread 0.7%).</li>
         </ul>
 
         <div class="callout note">
@@ -1994,19 +2035,20 @@ pre.code-block .var { color: #f9a8d4; }
       <div class="section-header">
         <div class="section-eyebrow">§ 7 — CLUSTER ROUTING</div>
         <h1 class="section-title">Cluster Scheduler (C) — Per-Node 100K Centering</h1>
-        <div class="section-lede">The balanced operating point exists only when a node's in-flight pool is centered at <b>mean ~100K</b> — only then does the local steering (§4) hit (decode <b>62</b> ∧ Σkv <b>6.15M</b> at prefill 128). At server scale (hundreds–thousands of nodes) the global arrival mean drifts above 100K, so a cluster-level scheduler <b>C</b> routes requests to seat each node at that operating point, with a global age-cap for inter-node FIFO fairness and an on-node 3-tier multi-turn KV cache.</div>
+        <div class="section-lede">The balanced operating point exists only when a node's in-flight pool is centered at <b>mean ~100K</b> — only then does the local steering (§4) hit (decode <b>62</b> ∧ Σkv <b>6.15M</b> at prefill 128). At server scale (hundreds–thousands of nodes) the global arrival mean drifts above 100K, so a cluster-level scheduler <b>C</b> routes requests to seat each node at that operating point, with a global age-cap for inter-node FIFO fairness and an on-node 3-tier multi-turn KV cache with holding-node affinity (cached returns routed back to their KV).</div>
       </div>
 
       <div class="prose">
 
         <h2 class="h-sub">Why it exists</h2>
-        <p>Without centering, each node's pool tracks the global arrival mean and drifts high: a node then fits fewer decoders, so a batch <b>falls below count 62 while Σkv rises above 6.15M</b> — both control targets break together and idle blows up. <b>C</b> keeps every node centered at 100K (measured <code class="inline">poolMean 117K</code>) so the per-node steering can compose the operating point.</p>
+        <p>Without centering, each node's pool tracks the global arrival mean and drifts high: a node then fits fewer decoders, so a batch <b>falls below count 62 while Σkv rises above 6.15M</b> — both control targets break together and idle blows up. <b>C</b> keeps every node centered at 100K (measured <code class="inline">poolMean 116K</code>) so the per-node steering can compose the operating point.</p>
 
-        <h2 class="h-sub">Design = node mechanism + (1) global age-cap + (2) 3-tier KV cache</h2>
-        <p>C is the node mechanism — <b>resident surplus</b> + <b>per-iteration steering re-selection</b> + <b>per-completion healing</b> — plus two cluster-level additions:</p>
+        <h2 class="h-sub">Design = node mechanism + (1) global age-cap + (2) 3-tier KV cache + (3) cache affinity</h2>
+        <p>C is the node mechanism — <b>resident surplus</b> + <b>per-iteration steering re-selection</b> + <b>per-completion healing</b> — plus three cluster-level additions. The surplus re-selection is a <b>general-purpose perturbation absorber</b> — it digests age-cap forced injections and affinity mismatches alike — which is what let cache affinity land with zero new steering machinery:</p>
         <ul>
           <li><b>(1) Global age-cap (inter-node FIFO fairness).</b> A node requests <code class="inline">ideal = hole</code>; the global queue returns a near-fit, but any request older than <code class="inline">global_age_cap</code> is <b>force-routed</b> regardless of fit. Bounded wait, no starvation across nodes.</li>
-          <li><b>(2) On-node multi-turn 3-tier KV cache.</b> <b>HBM hit / SSD reload / recompute.</b> When a conversation's <code class="inline">length &gt; 16000</code> and residual HBM fits, its KV is cached in HBM; <code class="inline">evict_age</code> idle turns demote it (SSD at <code class="inline">offload_bw</code>), <code class="inline">gone_age</code> turns trigger recompute.</li>
+          <li><b>(2) On-node multi-turn 3-tier KV cache.</b> <b>HBM hit / SSD reload / recompute.</b> When a conversation's <code class="inline">length &gt; 16000</code> and residual HBM fits, its KV is cached in HBM; <code class="inline">evict_age</code> idle turns demote it (SSD at <code class="inline">offload_bw</code>), <code class="inline">gone_age</code> turns trigger recompute. <b>Dynamic cache budget:</b> pool-KV inflation from multi-turn (measured ~0.24 TB ≈ 23% of the cache budget) is debited from the node's cache budget each round — an HBM-byte closed loop (static accounting overstated HBM-hit by ~9%p).</li>
+          <li><b>(3) Cache affinity + spill cap.</b> A multi-turn return whose KV is HBM-cached queues at the holding node; on a hole, 1st priority = the oldest affinity waiter (admitted regardless of length / cap_room), 2nd = the usual <code class="inline">pull_slot</code> (global aged-forced, else ideal = hole nearest). Physical (holding-node) hits: <b>1.7% → 99.7%</b>. Waiters get their own bound <code class="inline">aff_spill = 200</code> — separate from <code class="inline">global_age_cap 25</code>, because a cached return's waiting is rewarded (~2 ms/round is ~10× cheaper than a 160–780-round SSD reload). Sweeping 25→200 improved <i>both</i> physical hits (67→99.7%) and Σdev (1.57→1.38%): spilled requests became forced off-fit injections — a worse perturbation than affinity's near like-for-like admits (former residents grown ≤12K; eligibility ≥16K filters high-growth shorts); residuals are absorbed by the existing surplus re-selection + node age-cap machinery. Measured spill: <b>4 of 13,483 affinity candidates (0.03%)</b> — under the single global cap 25 it was 31% (4,317); the dedicated-cap separation cut it ~1,000×.</li>
         </ul>
 
         <h2 class="h-sub">C config (locked)</h2>
@@ -2014,26 +2056,32 @@ pre.code-block .var { color: #f9a8d4; }
           <thead><tr><th style="width: 200px;">parameter</th><th style="width: 120px;">value</th><th>role</th></tr></thead>
           <tbody>
             <tr><td><code>decode_surplus</code></td><td class="mono"><b>25</b></td><td>resident surplus per node → <code>decode_pool</code> <b>149</b></td></tr>
+            <tr><td><code>prefill_pool</code></td><td class="mono"><b>60</b></td><td>resident prefill pool — depth-diversity floor 50 + surplus margin 10 (prefill-side surplus; over-provisioning risks age-cap forcing)</td></tr>
             <tr><td><code>global_age_cap</code></td><td class="mono"><b>25</b></td><td>inter-node FIFO cap — oldest-beyond-cap force-routed</td></tr>
             <tr><td><code>eligibility</code></td><td class="mono"><b>16000</b></td><td>HBM-cache threshold (mid · long): <code>length &gt; 16000</code></td></tr>
             <tr><td><code>evict_age</code></td><td class="mono"><b>200</b></td><td>idle turns before HBM → SSD demotion</td></tr>
+            <tr><td><code>gone_age</code></td><td class="mono"><b>3000</b></td><td>idle turns before the SSD entry expires → recompute (fixed assumption)</td></tr>
             <tr><td><code>contention β</code></td><td class="mono"><b>0.5</b></td><td>conservative PIM-exposure penalty weight (β-robust)</td></tr>
-            <tr><td><code>offload_bw</code></td><td class="mono"><b>2e7</b></td><td>SSD reload bandwidth ≈ 10 GB/s</td></tr>
+            <tr><td><code>offload_bw</code></td><td class="mono"><b>1e8</b></td><td>SSD reload bandwidth ≈ 50 GB/s NVMe array (assumption label; old 2e7 sat below the recompute break-even ≈ 2.1e7, mathematically disabling the SSD tier)</td></tr>
             <tr><td><code>node_age_cap</code></td><td class="mono"><b>5</b></td><td>on-node steering fairness cap</td></tr>
+            <tr><td><code>affinity</code></td><td class="mono"><b>on</b></td><td>HBM-cached returns queue at the holding node — 1st-priority admit on a hole</td></tr>
+            <tr><td><code>aff_spill</code></td><td class="mono"><b>200</b></td><td>affinity-wait bound (separate from the global cap) — beyond it, spill to the global queue</td></tr>
+            <tr><td><code>dyncache</code></td><td class="mono"><b>on</b></td><td>multi-turn pool-KV inflation debited from the cache budget each round (HBM-byte closed loop)</td></tr>
           </tbody>
         </table>
 
         <h2 class="h-sub">C KPI (measured)</h2>
         <div class="kpi-grid">
-          <div class="kpi-card good"><span class="kpi-label">Σdev</span><span class="kpi-value">1.35%</span><span class="kpi-sub">worst 16.9%</span></div>
-          <div class="kpi-card"><span class="kpi-label">TBT mean</span><span class="kpi-value">2056 µs</span><span class="kpi-sub">p99 2191 µs</span></div>
-          <div class="kpi-card"><span class="kpi-label">TTFT mean</span><span class="kpi-value">0.74M µs</span><span class="kpi-sub">p99 8.94M µs</span></div>
-          <div class="kpi-card good"><span class="kpi-label">SLO goodput</span><span class="kpi-value">3.79M</span><span class="kpi-sub">tok/s (TBT goodput 3.90M)</span></div>
-          <div class="kpi-card good"><span class="kpi-label">TTFT-met</span><span class="kpi-value">97.1%</span><span class="kpi-sub">within SLO</span></div>
-          <div class="kpi-card good"><span class="kpi-label">cache HBM-hit</span><span class="kpi-value">92.0%</span><span class="kpi-sub">3-tier multi-turn</span></div>
-          <div class="kpi-card accent"><span class="kpi-label">PIM-exposed</span><span class="kpi-value">73.5%</span><span class="kpi-sub">expo 20µs/μbatch ≈ 0.25µs/layer ≈ 1% of 25.5µs</span></div>
-          <div class="kpi-card"><span class="kpi-label">max_wait</span><span class="kpi-value">26</span><span class="kpi-sub">rounds · forced 1626</span></div>
-          <div class="kpi-card"><span class="kpi-label">poolMean</span><span class="kpi-value">117K</span><span class="kpi-sub">centered ~100K</span></div>
+          <div class="kpi-card good"><span class="kpi-label">Σdev</span><span class="kpi-value">1.38%</span><span class="kpi-sub">worst 22.6%</span></div>
+          <div class="kpi-card"><span class="kpi-label">TBT mean</span><span class="kpi-value">2058 µs</span><span class="kpi-sub">p99 2194 µs</span></div>
+          <div class="kpi-card"><span class="kpi-label">TTFT mean</span><span class="kpi-value">0.76M µs</span><span class="kpi-sub">p99 8.77M µs</span></div>
+          <div class="kpi-card good"><span class="kpi-label">SLO goodput</span><span class="kpi-value">3.80M</span><span class="kpi-sub">tok/s (TBT goodput 3.90M)</span></div>
+          <div class="kpi-card good"><span class="kpi-label">TTFT-met</span><span class="kpi-value">97.2%</span><span class="kpi-sub">within SLO</span></div>
+          <div class="kpi-card good"><span class="kpi-label">cache HBM-hit</span><span class="kpi-value">91.1%</span><span class="kpi-sub">physical (holding-node) 99.7%</span></div>
+          <div class="kpi-card accent"><span class="kpi-label">PIM-exposed</span><span class="kpi-value">74.4%</span><span class="kpi-sub">expo 21µs/μbatch ≈ 0.26µs/layer ≈ 1% of 25.5µs</span></div>
+          <div class="kpi-card"><span class="kpi-label">max_wait</span><span class="kpi-value">24</span><span class="kpi-sub">rounds · forced 3704</span></div>
+          <div class="kpi-card"><span class="kpi-label">poolMean</span><span class="kpi-value">116K</span><span class="kpi-sub">centered ~100K</span></div>
+          <div class="kpi-card good"><span class="kpi-label">worst token gap</span><span class="kpi-value">6</span><span class="kpi-sub">rounds (= node age-cap+1) ≈ 12.2 ms · paused-token share 3.4%</span></div>
         </div>
 
         <h2 class="h-sub">Contention · dependency TBT model</h2>
@@ -2042,7 +2090,7 @@ pre.code-block .var { color: #f9a8d4; }
 <span class="var">instance_a</span> = max(<span class="var">t_pim</span>, <span class="var">t_gpu_a</span>) + <span class="var">β</span>·max(0, <span class="var">t_pim</span> − <span class="var">t_gpu_a</span>)
 <span class="cmt"># TBT = the slower of instance-A and the FFN lane, across all layers</span>
 <span class="var">TBT</span> = max(<span class="var">instance_a</span>, <span class="var">t_ffn</span>) × <span class="var">80</span>   <span class="cmt"># layers</span></pre>
-        <p><b>Contention-free</b> ⟺ <code class="inline">t_pim ≤ t_gpu_a</code> — the PIM decode read hides entirely in the GPU-A shadow, so the penalty term vanishes. <code class="inline">β = 0.5</code> is the <b>conservative</b> assumption label; C is <b>β-robust</b> (goodput stays fixed across the full β range). The operating point sits on the <b>PIM-hiding edge</b> (derive balances <code class="inline">t_pim ≈ t_gpu_a</code>), so exposure is frequent (<b>73.5%</b>) but each exposure costs only <b>~1%</b> of the <b>~25.5 µs</b> per-layer budget (≈ 0.25 µs/layer) — yielding TBT mean <b>2056 µs</b> against the ~2.0 ms (80×25.5µs) budget.</p>
+        <p><b>Contention-free</b> ⟺ <code class="inline">t_pim ≤ t_gpu_a</code> — the PIM decode read hides entirely in the GPU-A shadow, so the penalty term vanishes. <code class="inline">β = 0.5</code> is the <b>conservative</b> assumption label; C is <b>β-robust</b> (goodput stays fixed across the full β range). The operating point sits on the <b>PIM-hiding edge</b> (derive balances <code class="inline">t_pim ≈ t_gpu_a</code>), so exposure is frequent (<b>74.4%</b>) but each exposure costs only <b>~1%</b> of the <b>~25.5 µs</b> per-layer budget (≈ 0.26 µs/layer) — yielding TBT mean <b>2058 µs</b> against the ~2.0 ms (80×25.5µs) budget.</p>
 
         <div class="callout note">
           <span class="callout-title">OPERATING POINT</span>
@@ -2259,7 +2307,7 @@ pre.code-block .var { color: #f9a8d4; }
           <span class="source-id">F3</span>
           <span class="source-name">Inter-Instance A↔B Pipeline</span>
           <span class="source-badge calibrated">Calibrated</span>
-          <span class="source-headline">2-active compose · composition 100% · Σdev 0.38%</span>
+          <span class="source-headline">2-active compose · composition ≈99.5% · Σdev ≈1.2%</span>
         </div>
         <div class="source-figure">
           <div class="f3-wrap">
@@ -2513,7 +2561,7 @@ pre.code-block .var { color: #f9a8d4; }
           <tbody>
             <tr><td class="source-id-cell">F1</td><td>SP-PIM attention (2048-ch Q-replicate)</td><td><span class="status-def">Deferred</span></td><td class="mono">—</td><td>Impl-11 (Blackwell attn kernel calibration)</td></tr>
             <tr><td class="source-id-cell">F2</td><td>Projection ‖ PIM double-buffering</td><td><span class="status-def">Deferred</span></td><td class="mono">—</td><td>Impl-11 (isolated cycle ratio)</td></tr>
-            <tr><td class="source-id-cell">F3</td><td>Inter-instance A↔B pipeline</td><td><span class="status-cal">Calibrated</span></td><td class="mono">0.92–0.99 closed-form · lifecycle 2-μ-batch composition 100% · Σdev 0.38%</td><td>closed-form ctx sweep · integrated lifecycle (2-active, deployed 128)</td></tr>
+            <tr><td class="source-id-cell">F3</td><td>Inter-instance A↔B pipeline</td><td><span class="status-cal">Calibrated</span></td><td class="mono">0.92–0.99 closed-form · lifecycle 2-μ-batch composition ≈99.5% · Σdev ≈1.2%</td><td>closed-form ctx sweep · integrated lifecycle (2-active, deployed 128)</td></tr>
             <tr><td class="source-id-cell">F4</td><td>μ-batch staggering</td><td><span class="status-abs">Absorbed</span></td><td class="mono">—</td><td>Precondition for F2·F3; contained in their measurements</td></tr>
             <tr><td class="source-id-cell">F5</td><td>Channel-independent vs lock-step</td><td><span class="status-cal">Calibrated</span></td><td class="mono">5.15× speedup</td><td>LongBench λ=3.40, 10-req sum trace-grounded</td></tr>
             <tr><td class="source-id-cell">Aux1</td><td>Mixed batching weight reuse</td><td><span class="status-cal">Calibrated</span></td><td class="mono">2.0× closed-form · 1.97× T4 measured</td><td>Llama-3 70B FFN single-layer, Colab T4</td></tr>
@@ -2550,7 +2598,7 @@ pre.code-block .var { color: #f9a8d4; }
       <div class="result-block">
         <h3 class="result-block-title">Runtime validation — 2 active μ-batch (integrated lifecycle)</h3>
         <p style="font-size:12.5px; color:var(--color-muted); margin: 6px 0 12px 0;">
-          One integrated sim (<code class="inline">../puls-engine/sim/lifecycle.cpp</code>) runs cold-start → steering · prefill→decode transition · per-completion healing · age-cap 5 on a wide synthetic pool. A node runs <b>2 active μ-batches</b>; when one finishes its forward pass it is <b>re-composed from (returned members + surplus)</b> — <i>no 3rd batch is force-composed</i>. Deployed prefill 128. Statistics are over the <b>last 500 of 1000 rounds × 16 nodes = 8,000 node-rounds</b> (16,000 decode · 8,000 prefill batches).
+          One integrated sim (<code class="inline">../puls-engine/sim/lifecycle.cpp</code>) runs cold-start → steering · prefill→decode transition · per-completion healing · age-cap 5 on a wide synthetic pool. A node runs <b>2 active μ-batches</b>; when one finishes its forward pass it is <b>re-composed from (returned members + surplus)</b> — <i>no 3rd batch is force-composed</i>. Deployed prefill 128. Statistics: <code class="inline">puls_lifecycle 4000 64 5 2000</code> — <b>last 3,500 of 4,000 rounds × 64 nodes</b> (re-verified 2026-06: decode 99.87% / Σdev 1.233%, prefill 100% / Σdev 0.114%).
         </p>
 
         <p style="font-size:12.5px; margin: 4px 0 6px 0;"><b>composition — operating-point hit (with dependency · age-cap)</b></p>
@@ -2608,6 +2656,502 @@ pre.code-block .var { color: #f9a8d4; }
   if (initial && document.getElementById(initial)) {
     show(initial);
   }
+})();
+</script>
+
+<!-- ============================ Language toggle (KO / EN) ============================ -->
+<div class="lang-toggle" role="group" aria-label="Language">
+  <button type="button" data-lang="ko" title="한국어">
+    <svg width="22" height="15" viewBox="0 0 30 20" aria-hidden="true">
+      <rect width="30" height="20" fill="#ffffff" stroke="#e5e7eb" stroke-width="0.6"/>
+      <g transform="translate(15,10) rotate(-33.69)">
+        <path d="M0,-6 A6,6 0 0,1 0,6 A3,3 0 0,1 0,0 A3,3 0 0,0 0,-6 Z" fill="#cd2e3a"/>
+        <path d="M0,-6 A6,6 0 0,0 0,6 A3,3 0 0,0 0,0 A3,3 0 0,1 0,-6 Z" fill="#0047a0"/>
+      </g>
+    </svg>
+    <span class="lbl">한국어</span>
+  </button>
+  <button type="button" data-lang="en" title="English">
+    <svg width="22" height="15" viewBox="0 0 26 18" aria-hidden="true">
+      <rect width="26" height="18" fill="#ffffff"/>
+      <g fill="#b22234">
+        <rect y="0" width="26" height="1.385"/>
+        <rect y="2.77" width="26" height="1.385"/>
+        <rect y="5.54" width="26" height="1.385"/>
+        <rect y="8.31" width="26" height="1.385"/>
+        <rect y="11.08" width="26" height="1.385"/>
+        <rect y="13.85" width="26" height="1.385"/>
+        <rect y="16.62" width="26" height="1.385"/>
+      </g>
+      <rect width="11" height="9.69" fill="#3c3b6e"/>
+    </svg>
+    <span class="lbl">English</span>
+  </button>
+</div>
+
+<script>
+/* ============================================================
+   KO / EN language toggle.
+   The English DOM is never edited: at load each translatable
+   element's original innerHTML is captured and restored verbatim
+   for EN. Korean is keyed by the element's normalized visible text
+   (KO map below). Elements with no KO entry stay English on purpose
+   (technical terms, code, diagrams, numeric labels).
+   ============================================================ */
+(function () {
+  var KO = {};
+
+  Object.assign(KO, {
+    /* ---- sidebar ---- */
+    "Reading guide — companion to ARCHITECTURE.md §6":
+      "읽기 가이드 — ARCHITECTURE.md §6 동반 문서",
+    "1Instance Disaggregation": "<span class=\"nav-num\">1</span>인스턴스 분리",
+    "2Invariants & Dispatch DAG": "<span class=\"nav-num\">2</span>불변식 & 디스패치 DAG",
+    "3Scheduler Usage": "<span class=\"nav-num\">3</span>스케줄러 동작",
+    "4The Operating Point": "<span class=\"nav-num\">4</span>동작점",
+    "5Cluster Scheduler (C)": "<span class=\"nav-num\">5</span>클러스터 스케줄러 (C)",
+    "6Example Dispatch Trace": "<span class=\"nav-num\">6</span>디스패치 트레이스 예시",
+    "7Acceleration Sources": "<span class=\"nav-num\">7</span>가속 요인",
+    "8Results": "<span class=\"nav-num\">8</span>결과",
+    "Canonical text: ARCHITECTURE.md Repo: README.md":
+      "기준 문서: <a href=\"https://github.com/rhydcdc/puls-rfc/blob/main/ARCHITECTURE.md\" target=\"_blank\" rel=\"noopener\">ARCHITECTURE.md</a><br>저장소: <a href=\"https://github.com/rhydcdc/puls-rfc/blob/main/README.md\" target=\"_blank\" rel=\"noopener\">README.md</a>",
+
+    /* ---- section 1: Instance Disaggregation ---- */
+    "§ 3.4 — ARCHITECTURAL BACKDROP": "§ 3.4 — 아키텍처 배경",
+    "Instance Disaggregation": "인스턴스 분리",
+    "The transformer layer is split at the attention/FFN boundary into two instances connected by an NVLink pipeline. This split is the prerequisite for everything in the scheduler policy that follows — KV cache permanence, fixed-shape handoff, and the Instance A internal joint GPU·PIM scheduling.":
+      "트랜스포머 레이어를 attention/FFN 경계에서 둘로 나눠 NVLink 파이프라인으로 연결된 두 인스턴스로 분리한다. 이 분리가 이후 스케줄러 정책의 모든 것 — KV cache 영속성, 고정 형상 핸드오프, Instance A 내부의 GPU·PIM 공동 스케줄링 — 의 전제 조건이다.",
+    "GENERALIZED (2026-06) The numbers in this policy are a concrete example calibrated on Llama-3 70B + B200 + HBM4 (16-high). The method for constructing the operating point is model- and GPU-independent: it is implemented and validated in the C++ scheduler puls-engine (196 checks) and is derived for any model / GPU within the HBM capacity bound. See puls-engine/CONTRACT.md.":
+      "<span class=\"callout-title\">일반화 (2026-06)</span> 이 정책의 수치는 <b>Llama-3 70B + B200 + HBM4 (16-high)</b> 기준으로 보정한 구체적 예시다. 동작점을 구성하는 <b>방법</b> 자체는 모델·GPU 독립적이다: C++ 스케줄러 <b>puls-engine</b>(196개 검사)에 구현·검증되어 있으며, HBM 용량 한계 안에서 임의의 모델/GPU에 대해 도출된다. <a href=\"../puls-engine/CONTRACT.md\">puls-engine/CONTRACT.md</a> 참조.",
+    "PULS Instance Disaggregation": "PULS 인스턴스 분리",
+    "14-step transformer layer flow split across Instance A (Attention) and Instance B (FFN), connected by an inter-instance NVLink pipeline.":
+      "14단계 트랜스포머 레이어 흐름을 <b>Instance A (Attention)</b>와 <b>Instance B (FFN)</b>로 나누고, 인스턴스 간 NVLink 파이프라인으로 연결한다.",
+    "Instance A — Attention Block": "Instance A — Attention 블록",
+    "Instance B — FFN Block": "Instance B — FFN 블록",
+    "KV cache — permanent in Instance A HBM (no inter-instance transfer)":
+      "<b>KV cache</b> &mdash; Instance A HBM에 영구 상주 (인스턴스 간 전송 없음)",
+    "Substrate note — FFN is compute-bound; full HBM bandwidth not required, so GDDR (or low-stack HBM) suffices.":
+      "<b>기판 메모</b> &mdash; FFN은 compute-bound이라 HBM 대역폭 전부가 필요치 않다. 따라서 GDDR(또는 low-stack HBM)로 충분하다.",
+    "Figure. Per-layer 14-step flow is partitioned at the attention/FFN boundary. Instance A (steps 1–7) holds the KV cache permanently in HBM and executes attention; decode attention is offloaded to SP-PIM across 2048 channels (8 GPU × 256 ch), while prefill attention stays on the GPU. Instance B (steps 8–14) executes the FFN block; since FFN is compute-bound, GDDR (or low-stack HBM) substrate suffices. The two instances exchange a fixed-shape [B × hidden] tensor over intra-node NVLink and process different micro-batches concurrently (steady-state pipeline).":
+      "<b>그림.</b> 레이어당 14단계 흐름을 attention/FFN 경계에서 분할한다. <b>Instance A</b>(1&ndash;7단계)는 KV cache를 HBM에 영구 보관하며 attention을 수행한다. decode attention은 2048채널(8 GPU &times; 256 ch)에 걸쳐 SP-PIM으로 오프로드되고, prefill attention은 GPU에 남는다. <b>Instance B</b>(8&ndash;14단계)는 FFN 블록을 수행한다. FFN은 compute-bound이므로 GDDR(또는 low-stack HBM) 기판으로 충분하다. 두 인스턴스는 고정 형상 <code>[B &times; hidden]</code> 텐서를 노드 내 NVLink로 교환하며, 서로 다른 마이크로배치를 동시에 처리한다(정상상태 파이프라인)."
+  });
+  Object.assign(KO, {
+    /* ---- section 2: Invariants & Dispatch DAG ---- */
+    "§ 6.2 · § 6.3 — STATIC RULES": "§ 6.2 · § 6.3 — 정적 규칙",
+    "Invariants & Dispatch DAG": "불변식 & 디스패치 DAG",
+    "The scheduler's policy reduces to a graph problem. Invariants (correctness + efficiency + resource) become edges in a per-μ-batch dependency DAG, and the dispatch decision collapses to picking a ready node.":
+      "스케줄러 정책은 그래프 문제로 환원된다. <b>불변식</b>(정확성 + 효율 + 자원)이 μ-batch별 의존성 DAG의 <b>간선</b>이 되고, 디스패치 결정은 준비된 노드를 고르는 일로 축약된다.",
+    "Invariants (I1 — I5)": "불변식 (I1 — I5)",
+    "Whichever policy the scheduler adopts, these five rules cannot be violated. I1·I2 are correctness invariants (data dependency); I3 is an efficiency invariant (split O-proj is mathematically equivalent, but is strictly never split due to weight reuse · MFU · kernel launch penalties); I4·I5 are hardware resource constraints.":
+      "스케줄러가 어떤 정책을 택하든 이 다섯 규칙은 위반될 수 없다. <b>I1·I2</b>는 <i>정확성</i> 불변식(데이터 의존성)이고, <b>I3</b>은 <i>효율</i> 불변식이다(O-proj 분할은 수학적으로 동치이지만 weight 재사용·MFU·커널 실행 페널티 때문에 절대 분할하지 않는다). <b>I4·I5</b>는 <i>하드웨어 자원 제약</i>이다.",
+    "Kind": "종류",
+    "Rule": "규칙",
+    "correctness": "<span class=\"kind-correctness\">정확성</span>",
+    "efficiency": "<span class=\"kind-efficiency\">효율</span>",
+    "resource": "<span class=\"kind-resource\">자원</span>",
+    "prefill-attn(X) → dispatch only after QKV(X) completes (Q, K, V dependency)":
+      "<code>prefill-attn(X)</code> &rarr; <code>QKV(X)</code> 완료 후에만 디스패치 (Q, K, V 의존성)",
+    "decode-attn(X) → dispatch only after QKV(X) completes (PIM FSM start condition)":
+      "<code>decode-attn(X)</code> &rarr; <code>QKV(X)</code> 완료 후에만 디스패치 (PIM FSM 시작 조건)",
+    "O-proj(X) → dispatch only after both prefill-attn(X) ∧ decode-attn(X) complete. Although row-wise independence permits splitting, the penalties of W_O 2× streaming + MFU drop + 2× kernel launch keep it always a single GEMM. Aligned with the production mixed-batch standard pattern.":
+      "<code>O-proj(X)</code> &rarr; <i>두</i> <code>prefill-attn(X)</code> &and; <code>decode-attn(X)</code>가 모두 완료된 후에만 디스패치. 행 단위 독립성이 분할을 허용하지만, <code>W_O</code> 2&times; 스트리밍 + MFU 하락 + 2&times; 커널 실행 페널티 때문에 항상 단일 GEMM으로 유지한다. 프로덕션 mixed-batch 표준 패턴과 일치.",
+    "At time t, the GPU resource runs only one GEMM / attention op (tensor core saturates; kernel concurrency ineffective).":
+      "시각 t에 GPU 자원은 단 하나의 GEMM / attention 연산만 실행한다 (텐서 코어 포화, 커널 동시성 무효).",
+    "At time t, the PIM resource runs only one decode-attn op (SP-PIM occupies all 2048 channels). Not a head- or request-level constraint — within a single decode-attn op, multi-head · multi-request batching is free.":
+      "시각 t에 PIM 자원은 <b>단 하나의</b> decode-attn 연산만 실행한다 (SP-PIM이 2048채널 전체를 점유). head·request 수준 제약이 아니다 &mdash; 단일 decode-attn 연산 내부에서는 multi-head·multi-request 배칭이 자유롭다.",
+    "Dispatch DAG": "디스패치 DAG",
+    "DEFINITION Directed Acyclic Graph. Nodes are work units; an edge A → B denotes the precedence relation “B can be dispatched once A completes.” Acyclicity precludes deadlock and guarantees topological order. PULS encodes the §6.2 invariants as DAG edges, reducing the dispatch decision to a ready-node selection problem over a data structure.":
+      "<span class=\"callout-title\">정의</span> <b>방향 비순환 그래프(DAG).</b> 노드는 작업 단위이고, 간선 <code>A &rarr; B</code>는 <i>&ldquo;A가 완료되면 B를 디스패치할 수 있다&rdquo;</i>는 선후 관계를 뜻한다. 비순환성은 교착을 배제하고 위상 순서를 보장한다. PULS는 §6.2 불변식을 DAG 간선으로 인코딩해, 디스패치 결정을 <i>자료구조 위에서 준비된 노드를 고르는 문제</i>로 환원한다.",
+    "Nodes. For each μ-batch X, four work nodes: QKV(X), prefill-attn(X), decode-attn(X), O-proj(X).":
+      "<b>노드.</b> 각 μ-batch <code>X</code>마다 네 개의 작업 노드: <code>QKV(X)</code>, <code>prefill-attn(X)</code>, <code>decode-attn(X)</code>, <code>O-proj(X)</code>.",
+    "Edges. I1·I2·I3 become precedence edges directly:":
+      "<b>간선.</b> I1·I2·I3이 그대로 선후 간선이 된다:",
+    "Edge": "간선",
+    "Source invariant": "출처 불변식",
+    "Single μ-batch graph": "단일 μ-batch 그래프",
+    "Single μ-batch DAG. Diamond structure: QKV fans out to two attention nodes (GPU prefill / PIM decode), which fan in to O-proj. Edge labels mark the source invariant.":
+      "단일 μ-batch DAG. 다이아몬드 구조: QKV가 두 attention 노드(GPU prefill / PIM decode)로 분기했다가 O-proj로 합류한다. 간선 라벨은 출처 불변식을 표시한다."
+  });
+
+  Object.assign(KO, {
+    /* ---- section 3: Scheduler Usage ---- */
+    "§ 6.3 — RUNTIME MECHANISM": "§ 6.3 — 런타임 메커니즘",
+    "Scheduler Usage": "스케줄러 동작",
+    "How the scheduler actually runs at each kernel-completion event: maintain the DAG over a 2-active + transition-tail (capacity 3) window, refresh the ready set, and let two pick calls (one per resource) drive dispatch. The whole policy fits in nine lines.":
+      "스케줄러가 각 커널 완료 이벤트에서 실제로 도는 방식: 2-active + transition-tail(용량 3) 윈도우 위에서 DAG를 유지하고, ready set을 갱신하며, 두 번의 <code class=\"inline\">pick</code> 호출(자원당 하나)이 디스패치를 이끈다. 정책 전체가 아홉 줄에 담긴다.",
+    "Pseudo-code": "의사코드",
+    "The scheduler maintains a DAG over the in-flight μ-batch window {Mi-1, Mi, Mi+1}, and at every kernel-completion event dispatches ready work from the two queues (GPU·PIM).":
+      "스케줄러는 in-flight μ-batch 윈도우 <code>{M<sub>i-1</sub>, M<sub>i</sub>, M<sub>i+1</sub>}</code> 위에서 DAG를 유지하고, 매 커널 완료 이벤트마다 두 큐(GPU·PIM)에서 준비된 작업을 디스패치한다.",
+    "pick — definition": "<code class=\"inline\">pick</code> &mdash; 정의",
+    "PRIORITY-QUEUE DEQUEUE A function with arguments (candidate set, priority rule, tie-break rule). Behavior: among candidates, narrow down to nodes belonging to the top-priority class of the priority rule, then pick a single node within that subset via the tie-break rule. Returns null if the candidate set is empty (in which case the resource sits idle).":
+      "<span class=\"callout-title\">우선순위 큐 디큐</span> 인자 <code>(후보 집합, 우선순위 규칙, tie-break 규칙)</code>를 받는 함수. 동작: 후보 중 우선순위 규칙의 최상위 클래스에 속한 노드로 좁힌 뒤, 그 부분집합 안에서 tie-break 규칙으로 단일 노드를 고른다. 후보 집합이 비어 있으면 <code>null</code>을 반환한다(이때 해당 자원은 유휴 상태로 둔다).",
+    "GPU priority rationale — O-proj > prefill-attn > QKV":
+      "GPU 우선순위 근거 &mdash; <code class=\"inline\">O-proj &gt; prefill-attn &gt; QKV</code>",
+    "Why O-proj first. Delaying O-proj is a delay of the current μ-batch's completion and thus directly impacts the critical path. Once O-proj is ready (I3 satisfied), nothing else on the queue should jump ahead of it.":
+      "<b>왜 O-proj가 먼저인가.</b> <code>O-proj</code>를 미루는 것은 <i>현재 μ-batch의 완료</i>를 미루는 것이라 critical path에 직접 영향을 준다. O-proj가 준비되면(I3 충족) 큐의 다른 어떤 것도 그 앞을 가로채선 안 된다.",
+    "Why QKV last. QKV is the next μ-batch's enabling work, not the current one's critical path. It is prioritized only when the higher-priority classes are empty — that is, only when there is a risk of PIM going idle (no current-μ-batch attention or projection work left to do).":
+      "<b>왜 QKV가 마지막인가.</b> <code>QKV</code>는 현재가 아니라 <i>다음 μ-batch를 가능하게 하는 작업</i>이라 현재의 critical path가 아니다. 상위 우선순위 클래스가 비었을 때만 &mdash; 즉 PIM이 유휴에 빠질 위험이 있을 때만(현재 μ-batch의 attention이나 projection 작업이 남아 있지 않을 때) 우선된다.",
+    "This ordering keeps the GPU lane continuously loaded: when O-proj is blocked (waiting on PIM for I3) and prefill-attn is also not ready (its μ-batch's QKV not yet done), the dequeue falls through to QKV of the next μ-batch — so the GPU stays busy and PIM decode-attn overlaps the compute-bound stages rather than serializing behind them.":
+      "이 순서가 <b>GPU lane을 끊김 없이 채운다</b>: O-proj가 막히고(I3 때문에 PIM 대기) prefill-attn도 준비되지 않았을 때(그 μ-batch의 QKV 미완료), 디큐는 다음 μ-batch의 QKV로 떨어진다 &mdash; 그래서 GPU는 계속 바쁘고, PIM decode-attn은 compute-bound 단계 뒤에 직렬화되는 대신 그것과 겹친다.",
+    "Sync guarantee": "동기화 보장",
+    "Since I3 is auto-enforced as a DAG edge, there is no risk of missing synchronization. The DAG itself encodes the precondition; a node simply does not enter the ready set until its precedences are done.":
+      "I3이 DAG 간선으로 자동 강제되므로 <b>동기화를 놓칠 위험이 없다</b>. DAG 자체가 전제 조건을 인코딩하고, 노드는 선행 작업이 끝나기 전까지 ready set에 들어가지 않을 뿐이다.",
+    "Owing to PIM FSM determinism (§3.1), the PIM completion time is computed at the moment PIM is dispatched. The scheduler therefore knows in advance when O-proj will become ready, and the next GPU dispatch can be pre-scheduled to that exact moment.":
+      "PIM FSM 결정성(<code class=\"inline\">§3.1</code>) 덕분에 PIM 완료 시각은 PIM이 디스패치되는 순간에 계산된다. 따라서 스케줄러는 O-proj가 언제 준비될지 <i>미리</i> 알고, 다음 GPU 디스패치를 바로 그 시점에 미리 예약할 수 있다."
+  });
+
+  Object.assign(KO, {
+    /* ---- section 4: The Operating Point ---- */
+    "§ 6.4 — THE OPERATING POINT": "§ 6.4 — 동작점",
+    "Admission: The Operating Point": "어드미션: 동작점",
+    "Each μ-batch is composed to drive the three resources (PIM decode-attn · GPU-A projection+prefill-attn · FFN) to equal time. Composition is three separate concerns, each steered independently to a fixed target by local-greedy steering + an age-cap — not one cohort regulated by idle-fraction feedback.":
+      "각 μ-batch는 세 자원(PIM decode-attn · GPU-A projection+prefill-attn · FFN)을 동일한 시간으로 몰도록 구성된다. 구성은 세 개의 <b>독립된 관심사</b>이며, 각각 local-greedy steering + age-cap으로 <b>고정 목표</b>에 독립적으로 조향된다 &mdash; idle-fraction 피드백으로 조절되는 하나의 cohort가 아니다.",
+    "Three separate concerns": "세 개의 독립된 관심사",
+    "Admission = pool refill only. request_queue → in-flight (PREFILL), gated solely by the aggregate KV budget. It does not look at the decode/prefill targets. A request with prompt_len = 0, or whose prefill is already done, transitions straight to DECODE.":
+      "<b>어드미션 = 풀 보충만.</b> <code class=\"inline\">request_queue &rarr; in-flight (PREFILL)</code>이며, 오로지 총 KV 예산으로만 게이팅된다. decode/prefill 목표는 보지 않는다. <code class=\"inline\">prompt_len = 0</code>이거나 prefill이 이미 끝난 요청은 곧장 DECODE로 전이한다.",
+    "Decode-set steering. From the in-flight DECODE pool, select a set hitting two targets at once — count 62 ∧ Σkv 6.15M — by local-greedy steering + age-cap. Pure selection (KV is reserved at pool entry).":
+      "<b>Decode-set steering.</b> in-flight DECODE 풀에서 두 목표 &mdash; <b>count 62 ∧ Σkv 6.15M</b> &mdash; 를 동시에 맞추는 집합을 local-greedy steering + age-cap으로 선택한다. 순수한 <i>선택</i>이다(KV는 풀 진입 시 예약된다).",
+    "Prefill steering. From the in-flight PREFILL pool, distribute 128 tokens (the fixed FFN-batch knob) so the PREFILL_ATTN depth-sum hits 12.8M, by the same per-token steering + age-cap. A member that receives 0 tokens stays in the pool.":
+      "<b>Prefill steering.</b> in-flight PREFILL 풀에서 <b>128 토큰</b>(고정 FFN-batch 노브)을 분배해 PREFILL_ATTN depth-sum이 <b>12.8M</b>에 닿도록 한다 &mdash; 같은 토큰별 steering + age-cap으로. 0 토큰을 받은 멤버는 풀에 남는다.",
+    "These three concerns run every iteration. Per-iteration recomposition: after each forward pass the μ-batch is re-selected from the pool, disjoint from the other active μ-batch. The window holds 2 active μ-batches (capacity 3 = 2 active + 1 transition slack) — the staggering precondition for F2/F3 overlap. This is the real continuous-batching paradigm: a standing pool mixing decode / prefill / just-finished-prefill, recomposed every iteration — not a fixed cohort.":
+      "이 세 관심사는 매 iteration마다 돈다. <b>iteration별 재구성:</b> 각 forward pass 후 μ-batch는 풀에서 다시 선택되며, 다른 active μ-batch와 서로소다. 윈도우는 2개의 active μ-batch를 담는다(용량 3 = active 2 + transition 여유 1) &mdash; F2/F3 오버랩을 위한 staggering 전제 조건이다. <i>이것이 진짜 continuous-batching 패러다임이다: decode / prefill / 막 끝난 prefill이 섞인 상주 풀을 매 iteration 재구성하는 것 &mdash; 고정 cohort가 아니다.</i>",
+    "The operating point — causal chain ① → ⑤": "동작점 &mdash; 인과 사슬 ① → ⑤",
+    "prefill token count fixes the FFN batch, which fixes the decode count, which with the balance ctx fixes the decode-KV sum:":
+      "prefill 토큰 수가 FFN batch를 고정하고, 그것이 decode count를 고정하며, 그것이 balance ctx와 함께 decode-KV 합을 고정한다:",
+    "order": "순서",
+    "fixed value": "고정 값",
+    "value (prefill 128, deployed)": "값 (prefill 128, 배포)",
+    "binding resource": "바인딩 자원",
+    "prefill tokens / batch": "batch당 prefill 토큰",
+    "balance time X": "balance 시간 X",
+    "128 (power-of-2)": "<b>128</b> (2의 거듭제곱)",
+    "190 tokens": "<b>190</b> 토큰",
+    "decode count N_dec (control target)": "<b>decode count N_dec</b> (제어 목표)",
+    "decode-KV sum (control target)": "<b>decode-KV 합</b> (제어 목표)",
+    "prefill KV-work (control target)": "prefill KV-work (제어 목표)",
+    "~100K (Llama-3 70B + B200 balance point; model/GPU-dependent, re-derived by puls-engine)":
+      "<b>~100K</b> (Llama-3 70B + B200 balance point; 모델/GPU 의존, puls-engine이 재도출)",
+    "The count (62) is independent of KV length (FFN sees only token count); the KV sum (6.15M) is the sum of lengths (PIM sees only the sum). ctx 100K is the Llama-3 70B + B200 balance value (model/GPU-dependent, re-derived by puls-engine; prefill cancels out of the triple balance) used only to derive the targets — never imposed on the workload.":
+      "<i>count</i>(62)는 KV 길이와 무관하고(FFN은 토큰 수만 본다), <i>KV 합</i>(6.15M)은 길이의 합이다(PIM은 합만 본다). ctx 100K는 Llama-3 70B + B200 balance 값으로(모델/GPU 의존, puls-engine이 재도출하며 prefill은 삼중 balance에서 상쇄된다) 목표를 <i>도출</i>하는 데만 쓰일 뿐 &mdash; 워크로드에 강요되지 않는다.",
+    "Local-greedy steering + age-cap (the former algorithm)":
+      "Local-greedy steering + age-cap (<code class=\"inline\">former</code> 알고리즘)",
+    "The control target is the pair (count 62, Σkv 6.15M) — not a single average. Pure FIFO catches Σkv but misses the count on an off-average pool (spread 22–30%). So at each step the scheduler computes the length it next needs and admits the decoder closest to it; a request that has waited ≥ AGE_CAP is force-included (fairness). No global statistics, purely local:":
+      "제어 목표는 <b>쌍</b>(count 62, Σkv 6.15M)이다 &mdash; 단일 평균이 아니다. 순수 FIFO는 Σkv는 맞히지만 평균에서 벗어난 풀(spread 22&ndash;30%)에서는 count를 놓친다. 그래서 매 단계마다 스케줄러는 <i>다음에 필요한 길이</i>를 계산하고 그에 가장 가까운 디코더를 받아들인다. <code class=\"inline\">≥ AGE_CAP</code>만큼 기다린 요청은 강제 포함된다(공정성). 전역 통계 없이 순수하게 국소적이다:",
+    "★ Length-distribution-agnostic. On a heavily varied pool, short + long requests are combined to hit both targets — the average is never read. Heavy / mixed / bimodal all converge. Even an age-cap-forced off-size request is corrected by steering (a forced long request lowers ideal → the next picks several short ones).":
+      "<b>★ 길이 분포 무관.</b> 심하게 분산된 풀에서도 짧은 요청 + 긴 요청을 <i>조합</i>해 두 목표를 맞춘다 &mdash; 평균은 결코 읽지 않는다. heavy / mixed / bimodal 모두 수렴한다. age-cap에 의해 강제된 비규격 요청조차 steering이 보정한다(강제된 긴 요청은 <code class=\"inline\">ideal</code>을 낮추고 &rarr; 다음에 짧은 요청 여러 개를 고른다).",
+    "Operating parameters = target_count + target_kv + AGE_CAP. Steering hits the target directly; former selects by nearest-to-ideal, not by any tolerance gate.":
+      "<b>동작 파라미터 = target_count + target_kv + AGE_CAP.</b> steering은 목표를 직접 맞히고, <code class=\"inline\">former</code>는 어떤 허용 게이트가 아니라 <code class=\"inline\">ideal</code>에 가장 가까운 것으로 선택한다.",
+    "AGE_CAP trade-off (sweep). cap↑ → steering freedom↑ → spread↓ but latency↑; cap↓ → FIFO-like → fair/low-latency but spread↑. cap1: 3.1% · cap2: 1.2%, wait ≤3 · cap5: 0.7%, wait 5 · cap∞: 0.8% but starvation (wait 37) → AGE_CAP = 5 adopted (wait 5 rounds ≈ 10 ms of paused decoding — a per-request token-gap [PAUSE], invisible to batch-level TBT and bounded at exactly cap+1 rounds ≈ 12.2 ms worst; a pure tail-bound knob; spread 0.7%).":
+      "<b>AGE_CAP 트레이드오프 (sweep).</b> cap↑ → steering 자유도↑ → spread↓ 하지만 latency↑; cap↓ → FIFO에 가까움 → 공정·저지연이지만 spread↑. <code class=\"inline\">cap1: 3.1%</code> · <code class=\"inline\">cap2: 1.2%, wait ≤3</code> · <code class=\"inline\">cap5: 0.7%, wait 5</code> · <code class=\"inline\">cap∞: 0.8% but starvation (wait 37)</code> → <b>AGE_CAP = 5 채택</b> (wait 5 라운드 ≈ 디코딩 일시정지 10 ms — 요청별 토큰 간격 [PAUSE]로 배치 단위 TBT에는 보이지 않으며 최악이 정확히 cap+1 라운드 ≈ 12.2 ms로 bound; 순수 tail-bound 노브; spread 0.7%).",
+    "SUPERSEDED Earlier drafts adjusted admission per iteration from measured GPU/PIM idle fractions + a hysteresis deadband. That feedback model is replaced by this pool model: the scheduler hits fixed targets via steering rather than reacting to measured idle (deadband σ was unmeasurable on a self-authored framework). See ARCHITECTURE.md §6.4.":
+      "<span class=\"callout-title\">대체됨</span> 초기 초안은 측정된 GPU/PIM idle 비율 + 히스테리시스 deadband로 iteration마다 어드미션을 조정했다. 그 피드백 모델은 이 풀 모델로 대체된다: 스케줄러는 측정된 idle에 반응하는 대신 steering으로 <i>고정 목표</i>를 맞힌다(deadband σ는 자체 제작 프레임워크에서 측정 불가였다). <code class=\"inline\">ARCHITECTURE.md §6.4</code> 참조."
+  });
+
+  Object.assign(KO, {
+    /* ---- section: Cluster Scheduler (C) ---- */
+    "§ 7 — CLUSTER ROUTING": "§ 7 — 클러스터 라우팅",
+    "Cluster Scheduler (C) — Per-Node 100K Centering": "클러스터 스케줄러 (C) — 노드별 100K 센터링",
+    "The balanced operating point exists only when a node's in-flight pool is centered at mean ~100K — only then does the local steering (§4) hit (decode 62 ∧ Σkv 6.15M at prefill 128). At server scale (hundreds–thousands of nodes) the global arrival mean drifts above 100K, so a cluster-level scheduler C routes requests to seat each node at that operating point, with a global age-cap for inter-node FIFO fairness and an on-node 3-tier multi-turn KV cache with holding-node affinity (cached returns routed back to their KV).":
+      "균형 동작점은 노드의 in-flight 풀이 <b>평균 ~100K</b>에 센터링됐을 때만 존재한다 &mdash; 그때만 국소 steering(§4)이 맞는다(prefill 128에서 decode <b>62</b> ∧ Σkv <b>6.15M</b>). 서버 규모(수백~수천 노드)에서는 전역 도착 평균이 100K 위로 떠오르므로, 클러스터 수준 스케줄러 <b>C</b>가 요청을 라우팅해 각 노드를 그 동작점에 앉힌다 &mdash; 노드 간 FIFO 공정성을 위한 전역 age-cap과, 보유 노드 어피니티(캐시된 복귀를 자기 KV로 되돌려 라우팅)를 갖춘 노드 내 3-tier multi-turn KV cache를 함께 둔다.",
+    "Why it exists": "왜 필요한가",
+    "Without centering, each node's pool tracks the global arrival mean and drifts high: a node then fits fewer decoders, so a batch falls below count 62 while Σkv rises above 6.15M — both control targets break together and idle blows up. C keeps every node centered at 100K (measured poolMean 116K) so the per-node steering can compose the operating point.":
+      "센터링이 없으면 각 노드의 풀은 전역 도착 평균을 따라가 높게 떠오른다: 그러면 노드가 담는 디코더가 줄어 batch가 <b>count 62 아래로 떨어지는 동시에 Σkv는 6.15M 위로 오른다</b> &mdash; 두 제어 목표가 함께 깨지고 idle이 폭증한다. <b>C</b>는 모든 노드를 100K에 센터링해(측정값 <code class=\"inline\">poolMean 116K</code>) 노드별 steering이 동작점을 구성할 수 있게 한다.",
+    "Design = node mechanism + (1) global age-cap + (2) 3-tier KV cache + (3) cache affinity":
+      "설계 = 노드 메커니즘 + (1) 전역 age-cap + (2) 3-tier KV cache + (3) 캐시 어피니티",
+    "C is the node mechanism — resident surplus + per-iteration steering re-selection + per-completion healing — plus three cluster-level additions. The surplus re-selection is a general-purpose perturbation absorber — it digests age-cap forced injections and affinity mismatches alike — which is what let cache affinity land with zero new steering machinery:":
+      "C는 노드 메커니즘 &mdash; <b>상주 잉여</b> + <b>iteration별 steering 재선택</b> + <b>완료별 힐링</b> &mdash; 에 세 가지 클러스터 수준 추가를 더한 것이다. 잉여 재선택은 <b>범용 섭동 흡수기</b>다 &mdash; age-cap 강제 주입과 어피니티 mismatch를 똑같이 소화한다 &mdash; 이 덕분에 캐시 어피니티가 새 steering 기구 없이 안착했다:",
+    "(1) Global age-cap (inter-node FIFO fairness). A node requests ideal = hole; the global queue returns a near-fit, but any request older than global_age_cap is force-routed regardless of fit. Bounded wait, no starvation across nodes.":
+      "<b>(1) 전역 age-cap (노드 간 FIFO 공정성).</b> 노드는 <code class=\"inline\">ideal = hole</code>을 요청하고, 전역 큐는 근접한 것을 돌려준다. 다만 <code class=\"inline\">global_age_cap</code>보다 오래된 요청은 적합도와 무관하게 <b>강제 라우팅</b>된다. 대기가 유한하고 노드 간 기아가 없다.",
+    "(2) On-node multi-turn 3-tier KV cache. HBM hit / SSD reload / recompute. When a conversation's length > 16000 and residual HBM fits, its KV is cached in HBM; evict_age idle turns demote it (SSD at offload_bw), gone_age turns trigger recompute. Dynamic cache budget: pool-KV inflation from multi-turn (measured ~0.24 TB ≈ 23% of the cache budget) is debited from the node's cache budget each round — an HBM-byte closed loop (static accounting overstated HBM-hit by ~9%p).":
+      "<b>(2) 노드 내 multi-turn 3-tier KV cache.</b> <b>HBM hit / SSD reload / recompute.</b> 대화의 <code class=\"inline\">length &gt; 16000</code>이고 잔여 HBM이 맞으면 그 KV를 HBM에 캐싱한다. <code class=\"inline\">evict_age</code>만큼 유휴 턴이 지나면 강등되고(<code class=\"inline\">offload_bw</code>로 SSD에), <code class=\"inline\">gone_age</code> 턴이 지나면 recompute를 트리거한다. <b>동적 캐시 예산:</b> 멀티턴이 일으키는 풀-KV 인플레이션(측정 ~0.24 TB ≈ 캐시 예산의 23%)을 매 라운드 노드 캐시 예산에서 차감한다 &mdash; HBM 바이트 폐루프(정적 회계는 HBM-hit를 ~9%p 과대평가했다).",
+    "(3) Cache affinity + spill cap. A multi-turn return whose KV is HBM-cached queues at the holding node; on a hole, 1st priority = the oldest affinity waiter (admitted regardless of length / cap_room), 2nd = the usual pull_slot (global aged-forced, else ideal = hole nearest). Physical (holding-node) hits: 1.7% → 99.7%. Waiters get their own bound aff_spill = 200 — separate from global_age_cap 25, because a cached return's waiting is rewarded (~2 ms/round is ~10× cheaper than a 160–780-round SSD reload). Sweeping 25→200 improved both physical hits (67→99.7%) and Σdev (1.57→1.38%): spilled requests became forced off-fit injections — a worse perturbation than affinity's near like-for-like admits (former residents grown ≤12K; eligibility ≥16K filters high-growth shorts); residuals are absorbed by the existing surplus re-selection + node age-cap machinery. Measured spill: 4 of 13,483 affinity candidates (0.03%) — under the single global cap 25 it was 31% (4,317); the dedicated-cap separation cut it ~1,000×.":
+      "<b>(3) 캐시 어피니티 + spill cap.</b> KV가 HBM에 캐싱된 멀티턴 복귀는 보유 노드 전용 대기열에 줄을 선다. hole이 생기면 1순위 = 최고령 어피니티 대기자(길이·cap_room 무관 admit), 2순위 = 평소의 <code class=\"inline\">pull_slot</code>(글로벌 aged 강제, 아니면 ideal=hole 최근접). 물리(보유 노드) hit: <b>1.7% → 99.7%</b>. 대기자에게는 별도 상한 <code class=\"inline\">aff_spill = 200</code>을 둔다 &mdash; <code class=\"inline\">global_age_cap 25</code>와 분리. 캐시 보유 복귀의 대기에는 보상이 있기 때문이다(라운드당 ~2 ms는 160&ndash;780라운드짜리 SSD reload보다 ~10배 싸다). 25→200 sweep은 물리 hit(67→99.7%)와 Σdev(1.57→1.38%)를 <i>동시에</i> 개선했다: spill된 요청은 강제 off-fit 주입이 되는데, 이는 어피니티의 거의 like-for-like admit(과거 상주분이 ≤12K 성장; eligibility ≥16K가 고성장 short를 거름)보다 더 나쁜 섭동이다. 잔여 섭동은 기존 잉여 재선택 + 노드 age-cap 기구가 흡수한다. 실측 spill: <b>어피니티 후보 13,483건 중 4건(0.03%)</b> &mdash; 글로벌 cap 25를 그대로 쓰던 설계에선 31%(4,317건)였고, 전용 cap 분리가 이를 ~1,000배 줄였다.",
+    "C config (locked)": "C 설정 (고정)",
+    "parameter": "파라미터",
+    "value": "값",
+    "role": "역할",
+    "resident surplus per node → decode_pool 149": "노드당 상주 잉여 → <code>decode_pool</code> <b>149</b>",
+    "resident prefill pool — depth-diversity floor 50 + surplus margin 10 (prefill-side surplus; over-provisioning risks age-cap forcing)":
+      "상주 프리필 풀 — depth-diversity 하한 50 + 잉여 마진 10 (프리필 측 잉여; 과대 시 age-cap 강제 위험)",
+    "idle turns before the SSD entry expires → recompute (fixed assumption)":
+      "SSD 엔트리 소멸 → recompute 전 유휴 턴 수 (고정 가정)",
+    "inter-node FIFO cap — oldest-beyond-cap force-routed": "노드 간 FIFO 상한 &mdash; cap 초과 최고령 요청 강제 라우팅",
+    "HBM-cache threshold (mid · long): length > 16000": "HBM 캐시 임계값 (mid · long): <code>length &gt; 16000</code>",
+    "idle turns before HBM → SSD demotion": "HBM → SSD 강등 전 유휴 턴 수",
+    "conservative PIM-exposure penalty weight (β-robust)": "보수적 PIM-노출 페널티 가중치 (β-robust)",
+    "SSD reload bandwidth ≈ 50 GB/s NVMe array (assumption label; old 2e7 sat below the recompute break-even ≈ 2.1e7, mathematically disabling the SSD tier)":
+      "SSD reload 대역폭 ≈ 50 GB/s NVMe 어레이 (가정 라벨; 옛 2e7은 recompute 손익분기 ≈ 2.1e7 아래라 SSD 티어가 수학적으로 무력했다)",
+    "on-node steering fairness cap": "노드 내 steering 공정성 상한",
+    "HBM-cached returns queue at the holding node — 1st-priority admit on a hole":
+      "HBM 캐시 보유 복귀는 보유 노드 대기열에 — hole 발생 시 1순위 admit",
+    "affinity-wait bound (separate from the global cap) — beyond it, spill to the global queue":
+      "어피니티 대기 상한 (글로벌 cap과 분리) — 초과 시 글로벌 큐로 spill",
+    "multi-turn pool-KV inflation debited from the cache budget each round (HBM-byte closed loop)":
+      "멀티턴 풀-KV 인플레이션을 매 라운드 캐시 예산에서 차감 (HBM 바이트 폐루프)",
+    "C KPI (measured)": "C KPI (측정)",
+    "TBT mean": "TBT 평균",
+    "TTFT mean": "TTFT 평균",
+    "TTFT-met": "TTFT 충족",
+    "PIM-exposed": "PIM 노출",
+    "worst 22.6%": "최악 22.6%",
+    "within SLO": "SLO 이내",
+    "physical (holding-node) 99.7%": "물리(보유 노드) 99.7%",
+    "rounds · forced 3704": "라운드 · forced 3704",
+    "centered ~100K": "~100K 센터링",
+    "worst token gap": "최악 토큰 간격",
+    "rounds (= node age-cap+1) ≈ 12.2 ms · paused-token share 3.4%": "라운드 (= 노드 age-cap+1) ≈ 12.2 ms · paused 토큰 비율 3.4%",
+    "Contention · dependency TBT model": "Contention · 의존성 TBT 모델",
+    "Per-layer TBT folds the GPU·PIM dependency and the bus-contention penalty into one recurrence, summed over 80 layers:":
+      "레이어당 TBT는 GPU·PIM 의존성과 버스 contention 페널티를 하나의 점화식으로 묶어 <b>80개 레이어</b>에 걸쳐 합산한다:",
+    "Contention-free ⟺ t_pim ≤ t_gpu_a — the PIM decode read hides entirely in the GPU-A shadow, so the penalty term vanishes. β = 0.5 is the conservative assumption label; C is β-robust (goodput stays fixed across the full β range). The operating point sits on the PIM-hiding edge (derive balances t_pim ≈ t_gpu_a), so exposure is frequent (74.4%) but each exposure costs only ~1% of the ~25.5 µs per-layer budget (≈ 0.26 µs/layer) — yielding TBT mean 2058 µs against the ~2.0 ms (80×25.5µs) budget.":
+      "<b>Contention-free</b> ⟺ <code class=\"inline\">t_pim ≤ t_gpu_a</code> &mdash; PIM decode read가 GPU-A 그림자 안에 완전히 숨어 페널티 항이 사라진다. <code class=\"inline\">β = 0.5</code>는 <b>보수적</b> 가정 라벨이다. C는 <b>β-robust</b>다(β 전 구간에서 goodput 고정). 동작점은 <b>PIM-hiding 경계</b>에 놓이므로(derive가 <code class=\"inline\">t_pim ≈ t_gpu_a</code>를 맞춤) 노출은 잦지만(<b>74.4%</b>) 한 번의 노출 비용은 레이어당 <b>~25.5 µs</b> 예산의 <b>~1%</b>(≈ 0.26 µs/layer)에 불과하다 &mdash; 그 결과 ~2.0 ms(80×25.5µs) 예산 대비 TBT 평균 <b>2058 µs</b>를 얻는다.",
+    "OPERATING POINT Invariant across this section: Llama-3 70B + DGX B200, prefill 128 → decode 62, Σ KV 6.15M, balanced ctx ~100K, ~25.5 µs/layer → TBT ~2.0 ms over 80 layers.":
+      "<span class=\"callout-title\">동작점</span> 이 절 전반의 불변: <b>Llama-3 70B + DGX B200</b>, prefill <b>128</b> → decode <b>62</b>, Σ KV <b>6.15M</b>, balanced ctx <b>~100K</b>, ~25.5 µs/layer → 80개 레이어에서 TBT ~2.0 ms."
+  });
+
+  Object.assign(KO, {
+    /* ---- section 5: Example Dispatch Trace ---- */
+    "§ 6.5 — WORKED EXAMPLE": "§ 6.5 — 워크드 예시",
+    "Example Dispatch Trace": "디스패치 트레이스 예시",
+    "A concrete in-flight window under PULS scheduler's balanced steady state (the three resources cycle-balanced per §6.4). The greedy ready-set dispatch (Section 3) keeps both lanes busy: PIM decode-attn of one μ-batch overlaps the compute-bound GPU projection + prefill-attn of another — decode-attn is hidden behind the compute-bound window, not added to it (F2 · F3). The per-μ-batch cycle drops from the sum to max(GPU stages, t_PIM).":
+      "PULS 스케줄러의 균형 정상상태(§6.4에 따라 세 자원이 cycle-balanced)에서의 구체적 in-flight 윈도우. greedy ready-set 디스패치(<a href=\"#sec-3\" onclick=\"document.querySelector('.nav a[data-target=sec-3]').click(); return false;\">3절</a>)가 두 lane을 모두 바쁘게 유지한다: <b>한 μ-batch의 PIM decode-attn이 다른 μ-batch의 compute-bound GPU projection + prefill-attn과 겹친다</b> &mdash; decode-attn은 compute-bound 윈도우 뒤에 숨고 거기에 더해지지 않는다(F2 · F3). μ-batch당 cycle이 합에서 <code>max(GPU stages, t_PIM)</code>으로 줄어든다.",
+    "PULS Scheduler Dispatch Timeline": "PULS 스케줄러 디스패치 타임라인",
+    "Event-driven dispatch + dependency DAG over a 2-active + transition-tail in-flight window. Greedy priority dequeue (O-proj > prefill-attn > QKV) keeps GPU and PIM concurrently loaded on different μ-batches — PIM decode-attn hides behind the compute-bound GPU stages.":
+      "2-active + transition-tail in-flight 윈도우 위의 이벤트 구동 디스패치 + 의존성 DAG. greedy 우선순위 디큐(<code>O-proj &gt; prefill-attn &gt; QKV</code>)가 GPU와 PIM을 서로 다른 μ-batch에 동시에 채운다 &mdash; PIM decode-attn은 compute-bound GPU 단계 뒤에 숨는다.",
+    "P (tail-in-flight at Init): {X: prefill chunk (✓ done), G, H: decode}":
+      "<span class=\"swatch\"></span><b>P</b> (Init 시점 tail-in-flight): {X: prefill chunk (&check; 완료), G, H: decode}",
+    "M (current): {A: prefill chunk, B, C: decode}":
+      "<span class=\"swatch\"></span><b>M</b> (현재): {A: prefill chunk, B, C: decode}",
+    "N (next): {D: prefill chunk, E, F: decode}":
+      "<span class=\"swatch\"></span><b>N</b> (다음): {D: prefill chunk, E, F: decode}",
+    "GPU CONTINUOUS The GPU lane always has ready work — QKV / projection / prefill-attn of one of the in-flight μ-batches. These are compute-bound (tensor cores saturated, HBM bus mostly idle), so the GPU never idle-waits on PIM.":
+      "<span class=\"label\">GPU 연속</span> GPU lane에는 항상 준비된 작업이 있다 &mdash; in-flight μ-batch 중 하나의 QKV / projection / prefill-attn. 이들은 <b>compute-bound</b>이므로(텐서 코어 포화, HBM 버스는 대체로 유휴) GPU는 결코 PIM을 기다리며 놀지 않는다.",
+    "PIM HIDDEN PIM decode-attn (P at Init, M at T1–T2, N at T4) runs concurrently with those compute-bound GPU stages. Its in-place KV reads overlap the GPU's compute-bound window → decode-attn is hidden, not added to the per-μ-batch cycle.":
+      "<span class=\"label\">PIM 은닉</span> PIM decode-attn(Init의 <b>P</b>, T1&ndash;T2의 <b>M</b>, T4의 <b>N</b>)은 그 compute-bound GPU 단계와 <i>동시에</i> 실행된다. in-place KV read가 GPU의 compute-bound 윈도우와 겹치므로 → decode-attn은 μ-batch당 cycle에 <b>더해지지 않고 숨는다</b>.",
+    "Figure. Event-driven dispatch trace of PULS scheduler over a 2-active + transition-tail in-flight window {Mi−1 (tail), Mi, Mi+1} (here labeled P/M/N), maintained as a dependency DAG. Mechanism At each kernel-completion event Ti, ready nodes (precedence satisfied per I1·I2·I3) are picked greedily — priority O-proj > prefill-attn > QKV; tie-break: oldest μ-batch first. The result is that GPU and PIM stay concurrently loaded on different μ-batches — no explicit policy is encoded. PIM hidden behind compute-bound GPU The GPU stages (QKV / projection / prefill-attn) are compute-bound and leave the HBM bus mostly idle; PIM decode-attn overlaps that window via its in-place internal path, so it adds nothing to the per-μ-batch cycle (F2 · F3, §5.3). P at Init = tail state P's prefill-attn(X) and earlier GPU stages already completed; only decode-attn(G,H) remains on PIM. Assumption Balanced admission steady state (cycle-balanced per §6.4: t_PIM(decode-attn) ≈ sum of GPU stages per μ-batch). The trace shape is the ctx-independent attractor under this balance — chunked prefill (§5.5) lets admission scale chunk granularity to maintain it across any ctx within TBT SLO. The figure ceases to apply only at very long ctx where balance is infeasible (§6.6 \"A-bound natural transition\") — a system-level limit of multi-request schedulers, not PULS-specific.":
+      "<b>그림.</b> 의존성 DAG로 유지되는 2-active + transition-tail in-flight 윈도우 <b>{M<sub>i&minus;1</sub> (tail), M<sub>i</sub>, M<sub>i+1</sub>}</b>(여기서는 P/M/N으로 표기) 위에서의 PULS 스케줄러 이벤트 구동 디스패치 트레이스. <ul class=\"caption-list\"><li><span class=\"item-label\">메커니즘</span> 각 커널 완료 이벤트 T<sub>i</sub>에서 준비된 노드(I1·I2·I3에 따라 선후 충족)를 greedy하게 고른다 &mdash; 우선순위 <code>O-proj &gt; prefill-attn &gt; QKV</code>, tie-break은 최고령 μ-batch 우선. 그 결과 GPU와 PIM이 서로 다른 μ-batch에 동시에 채워진다 &mdash; 명시적 정책은 인코딩되지 않는다.</li><li class=\"lookahead\"><span class=\"item-label\">compute-bound GPU 뒤에 숨는 PIM</span> GPU 단계(QKV / projection / prefill-attn)는 compute-bound이라 HBM 버스를 대체로 유휴로 둔다. PIM decode-attn은 in-place 내부 경로로 그 윈도우와 겹치므로 μ-batch당 cycle에 아무것도 더하지 않는다(F2 · F3, §5.3).</li><li><span class=\"item-label\">Init의 P = tail 상태</span> P의 prefill-attn(X)과 이전 GPU 단계는 이미 완료됐고, PIM에는 decode-attn(G,H)만 남아 있다.</li><li class=\"assumption\"><span class=\"item-label\">가정</span> 균형 어드미션 정상상태(§6.4에 따라 cycle-balanced: μ-batch당 <code>t_PIM(decode-attn) ≈ sum of GPU stages</code>). 트레이스 형태는 이 균형 아래의 <b>ctx-독립</b> attractor다 &mdash; chunked prefill(§5.5)이 어드미션의 chunk 단위를 조절해 TBT SLO 안의 어떤 ctx에서도 이를 유지한다. 이 그림은 균형이 불가능한 아주 긴 ctx에서만 적용을 멈춘다(§6.6 \"A-bound natural transition\") &mdash; PULS 고유가 아니라 multi-request 스케줄러의 시스템 수준 한계다.</li></ul>"
+  });
+
+  Object.assign(KO, {
+    /* ---- section 6: Acceleration Sources (lede, F1–F4) ---- */
+    "§ 5.7 — SOURCE DECOMPOSITION": "§ 5.7 — 요인 분해",
+    "Acceleration Sources": "가속 요인",
+    "Five op-/systems-level sources (F1–F5) and two derived effects (Aux1, Aux2) account for PULS's end-to-end speedup. Each card shows the mechanism schematic, a one-line headline, and the calibration status; full numerical breakdown is in §7 Results.":
+      "다섯 가지 연산/시스템 수준 요인(<b>F1&ndash;F5</b>)과 두 가지 파생 효과(<b>Aux1, Aux2</b>)가 PULS의 종단 간 speedup을 설명한다. 각 카드는 메커니즘 도식, 한 줄 헤드라인, 보정 상태를 보여준다. 전체 수치 분해는 <b>§7 결과</b>에 있다.",
+
+    "2048-channel cooperative": "2048채널 협력",
+    "Q-replicate broadcast → 32-channel lock-step (per HBM stack)":
+      "Q-복제 브로드캐스트 → 32채널 lock-step (HBM stack당)",
+    "32 channels / stack × 8 stacks / GPU × 8 GPU = 2048 channels aggregate":
+      "stack당 32채널 &nbsp;×&nbsp; GPU당 8 stack &nbsp;×&nbsp; 8 GPU &nbsp;=&nbsp; <b>총 2048채널</b>",
+    "The same Q vector is broadcast to every channel in lock-step; each channel sweeps its own KV-row slice independently inside the HBM4 logic-die SFU. With 2048 channels cooperating across 8 GPUs, a single attention operation is parallelized at sequence-row granularity rather than head granularity — bypassing the GPU's external HBM bandwidth ceiling by a factor of 1 / η_HBM.":
+      "같은 <b>Q 벡터</b>가 모든 채널에 lock-step으로 브로드캐스트되고, 각 채널은 HBM4 로직 다이 SFU 내부에서 자신의 KV-row 슬라이스를 독립적으로 훑는다. 8개 GPU에 걸친 2048채널이 협력하므로 단일 attention 연산이 head 단위가 아니라 sequence-row 단위로 병렬화된다 &mdash; GPU의 외부 HBM 대역폭 천장을 <code>1 / η_HBM</code> 배수만큼 우회한다.",
+
+    "Projection ‖ PIM Double-Buffer": "Projection ‖ PIM 더블버퍼",
+    "SHOWN IN ACTION": "실제 동작 보기",
+    "The double-buffer pattern is shown in §5 Example Dispatch Trace — GPU and PIM are concurrently dispatched on different μ-batches, so PIM decode-attn hides behind the compute-bound GPU stages.":
+      "더블버퍼 패턴은 <b>§5 디스패치 트레이스 예시</b>에 나온다 &mdash; GPU와 PIM이 서로 다른 μ-batch에 동시에 디스패치되므로 PIM decode-attn이 compute-bound GPU 단계 뒤에 숨는다.",
+    "→ Go to §5 Example Dispatch Trace": "→ §5 디스패치 트레이스 예시로 이동",
+    "In steady state both lanes are fully loaded: GPU runs QKV of μ-batch M+i while PIM runs decode-attn of μ-batch M+i−1, with no idle gap on either side. Channel separation (KV-cache channels vs weight-streaming channels) eliminates HBM-bus contention. The per-μ-batch cycle drops from t_proj + t_attn to max(t_proj, t_attn) — and over a long staggered stream, the slower of the two becomes the steady-state cadence.":
+      "정상상태에서 두 lane 모두 <b>가득 찬다</b>: GPU가 μ-batch <b>M+i</b>의 QKV를 도는 동안 PIM은 μ-batch <b>M+i&minus;1</b>의 decode-attn을 돌며, 양쪽에 idle 간격이 없다. 채널 분리(KV-cache 채널 vs weight-streaming 채널)가 HBM 버스 contention을 없앤다. μ-batch당 cycle이 <code>t_proj + t_attn</code>에서 <code>max(t_proj, t_attn)</code>으로 줄어들고 &mdash; 길게 staggered된 스트림에서는 둘 중 느린 쪽이 정상상태 cadence가 된다.",
+
+    "Inter-Instance A↔B Pipeline": "인스턴스 간 A↔B 파이프라인",
+    "2-active compose · composition ≈99.5% · Σdev ≈1.2%": "2-active 구성 · composition ≈99.5% · Σdev ≈1.2%",
+    "In steady state, Instance A processes μ-batch M (attention + projection) while Instance B processes μ-batch M-1 (FFN) — the two instances handle different μ-batches at the same wall-clock instant. The per-layer effective time drops from t_A + t_B to max(t_A, t_B). The pool-model sim composes μ-batches to the operating point where the three per-cycle times match to <1%, confirming both instances actively contribute (§6.8).":
+      "정상상태에서 Instance A가 μ-batch <b>M</b>(attention + projection)을 처리하는 동안 Instance B는 μ-batch <b>M-1</b>(FFN)을 처리한다 &mdash; 두 인스턴스가 같은 wall-clock 순간에 <i>서로 다른</i> μ-batch를 다룬다. 레이어당 유효 시간이 <code>t_A + t_B</code>에서 <code>max(t_A, t_B)</code>로 줄어든다. 풀 모델 sim은 세 per-cycle 시간이 <code>&lt;1%</code>로 일치하는 <b>동작점으로 μ-batch를 구성</b>하며, 두 인스턴스가 모두 능동적으로 기여함을 확인한다(§6.8).",
+
+    "μ-batch Staggering": "μ-batch 스태거링",
+    "μ-batch staggering is the steady-state precondition under which F2 and F3 hold — without staggered μ-batch arrivals, neither double-buffering (F2) nor the inter-instance pipeline (F3) would reach the overlap regime. F4 is therefore not an independent additive factor; its effect is already contained inside F2·F3 measurements. No separate figure. (ARCH §5.7)":
+      "μ-batch 스태거링은 F2와 F3이 성립하는 <b>정상상태 전제 조건</b>이다 &mdash; staggered된 μ-batch 도착이 없으면 더블버퍼(F2)도 인스턴스 간 파이프라인(F3)도 오버랩 영역에 닿지 못한다. 따라서 F4는 독립적인 가산 요인이 아니다. 그 효과는 <b>이미 F2·F3 측정 안에 포함</b>되어 있다. 별도 그림 없음. (ARCH §5.7)"
+  });
+
+  Object.assign(KO, {
+    /* ---- section 6: Acceleration Sources (F5, Aux1, Aux2) ---- */
+    "Channel-Independent Scheduling": "채널 독립 스케줄링",
+    "5.15× speedup (trace-grounded)": "5.15× speedup (트레이스 기반)",
+    "Lock-step baseline — ragged handoff": "Lock-step 베이스라인 &mdash; ragged 핸드오프",
+    "PULS — fixed-shape handoff": "PULS &mdash; 고정 형상 핸드오프",
+    "INSTANCE A · attention (per-req KV variance)": "INSTANCE A · attention (요청별 KV 분산)",
+    "INSTANCE A · attention (PIM absorbs variance)": "INSTANCE A · attention (PIM이 분산 흡수)",
+    "handoff shape: ragged — Instance B must wait":
+      "핸드오프 형상: <b>ragged</b> <span class=\"f5-shape r\"><span></span><span></span><span></span></span> &nbsp;&mdash; Instance B가 기다려야 함",
+    "handoff shape: [B × hidden] — uniform, no straggler":
+      "핸드오프 형상: <b>[B &times; hidden]</b> <span class=\"f5-shape u\"><span></span><span></span><span></span></span> &nbsp;&mdash; 균일, straggler 없음",
+    "Bubble until max-KV req (B) finishes": "최대-KV 요청(B)이 끝날 때까지 <b>Bubble</b>",
+    "Instance B starts immediately — no bubble": "Instance B가 <b>즉시</b> 시작 &mdash; bubble 없음",
+    "In a multi-request decode batch, per-request KV length varies (e.g. 47K · 280K · 81K) → attention output is ragged, and Instance B sits idle until the longest-KV straggler finishes. PULS lets each SP-PIM channel sweep its own KV slice independently, so all requests complete attention at the same wall-clock tick. Instance B always receives a fixed-shape [B × hidden] tensor and runs immediately. Bubble eliminated; speedup equals the trace's max/mean KV ratio — 5.15× on LongBench λ=3.40 (10 req).":
+      "multi-request decode batch에서 요청별 KV 길이가 제각각이라(예: <code>47K · 280K · 81K</code>) → attention 출력이 <b>ragged</b>해지고, Instance B는 최장 KV straggler가 끝날 때까지 놀게 된다. PULS는 각 SP-PIM 채널이 자신의 KV 슬라이스를 독립적으로 훑게 하므로 모든 요청이 같은 wall-clock tick에 attention을 끝낸다. Instance B는 항상 <b>고정 형상 <code>[B &times; hidden]</code> 텐서</b>를 받아 즉시 실행한다. Bubble이 사라지고, speedup은 트레이스의 <code>max/mean KV ratio</code>와 같다 &mdash; LongBench λ=3.40(10 req)에서 <b>5.15×</b>.",
+
+    "Mixed Batching Weight Reuse": "Mixed Batching weight 재사용",
+    "Baseline — single instance, weight thrash": "베이스라인 &mdash; 단일 인스턴스, weight thrash",
+    "PULS Instance B — FFN-only, mixed batch": "PULS Instance B &mdash; FFN 전용, mixed batch",
+    "GPU MEMORY HOLDS (all 3 weight types)": "GPU 메모리 보유 (3가지 weight 전부)",
+    "PER-LAYER WEIGHT-STREAMING SEQUENCE": "레이어당 WEIGHT-STREAMING 순서",
+    "INSTANCE B MEMORY HOLDS (FFN only)": "INSTANCE B 메모리 보유 (FFN만)",
+    "PER-LAYER FFN-STREAMING (single mixed batch)": "레이어당 FFN-STREAMING (단일 mixed batch)",
+    "projection weights": "projection weight",
+    "cache (grows with ctx)": "cache (ctx에 따라 증가)",
+    "gate / up / down weights": "gate / up / down weight",
+    "→ stays in Instance A": "→ Instance A에 잔류",
+    "→ stays in Instance A (PIM)": "→ Instance A에 잔류 (PIM)",
+    "pinned — no swap-out": "<b>pinned</b> &mdash; swap-out 없음",
+    "FFN weights re-streamed once per layer × per batch-type":
+      "FFN weight를 <b>레이어당 × batch-type당 한 번</b> 재스트리밍",
+    "1 FFN load amortized over prefill + decode tokens simultaneously":
+      "FFN 로드 1회를 <b>prefill + decode 토큰</b>에 동시에 분할 상각",
+    "prefill batch + decode batch run separately → 2× FFN weight loads":
+      "prefill batch + decode batch를 따로 실행 → <b>FFN weight 로드 2×</b>",
+    "Arithmetic intensity ↑ → weight-streaming time halved (memory-bound regime)":
+      "<span class=\"good\">Arithmetic intensity ↑</span> → weight-streaming 시간 절반 (memory-bound 영역)",
+    "Instance disaggregation pins FFN weights only inside Instance B's memory — QKV / KV never enter B, so no weight-cache thrash. With PIM absorbing the variable-length attention, prefill chunks and decode tokens coexist in a single mixed μ-batch and share the same FFN weight load. Token denominator of FFN bus traffic grows → arithmetic intensity rises. Colab T4 microbench confirms 1.97× against a 2.0× closed-form ceiling.":
+      "인스턴스 분리는 Instance B 메모리에 <b>FFN weight만</b> 고정한다 &mdash; QKV / KV는 B에 들어오지 않으므로 weight-cache thrash가 없다. PIM이 가변 길이 attention을 흡수하므로 prefill chunk와 decode 토큰이 하나의 mixed μ-batch에 공존하며 같은 FFN weight 로드를 공유한다. FFN 버스 트래픽의 토큰 분모가 커진다 → <b>arithmetic intensity 상승</b>. <b>Colab T4 마이크로벤치가 1.97×를 확인</b>(2.0× closed-form 천장 대비).",
+
+    "KV Bus Traffic Reduction": "KV 버스 트래픽 감소",
+    "4.95× / 79.8% reduction": "4.95× / 79.8% 감소",
+    "DECODE REGIME — three bus paths simultaneously reduced": "DECODE 영역 &mdash; 세 버스 경로 동시 감소",
+    "1KV bus Instance A · HBM ↔ GPU during decode-attn":
+      "<span class=\"num\">1</span>KV 버스 <span class=\"sub\">Instance A · decode-attn 중 HBM ↔ GPU</span>",
+    "2FFN weight bus Instance B · FFN weight streaming per layer":
+      "<span class=\"num\">2</span>FFN weight 버스 <span class=\"sub\">Instance B · 레이어당 FFN weight 스트리밍</span>",
+    "3Inter-instance bus A ↔ B · NVLink handoff per layer":
+      "<span class=\"num\">3</span>인스턴스 간 버스 <span class=\"sub\">A ↔ B · 레이어당 NVLink 핸드오프</span>",
+    "Total HBM bus traffic in the decode regime: −79.8% reduction, 4.95× speedup · long-ctx alone reaches −81% (5.3×).":
+      "decode 영역의 총 HBM 버스 트래픽: <b>−79.8%</b> 감소, <span class=\"good\">4.95× speedup</span> · long-ctx만으로 <b>−81% (5.3×)</b>에 도달.",
+    "In the decode regime, PULS reduces three bus paths simultaneously: (1) the KV bus inside Instance A is eliminated because PIM processes attention on the HBM4 logic die; (2) the FFN weight bus inside Instance B halves because the mixed batch amortizes one FFN load over prefill + decode tokens; (3) the inter-instance bus carries only the fixed-shape [B × hidden] tensor — KV never crosses. Calibrated 79.8% reduction on LongBench λ=3.40 (10 req); long-ctx alone reaches 81%, 5.3×.":
+      "<b>decode 영역</b>에서 PULS는 세 버스 경로를 동시에 줄인다: (1) PIM이 HBM4 로직 다이에서 attention을 처리하므로 Instance A 내부 <b>KV 버스</b>가 제거된다. (2) mixed batch가 FFN 로드 1회를 prefill + decode 토큰에 분할 상각하므로 Instance B 내부 <b>FFN weight 버스</b>가 절반이 된다. (3) <b>인스턴스 간 버스</b>는 고정 형상 <code>[B &times; hidden]</code> 텐서만 나르고 &mdash; KV는 결코 건너지 않는다. LongBench λ=3.40(10 req)에서 <b>79.8% 감소 보정</b>, long-ctx만으로 <b>81%, 5.3×</b>에 도달."
+  });
+
+  Object.assign(KO, {
+    /* ---- section 7: Results (part 1) ---- */
+    "§ 5.7 — QUANTITATIVE PROJECTION": "§ 5.7 — 정량 추정",
+    "Results": "결과",
+    "Calibrated projection on Llama-3 70B + DGX B200 + HBM4 hypothetical substrate, plus a runtime validation that the pool-model scheduler reaches the operating point. Absolute metrics (TTFT, TPOT, throughput) are out of scope — silicon absent.":
+      "Llama-3 70B + DGX B200 + HBM4 가상 기판에 대한 보정 추정과, 풀 모델 스케줄러가 동작점에 도달함을 보이는 런타임 검증. 절대 지표(TTFT, TPOT, throughput)는 범위 밖이다 &mdash; 실리콘이 없다.",
+    "Per-source breakdown": "요인별 분해",
+    "Source": "요인",
+    "Status": "상태",
+    "Number": "수치",
+    "Provenance": "출처",
+    "SP-PIM attention (2048-ch Q-replicate)": "SP-PIM attention (2048-ch Q-복제)",
+    "Projection ‖ PIM double-buffering": "Projection ‖ PIM 더블버퍼링",
+    "Inter-instance A↔B pipeline": "인스턴스 간 A↔B 파이프라인",
+    "μ-batch staggering": "μ-batch 스태거링",
+    "Channel-independent vs lock-step": "채널 독립 vs lock-step",
+    "Mixed batching weight reuse": "Mixed batching weight 재사용",
+    "KV bus traffic reduction": "KV 버스 트래픽 감소",
+    "Deferred": "<span class=\"status-def\">보류</span>",
+    "Calibrated": "<span class=\"status-cal\">보정됨</span>",
+    "Absorbed": "<span class=\"status-abs\">흡수됨</span>",
+    "2.0× closed-form · 1.97× T4 measured": "2.0× closed-form · 1.97× T4 측정",
+    "4.95× speedup · 79.8% reduction": "4.95× speedup · 79.8% 감소",
+    "Impl-11 (Blackwell attn kernel calibration)": "Impl-11 (Blackwell attn 커널 보정)",
+    "Impl-11 (isolated cycle ratio)": "Impl-11 (격리 cycle 비율)",
+    "closed-form ctx sweep · integrated lifecycle (2-active, deployed 128)":
+      "closed-form ctx sweep · 통합 lifecycle (2-active, 배포 128)",
+    "Precondition for F2·F3; contained in their measurements": "F2·F3의 전제 조건, 그 측정에 포함됨",
+    "LongBench λ=3.40, 10-req sum trace-grounded": "LongBench λ=3.40, 10-req 합 트레이스 기반",
+    "Llama-3 70B FFN single-layer, Colab T4": "Llama-3 70B FFN 단일 레이어, Colab T4",
+    "LongBench λ=3.40, 10-req sum closed-form": "LongBench λ=3.40, 10-req 합 closed-form",
+    "Aggregate breakdown": "집계 분해",
+    "Weight streaming": "Weight 스트리밍",
+    "KV bus traffic": "KV 버스 트래픽",
+    "Total (weight + bus)": "합계 (weight + bus)",
+    "Net speedup: 11.14 / 3.12 = 3.57× (closed-form, weight + bus) → 4–5× per forward pass when F5 channel-independent scheduling is composed in the long-ctx multi-request regime.":
+      "<b>순 speedup:</b> <code>11.14 / 3.12 = 3.57×</code> (closed-form, weight + bus) → long-ctx multi-request 영역에서 F5 채널 독립 스케줄링까지 합쳐지면 forward pass당 <b>4&ndash;5×</b>."
+  });
+
+  Object.assign(KO, {
+    /* ---- section 7: Results (part 2) ---- */
+    "Runtime validation — 2 active μ-batch (integrated lifecycle)":
+      "런타임 검증 &mdash; 2 active μ-batch (통합 lifecycle)",
+    "One integrated sim (../puls-engine/sim/lifecycle.cpp) runs cold-start → steering · prefill→decode transition · per-completion healing · age-cap 5 on a wide synthetic pool. A node runs 2 active μ-batches; when one finishes its forward pass it is re-composed from (returned members + surplus) — no 3rd batch is force-composed. Deployed prefill 128. Statistics: puls_lifecycle 4000 64 5 2000 — last 3,500 of 4,000 rounds × 64 nodes (re-verified 2026-06: decode 99.87% / Σdev 1.233%, prefill 100% / Σdev 0.114%).":
+      "하나의 통합 sim(<code class=\"inline\">../puls-engine/sim/lifecycle.cpp</code>)이 넓은 합성 풀에서 cold-start → steering · prefill→decode 전이 · 완료별 힐링 · age-cap 5를 실행한다. 노드는 <b>2개의 active μ-batch</b>를 돌리며, 하나가 forward pass를 끝내면 <b>(반환된 멤버 + 잉여)로 재구성</b>된다 &mdash; <i>3번째 batch를 강제 구성하지 않는다</i>. 배포 prefill 128. 통계: <code class=\"inline\">puls_lifecycle 4000 64 5 2000</code> &mdash; <b>4,000 라운드 중 마지막 3,500 × 64 노드</b> (2026-06 재검증: decode 99.87% / Σdev 1.233%, prefill 100% / Σdev 0.114%).",
+    "composition — operating-point hit (with dependency · age-cap)":
+      "<b>composition &mdash; 동작점 도달 (의존성 · age-cap 포함)</b>",
+    "operating-point target": "동작점 목표",
+    "hit": "도달",
+    "Honest disclosure": "정직한 고지",
+    "F1 deferred": "F1 보류",
+    "F2 deferred": "F2 보류",
+    "F4 absorbed": "F4 흡수",
+    "HBM4 substrate": "HBM4 기판",
+    "RTL substrate": "RTL 기판",
+    "Comparative baseline": "비교 베이스라인",
+    "Absolute metrics": "절대 지표",
+    "Requires Blackwell GPU attention kernel calibration for the GPU-side decode-attn baseline. No projected number is included in the aggregate above — only what is closed-form / measured.":
+      "GPU 측 decode-attn 베이스라인을 위해 <b>Blackwell GPU attention 커널 보정</b>이 필요하다. 위 집계에는 추정 수치를 넣지 않았다 &mdash; closed-form / 측정값만 포함한다.",
+    "Isolated cycle ratio quantification deferred. Mechanism validated structurally (Impl-5 stress tests); quantitative contribution not yet calibrated.":
+      "격리 cycle 비율 정량화는 보류. 메커니즘은 구조적으로 검증됨(Impl-5 스트레스 테스트). 정량적 기여는 아직 보정되지 않음.",
+    "μ-batch staggering is the steady-state precondition for F2·F3. Its effect is already contained inside their measurements — not an independent additive factor.":
+      "μ-batch 스태거링은 F2·F3의 정상상태 전제 조건이다. 그 효과는 이미 해당 측정에 포함되어 있다 &mdash; 독립적 가산 요인이 아니다.",
+    "Hypothetical projection — current production absent. JEDEC JESD270-4A spec + Ramulator2-based cycle-accurate measurements as references.":
+      "가상 추정 &mdash; 현행 양산품 없음. JEDEC JESD270-4A 스펙 + Ramulator2 기반 cycle-accurate 측정을 참조로 사용.",
+    "0.74 fix + sweep {0.70, 0.74, 0.80}. H100 HBM3 measurement extended to HBM4 (Framing A).":
+      "0.74 고정 + sweep {0.70, 0.74, 0.80}. H100 HBM3 측정을 HBM4로 확장(Framing A).",
+    "Open-source flow only (Yosys + ASAP7 + OpenSTA pre-CTS). Not commercial signoff.":
+      "오픈소스 플로우만 사용(Yosys + ASAP7 + OpenSTA pre-CTS). 상용 signoff 아님.",
+    "vLLM / Sarathi-Serve — not compared in this RFC.":
+      "vLLM / Sarathi-Serve &mdash; 이 RFC에서는 비교하지 않음.",
+    "TTFT, TPOT, throughput, SLO goodput — to be derived in a later calibration pass.":
+      "TTFT, TPOT, throughput, SLO goodput &mdash; 이후 보정 패스에서 도출 예정."
+  });
+
+  /* __KO_END__ (more sections appended above this line) */
+
+  var SELECTORS = [
+    '.sidebar-subtitle', '.nav a', '.sidebar-footer',
+    '.section-eyebrow', '.section-title', '.section-lede',
+    '.callout',
+    '.figure-container > .title', '.figure-container > .subtitle',
+    '.instance-name', '.kv-cache span', '.steps .note span',
+    '.caption',
+    '.prose h2.h-sub', '.prose > p', '.prose li', '.prose td', '.prose th',
+    '.dag-caption', '.annotation', '.composition .item',
+    '.source-name', '.source-headline', '.source-mechanism',
+    '.xref-eyebrow', '.xref-body', '.xref-btn',
+    '.fig-title', '.f1-scale', '.f3-inst-sub',
+    '.f5-panel-title', '.f5-sublabel', '.f5-handoff', '.f5-panel-caption',
+    '.aux1-panel-title', '.aux1-sublabel', '.aux1-cycle-cap', '.aux1-panel-caption', '.aux1-wslot .note',
+    '.aux2-regime', '.aux2-row-label', '.aux2-caption',
+    '.kpi-label', '.kpi-sub',
+    '.result-block-title', '.result-block p', '.result-table td', '.result-table th',
+    '.agg-label', '.agg-saving',
+    '.disclosure-key', '.disclosure-val',
+    '.f4-card p'
+  ].join(', ');
+
+  // Canonicalize micro-sign µ (U+00B5) → Greek μ (U+03BC) and collapse whitespace,
+  // so KO keys and live text can never drift on those.
+  function norm(s) { return (s || '').replace(/µ/g, 'μ').replace(/\s+/g, ' ').trim(); }
+
+  // Re-key the KO map through norm() so typed keys match normalized live text exactly.
+  var KON = {};
+  Object.keys(KO).forEach(function (k) { KON[norm(k)] = KO[k]; });
+
+  var origs = new Map();
+  document.querySelectorAll(SELECTORS).forEach(function (el) {
+    origs.set(el, { en: el.innerHTML, key: norm(el.textContent) });
+  });
+
+  var btns = Array.prototype.slice.call(document.querySelectorAll('.lang-toggle button'));
+
+  function apply(lang) {
+    origs.forEach(function (v, el) {
+      if (lang === 'ko' && KON[v.key] != null) el.innerHTML = KON[v.key];
+      else el.innerHTML = v.en;
+    });
+    document.documentElement.lang = lang;
+    btns.forEach(function (b) { b.classList.toggle('active', b.dataset.lang === lang); });
+    try { localStorage.setItem('puls-lang', lang); } catch (e) {}
+  }
+
+  btns.forEach(function (b) {
+    b.addEventListener('click', function () { apply(b.dataset.lang); });
+  });
+
+  var saved = 'en';
+  try { saved = localStorage.getItem('puls-lang') || 'en'; } catch (e) {}
+  apply(saved);
 })();
 </script>
 </body>

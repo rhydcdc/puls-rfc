@@ -36,16 +36,8 @@ public:
     // 미기록(첫 턴 등) id → MissRecompute(node = -1).
     Lookup lookup(long long id, long long now);
 
-    // 부작용 없는 조회(카운터·idle 리셋 없음) — 어피니티 라우팅 판단용(csched ①-순위).
-    Lookup peek(long long id) const;
-
     // 라운드마다: HBM idle > evict_age → SSD 강등; SSD idle > gone_age → 소멸.
     void evict_tick(long long now);
-
-    // 노드별 동적 예산(HBM 바이트 폐루프): 멀티턴 인플레이션으로 풀 실 KV 가 설계 footprint 를
-    // 초과한 만큼 캐시 예산을 깎는다. budget 미만이 될 때까지 그 노드 HBM 엔트리를 idle 오래된
-    // 순으로 SSD 강등. 이후 on_complete admit 도 이 예산으로 판정.
-    void enforce_budget(int node, long long budget);
 
     long long node_used(int node) const { return node_used_[node]; }
     long long node_capacity() const { return node_cap_; }
@@ -58,7 +50,6 @@ private:
     struct Entry { int node; int len; long long last; Tier tier; };
     std::unordered_map<long long, Entry> idx_;
     std::vector<long long> node_used_;   // 노드별 HBM 사용 바이트
-    std::vector<long long> node_budget_; // 노드별 동적 예산 (기본 = node_cap_)
     long long node_cap_;
     long long kv_bpt_;                   // kv_bytes_per_token
     CacheConfig cfg_;
