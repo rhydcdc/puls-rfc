@@ -1716,7 +1716,7 @@ pre.code-block .var { color: #f9a8d4; }
 
       <div class="callout info">
         <span class="callout-title">GENERALIZED (2026-06)</span>
-        The numbers in this policy are a concrete example calibrated on <b>Llama-3 70B + B200 + HBM4 (16-high)</b>. The <b>method</b> for constructing the operating point is model- and GPU-independent: it is implemented and validated in the C++ scheduler <b>puls-engine</b> (189 checks) and is derived for any model / GPU within the HBM capacity bound. See <a href="../puls-engine/CONTRACT.md">puls-engine/CONTRACT.md</a>.
+        The numbers in this policy are a concrete example calibrated on <b>Llama-3 70B + B200 + HBM4 (16-high)</b>. The <b>method</b> for constructing the operating point is model- and GPU-independent: it is implemented and validated in the C++ scheduler <b>puls-engine</b> (196 checks) and is derived for any model / GPU within the HBM capacity bound. See <a href="../puls-engine/CONTRACT.md">puls-engine/CONTRACT.md</a>.
       </div>
 
       <div class="figure-container">
@@ -2019,7 +2019,7 @@ pre.code-block .var { color: #f9a8d4; }
         <ul>
           <li><b>★ Length-distribution-agnostic.</b> On a heavily varied pool, short + long requests are <i>combined</i> to hit both targets — the average is never read. Heavy / mixed / bimodal all converge. Even an age-cap-forced off-size request is corrected by steering (a forced long request lowers <code class="inline">ideal</code> → the next picks several short ones).</li>
           <li><b>Operating parameters = target_count + target_kv + AGE_CAP.</b> Steering hits the target directly; <code class="inline">former</code> selects by nearest-to-<code class="inline">ideal</code>, not by any tolerance gate.</li>
-          <li><b>AGE_CAP trade-off (sweep).</b> cap↑ → steering freedom↑ → spread↓ but latency↑; cap↓ → FIFO-like → fair/low-latency but spread↑. <code class="inline">cap1: 3.1%</code> · <code class="inline">cap2: 1.2%, wait ≤3</code> · <code class="inline">cap5: 0.7%, wait 5</code> · <code class="inline">cap∞: 0.8% but starvation (wait 37)</code> → <b>AGE_CAP = 5 adopted</b> (wait 5 ≈ 128 µs ≪ TBT, so latency-harmless; spread 0.7%).</li>
+          <li><b>AGE_CAP trade-off (sweep).</b> cap↑ → steering freedom↑ → spread↓ but latency↑; cap↓ → FIFO-like → fair/low-latency but spread↑. <code class="inline">cap1: 3.1%</code> · <code class="inline">cap2: 1.2%, wait ≤3</code> · <code class="inline">cap5: 0.7%, wait 5</code> · <code class="inline">cap∞: 0.8% but starvation (wait 37)</code> → <b>AGE_CAP = 5 adopted</b> (wait 5 rounds ≈ 10 ms of paused decoding — a per-request token-gap [PAUSE], invisible to batch-level TBT and bounded at exactly cap+1 rounds ≈ 12.2 ms worst; a pure tail-bound knob; spread 0.7%).</li>
         </ul>
 
         <div class="callout note">
@@ -2035,19 +2035,20 @@ pre.code-block .var { color: #f9a8d4; }
       <div class="section-header">
         <div class="section-eyebrow">§ 7 — CLUSTER ROUTING</div>
         <h1 class="section-title">Cluster Scheduler (C) — Per-Node 100K Centering</h1>
-        <div class="section-lede">The balanced operating point exists only when a node's in-flight pool is centered at <b>mean ~100K</b> — only then does the local steering (§4) hit (decode <b>62</b> ∧ Σkv <b>6.15M</b> at prefill 128). At server scale (hundreds–thousands of nodes) the global arrival mean drifts above 100K, so a cluster-level scheduler <b>C</b> routes requests to seat each node at that operating point, with a global age-cap for inter-node FIFO fairness and an on-node 3-tier multi-turn KV cache.</div>
+        <div class="section-lede">The balanced operating point exists only when a node's in-flight pool is centered at <b>mean ~100K</b> — only then does the local steering (§4) hit (decode <b>62</b> ∧ Σkv <b>6.15M</b> at prefill 128). At server scale (hundreds–thousands of nodes) the global arrival mean drifts above 100K, so a cluster-level scheduler <b>C</b> routes requests to seat each node at that operating point, with a global age-cap for inter-node FIFO fairness and an on-node 3-tier multi-turn KV cache with holding-node affinity (cached returns routed back to their KV).</div>
       </div>
 
       <div class="prose">
 
         <h2 class="h-sub">Why it exists</h2>
-        <p>Without centering, each node's pool tracks the global arrival mean and drifts high: a node then fits fewer decoders, so a batch <b>falls below count 62 while Σkv rises above 6.15M</b> — both control targets break together and idle blows up. <b>C</b> keeps every node centered at 100K (measured <code class="inline">poolMean 117K</code>) so the per-node steering can compose the operating point.</p>
+        <p>Without centering, each node's pool tracks the global arrival mean and drifts high: a node then fits fewer decoders, so a batch <b>falls below count 62 while Σkv rises above 6.15M</b> — both control targets break together and idle blows up. <b>C</b> keeps every node centered at 100K (measured <code class="inline">poolMean 116K</code>) so the per-node steering can compose the operating point.</p>
 
-        <h2 class="h-sub">Design = node mechanism + (1) global age-cap + (2) 3-tier KV cache</h2>
-        <p>C is the node mechanism — <b>resident surplus</b> + <b>per-iteration steering re-selection</b> + <b>per-completion healing</b> — plus two cluster-level additions:</p>
+        <h2 class="h-sub">Design = node mechanism + (1) global age-cap + (2) 3-tier KV cache + (3) cache affinity</h2>
+        <p>C is the node mechanism — <b>resident surplus</b> + <b>per-iteration steering re-selection</b> + <b>per-completion healing</b> — plus three cluster-level additions. The surplus re-selection is a <b>general-purpose perturbation absorber</b> — it digests age-cap forced injections and affinity mismatches alike — which is what let cache affinity land with zero new steering machinery:</p>
         <ul>
           <li><b>(1) Global age-cap (inter-node FIFO fairness).</b> A node requests <code class="inline">ideal = hole</code>; the global queue returns a near-fit, but any request older than <code class="inline">global_age_cap</code> is <b>force-routed</b> regardless of fit. Bounded wait, no starvation across nodes.</li>
-          <li><b>(2) On-node multi-turn 3-tier KV cache.</b> <b>HBM hit / SSD reload / recompute.</b> When a conversation's <code class="inline">length &gt; 16000</code> and residual HBM fits, its KV is cached in HBM; <code class="inline">evict_age</code> idle turns demote it (SSD at <code class="inline">offload_bw</code>), <code class="inline">gone_age</code> turns trigger recompute.</li>
+          <li><b>(2) On-node multi-turn 3-tier KV cache.</b> <b>HBM hit / SSD reload / recompute.</b> When a conversation's <code class="inline">length &gt; 16000</code> and residual HBM fits, its KV is cached in HBM; <code class="inline">evict_age</code> idle turns demote it (SSD at <code class="inline">offload_bw</code>), <code class="inline">gone_age</code> turns trigger recompute. <b>Dynamic cache budget:</b> pool-KV inflation from multi-turn (measured ~0.24 TB ≈ 23% of the cache budget) is debited from the node's cache budget each round — an HBM-byte closed loop (static accounting overstated HBM-hit by ~9%p).</li>
+          <li><b>(3) Cache affinity + spill cap.</b> A multi-turn return whose KV is HBM-cached queues at the holding node; on a hole, 1st priority = the oldest affinity waiter (admitted regardless of length / cap_room), 2nd = the usual <code class="inline">pull_slot</code> (global aged-forced, else ideal = hole nearest). Physical (holding-node) hits: <b>1.7% → 99.7%</b>. Waiters get their own bound <code class="inline">aff_spill = 200</code> — separate from <code class="inline">global_age_cap 25</code>, because a cached return's waiting is rewarded (~2 ms/round is ~10× cheaper than a 160–780-round SSD reload). Sweeping 25→200 improved <i>both</i> physical hits (67→99.7%) and Σdev (1.57→1.38%): spilled requests became forced off-fit injections — a worse perturbation than affinity's near like-for-like admits (former residents grown ≤12K; eligibility ≥16K filters high-growth shorts); residuals are absorbed by the existing surplus re-selection + node age-cap machinery. Measured spill: <b>4 of 13,483 affinity candidates (0.03%)</b> — under the single global cap 25 it was 31% (4,317); the dedicated-cap separation cut it ~1,000×.</li>
         </ul>
 
         <h2 class="h-sub">C config (locked)</h2>
@@ -2055,26 +2056,32 @@ pre.code-block .var { color: #f9a8d4; }
           <thead><tr><th style="width: 200px;">parameter</th><th style="width: 120px;">value</th><th>role</th></tr></thead>
           <tbody>
             <tr><td><code>decode_surplus</code></td><td class="mono"><b>25</b></td><td>resident surplus per node → <code>decode_pool</code> <b>149</b></td></tr>
+            <tr><td><code>prefill_pool</code></td><td class="mono"><b>60</b></td><td>resident prefill pool — depth-diversity floor 50 + surplus margin 10 (prefill-side surplus; over-provisioning risks age-cap forcing)</td></tr>
             <tr><td><code>global_age_cap</code></td><td class="mono"><b>25</b></td><td>inter-node FIFO cap — oldest-beyond-cap force-routed</td></tr>
             <tr><td><code>eligibility</code></td><td class="mono"><b>16000</b></td><td>HBM-cache threshold (mid · long): <code>length &gt; 16000</code></td></tr>
             <tr><td><code>evict_age</code></td><td class="mono"><b>200</b></td><td>idle turns before HBM → SSD demotion</td></tr>
+            <tr><td><code>gone_age</code></td><td class="mono"><b>3000</b></td><td>idle turns before the SSD entry expires → recompute (fixed assumption)</td></tr>
             <tr><td><code>contention β</code></td><td class="mono"><b>0.5</b></td><td>conservative PIM-exposure penalty weight (β-robust)</td></tr>
-            <tr><td><code>offload_bw</code></td><td class="mono"><b>2e7</b></td><td>SSD reload bandwidth ≈ 10 GB/s</td></tr>
+            <tr><td><code>offload_bw</code></td><td class="mono"><b>1e8</b></td><td>SSD reload bandwidth ≈ 50 GB/s NVMe array (assumption label; old 2e7 sat below the recompute break-even ≈ 2.1e7, mathematically disabling the SSD tier)</td></tr>
             <tr><td><code>node_age_cap</code></td><td class="mono"><b>5</b></td><td>on-node steering fairness cap</td></tr>
+            <tr><td><code>affinity</code></td><td class="mono"><b>on</b></td><td>HBM-cached returns queue at the holding node — 1st-priority admit on a hole</td></tr>
+            <tr><td><code>aff_spill</code></td><td class="mono"><b>200</b></td><td>affinity-wait bound (separate from the global cap) — beyond it, spill to the global queue</td></tr>
+            <tr><td><code>dyncache</code></td><td class="mono"><b>on</b></td><td>multi-turn pool-KV inflation debited from the cache budget each round (HBM-byte closed loop)</td></tr>
           </tbody>
         </table>
 
         <h2 class="h-sub">C KPI (measured)</h2>
         <div class="kpi-grid">
-          <div class="kpi-card good"><span class="kpi-label">Σdev</span><span class="kpi-value">1.35%</span><span class="kpi-sub">worst 16.9%</span></div>
-          <div class="kpi-card"><span class="kpi-label">TBT mean</span><span class="kpi-value">2056 µs</span><span class="kpi-sub">p99 2191 µs</span></div>
-          <div class="kpi-card"><span class="kpi-label">TTFT mean</span><span class="kpi-value">0.74M µs</span><span class="kpi-sub">p99 8.94M µs</span></div>
-          <div class="kpi-card good"><span class="kpi-label">SLO goodput</span><span class="kpi-value">3.79M</span><span class="kpi-sub">tok/s (TBT goodput 3.90M)</span></div>
-          <div class="kpi-card good"><span class="kpi-label">TTFT-met</span><span class="kpi-value">97.1%</span><span class="kpi-sub">within SLO</span></div>
-          <div class="kpi-card good"><span class="kpi-label">cache HBM-hit</span><span class="kpi-value">92.0%</span><span class="kpi-sub">3-tier multi-turn</span></div>
-          <div class="kpi-card accent"><span class="kpi-label">PIM-exposed</span><span class="kpi-value">73.5%</span><span class="kpi-sub">expo 20µs/μbatch ≈ 0.25µs/layer ≈ 1% of 25.5µs</span></div>
-          <div class="kpi-card"><span class="kpi-label">max_wait</span><span class="kpi-value">26</span><span class="kpi-sub">rounds · forced 1626</span></div>
-          <div class="kpi-card"><span class="kpi-label">poolMean</span><span class="kpi-value">117K</span><span class="kpi-sub">centered ~100K</span></div>
+          <div class="kpi-card good"><span class="kpi-label">Σdev</span><span class="kpi-value">1.38%</span><span class="kpi-sub">worst 22.6%</span></div>
+          <div class="kpi-card"><span class="kpi-label">TBT mean</span><span class="kpi-value">2058 µs</span><span class="kpi-sub">p99 2194 µs</span></div>
+          <div class="kpi-card"><span class="kpi-label">TTFT mean</span><span class="kpi-value">0.76M µs</span><span class="kpi-sub">p99 8.77M µs</span></div>
+          <div class="kpi-card good"><span class="kpi-label">SLO goodput</span><span class="kpi-value">3.80M</span><span class="kpi-sub">tok/s (TBT goodput 3.90M)</span></div>
+          <div class="kpi-card good"><span class="kpi-label">TTFT-met</span><span class="kpi-value">97.2%</span><span class="kpi-sub">within SLO</span></div>
+          <div class="kpi-card good"><span class="kpi-label">cache HBM-hit</span><span class="kpi-value">91.1%</span><span class="kpi-sub">physical (holding-node) 99.7%</span></div>
+          <div class="kpi-card accent"><span class="kpi-label">PIM-exposed</span><span class="kpi-value">74.4%</span><span class="kpi-sub">expo 21µs/μbatch ≈ 0.26µs/layer ≈ 1% of 25.5µs</span></div>
+          <div class="kpi-card"><span class="kpi-label">max_wait</span><span class="kpi-value">24</span><span class="kpi-sub">rounds · forced 3704</span></div>
+          <div class="kpi-card"><span class="kpi-label">poolMean</span><span class="kpi-value">116K</span><span class="kpi-sub">centered ~100K</span></div>
+          <div class="kpi-card good"><span class="kpi-label">worst token gap</span><span class="kpi-value">6</span><span class="kpi-sub">rounds (= node age-cap+1) ≈ 12.2 ms · paused-token share 3.4%</span></div>
         </div>
 
         <h2 class="h-sub">Contention · dependency TBT model</h2>
@@ -2083,7 +2090,7 @@ pre.code-block .var { color: #f9a8d4; }
 <span class="var">instance_a</span> = max(<span class="var">t_pim</span>, <span class="var">t_gpu_a</span>) + <span class="var">β</span>·max(0, <span class="var">t_pim</span> − <span class="var">t_gpu_a</span>)
 <span class="cmt"># TBT = the slower of instance-A and the FFN lane, across all layers</span>
 <span class="var">TBT</span> = max(<span class="var">instance_a</span>, <span class="var">t_ffn</span>) × <span class="var">80</span>   <span class="cmt"># layers</span></pre>
-        <p><b>Contention-free</b> ⟺ <code class="inline">t_pim ≤ t_gpu_a</code> — the PIM decode read hides entirely in the GPU-A shadow, so the penalty term vanishes. <code class="inline">β = 0.5</code> is the <b>conservative</b> assumption label; C is <b>β-robust</b> (goodput stays fixed across the full β range). The operating point sits on the <b>PIM-hiding edge</b> (derive balances <code class="inline">t_pim ≈ t_gpu_a</code>), so exposure is frequent (<b>73.5%</b>) but each exposure costs only <b>~1%</b> of the <b>~25.5 µs</b> per-layer budget (≈ 0.25 µs/layer) — yielding TBT mean <b>2056 µs</b> against the ~2.0 ms (80×25.5µs) budget.</p>
+        <p><b>Contention-free</b> ⟺ <code class="inline">t_pim ≤ t_gpu_a</code> — the PIM decode read hides entirely in the GPU-A shadow, so the penalty term vanishes. <code class="inline">β = 0.5</code> is the <b>conservative</b> assumption label; C is <b>β-robust</b> (goodput stays fixed across the full β range). The operating point sits on the <b>PIM-hiding edge</b> (derive balances <code class="inline">t_pim ≈ t_gpu_a</code>), so exposure is frequent (<b>74.4%</b>) but each exposure costs only <b>~1%</b> of the <b>~25.5 µs</b> per-layer budget (≈ 0.26 µs/layer) — yielding TBT mean <b>2058 µs</b> against the ~2.0 ms (80×25.5µs) budget.</p>
 
         <div class="callout note">
           <span class="callout-title">OPERATING POINT</span>
@@ -2300,7 +2307,7 @@ pre.code-block .var { color: #f9a8d4; }
           <span class="source-id">F3</span>
           <span class="source-name">Inter-Instance A↔B Pipeline</span>
           <span class="source-badge calibrated">Calibrated</span>
-          <span class="source-headline">2-active compose · composition 100% · Σdev 0.38%</span>
+          <span class="source-headline">2-active compose · composition ≈99.5% · Σdev ≈1.2%</span>
         </div>
         <div class="source-figure">
           <div class="f3-wrap">
@@ -2554,7 +2561,7 @@ pre.code-block .var { color: #f9a8d4; }
           <tbody>
             <tr><td class="source-id-cell">F1</td><td>SP-PIM attention (2048-ch Q-replicate)</td><td><span class="status-def">Deferred</span></td><td class="mono">—</td><td>Impl-11 (Blackwell attn kernel calibration)</td></tr>
             <tr><td class="source-id-cell">F2</td><td>Projection ‖ PIM double-buffering</td><td><span class="status-def">Deferred</span></td><td class="mono">—</td><td>Impl-11 (isolated cycle ratio)</td></tr>
-            <tr><td class="source-id-cell">F3</td><td>Inter-instance A↔B pipeline</td><td><span class="status-cal">Calibrated</span></td><td class="mono">0.92–0.99 closed-form · lifecycle 2-μ-batch composition 100% · Σdev 0.38%</td><td>closed-form ctx sweep · integrated lifecycle (2-active, deployed 128)</td></tr>
+            <tr><td class="source-id-cell">F3</td><td>Inter-instance A↔B pipeline</td><td><span class="status-cal">Calibrated</span></td><td class="mono">0.92–0.99 closed-form · lifecycle 2-μ-batch composition ≈99.5% · Σdev ≈1.2%</td><td>closed-form ctx sweep · integrated lifecycle (2-active, deployed 128)</td></tr>
             <tr><td class="source-id-cell">F4</td><td>μ-batch staggering</td><td><span class="status-abs">Absorbed</span></td><td class="mono">—</td><td>Precondition for F2·F3; contained in their measurements</td></tr>
             <tr><td class="source-id-cell">F5</td><td>Channel-independent vs lock-step</td><td><span class="status-cal">Calibrated</span></td><td class="mono">5.15× speedup</td><td>LongBench λ=3.40, 10-req sum trace-grounded</td></tr>
             <tr><td class="source-id-cell">Aux1</td><td>Mixed batching weight reuse</td><td><span class="status-cal">Calibrated</span></td><td class="mono">2.0× closed-form · 1.97× T4 measured</td><td>Llama-3 70B FFN single-layer, Colab T4</td></tr>
@@ -2591,7 +2598,7 @@ pre.code-block .var { color: #f9a8d4; }
       <div class="result-block">
         <h3 class="result-block-title">Runtime validation — 2 active μ-batch (integrated lifecycle)</h3>
         <p style="font-size:12.5px; color:var(--color-muted); margin: 6px 0 12px 0;">
-          One integrated sim (<code class="inline">../puls-engine/sim/lifecycle.cpp</code>) runs cold-start → steering · prefill→decode transition · per-completion healing · age-cap 5 on a wide synthetic pool. A node runs <b>2 active μ-batches</b>; when one finishes its forward pass it is <b>re-composed from (returned members + surplus)</b> — <i>no 3rd batch is force-composed</i>. Deployed prefill 128. Statistics are over the <b>last 500 of 1000 rounds × 16 nodes = 8,000 node-rounds</b> (16,000 decode · 8,000 prefill batches).
+          One integrated sim (<code class="inline">../puls-engine/sim/lifecycle.cpp</code>) runs cold-start → steering · prefill→decode transition · per-completion healing · age-cap 5 on a wide synthetic pool. A node runs <b>2 active μ-batches</b>; when one finishes its forward pass it is <b>re-composed from (returned members + surplus)</b> — <i>no 3rd batch is force-composed</i>. Deployed prefill 128. Statistics: <code class="inline">puls_lifecycle 4000 64 5 2000</code> — <b>last 3,500 of 4,000 rounds × 64 nodes</b> (re-verified 2026-06: decode 99.87% / Σdev 1.233%, prefill 100% / Σdev 0.114%).
         </p>
 
         <p style="font-size:12.5px; margin: 4px 0 6px 0;"><b>composition — operating-point hit (with dependency · age-cap)</b></p>
@@ -2714,8 +2721,8 @@ pre.code-block .var { color: #f9a8d4; }
     "Instance Disaggregation": "인스턴스 분리",
     "The transformer layer is split at the attention/FFN boundary into two instances connected by an NVLink pipeline. This split is the prerequisite for everything in the scheduler policy that follows — KV cache permanence, fixed-shape handoff, and the Instance A internal joint GPU·PIM scheduling.":
       "트랜스포머 레이어를 attention/FFN 경계에서 둘로 나눠 NVLink 파이프라인으로 연결된 두 인스턴스로 분리한다. 이 분리가 이후 스케줄러 정책의 모든 것 — KV cache 영속성, 고정 형상 핸드오프, Instance A 내부의 GPU·PIM 공동 스케줄링 — 의 전제 조건이다.",
-    "GENERALIZED (2026-06) The numbers in this policy are a concrete example calibrated on Llama-3 70B + B200 + HBM4 (16-high). The method for constructing the operating point is model- and GPU-independent: it is implemented and validated in the C++ scheduler puls-engine (189 checks) and is derived for any model / GPU within the HBM capacity bound. See puls-engine/CONTRACT.md.":
-      "<span class=\"callout-title\">일반화 (2026-06)</span> 이 정책의 수치는 <b>Llama-3 70B + B200 + HBM4 (16-high)</b> 기준으로 보정한 구체적 예시다. 동작점을 구성하는 <b>방법</b> 자체는 모델·GPU 독립적이다: C++ 스케줄러 <b>puls-engine</b>(189개 검사)에 구현·검증되어 있으며, HBM 용량 한계 안에서 임의의 모델/GPU에 대해 도출된다. <a href=\"../puls-engine/CONTRACT.md\">puls-engine/CONTRACT.md</a> 참조.",
+    "GENERALIZED (2026-06) The numbers in this policy are a concrete example calibrated on Llama-3 70B + B200 + HBM4 (16-high). The method for constructing the operating point is model- and GPU-independent: it is implemented and validated in the C++ scheduler puls-engine (196 checks) and is derived for any model / GPU within the HBM capacity bound. See puls-engine/CONTRACT.md.":
+      "<span class=\"callout-title\">일반화 (2026-06)</span> 이 정책의 수치는 <b>Llama-3 70B + B200 + HBM4 (16-high)</b> 기준으로 보정한 구체적 예시다. 동작점을 구성하는 <b>방법</b> 자체는 모델·GPU 독립적이다: C++ 스케줄러 <b>puls-engine</b>(196개 검사)에 구현·검증되어 있으며, HBM 용량 한계 안에서 임의의 모델/GPU에 대해 도출된다. <a href=\"../puls-engine/CONTRACT.md\">puls-engine/CONTRACT.md</a> 참조.",
     "PULS Instance Disaggregation": "PULS 인스턴스 분리",
     "14-step transformer layer flow split across Instance A (Attention) and Instance B (FFN), connected by an inter-instance NVLink pipeline.":
       "14단계 트랜스포머 레이어 흐름을 <b>Instance A (Attention)</b>와 <b>Instance B (FFN)</b>로 나누고, 인스턴스 간 NVLink 파이프라인으로 연결한다.",
@@ -2834,8 +2841,8 @@ pre.code-block .var { color: #f9a8d4; }
       "<b>★ 길이 분포 무관.</b> 심하게 분산된 풀에서도 짧은 요청 + 긴 요청을 <i>조합</i>해 두 목표를 맞춘다 &mdash; 평균은 결코 읽지 않는다. heavy / mixed / bimodal 모두 수렴한다. age-cap에 의해 강제된 비규격 요청조차 steering이 보정한다(강제된 긴 요청은 <code class=\"inline\">ideal</code>을 낮추고 &rarr; 다음에 짧은 요청 여러 개를 고른다).",
     "Operating parameters = target_count + target_kv + AGE_CAP. Steering hits the target directly; former selects by nearest-to-ideal, not by any tolerance gate.":
       "<b>동작 파라미터 = target_count + target_kv + AGE_CAP.</b> steering은 목표를 직접 맞히고, <code class=\"inline\">former</code>는 어떤 허용 게이트가 아니라 <code class=\"inline\">ideal</code>에 가장 가까운 것으로 선택한다.",
-    "AGE_CAP trade-off (sweep). cap↑ → steering freedom↑ → spread↓ but latency↑; cap↓ → FIFO-like → fair/low-latency but spread↑. cap1: 3.1% · cap2: 1.2%, wait ≤3 · cap5: 0.7%, wait 5 · cap∞: 0.8% but starvation (wait 37) → AGE_CAP = 5 adopted (wait 5 ≈ 128 µs ≪ TBT, so latency-harmless; spread 0.7%).":
-      "<b>AGE_CAP 트레이드오프 (sweep).</b> cap↑ → steering 자유도↑ → spread↓ 하지만 latency↑; cap↓ → FIFO에 가까움 → 공정·저지연이지만 spread↑. <code class=\"inline\">cap1: 3.1%</code> · <code class=\"inline\">cap2: 1.2%, wait ≤3</code> · <code class=\"inline\">cap5: 0.7%, wait 5</code> · <code class=\"inline\">cap∞: 0.8% but starvation (wait 37)</code> → <b>AGE_CAP = 5 채택</b> (wait 5 ≈ 128 µs ≪ TBT라 지연 무해, spread 0.7%).",
+    "AGE_CAP trade-off (sweep). cap↑ → steering freedom↑ → spread↓ but latency↑; cap↓ → FIFO-like → fair/low-latency but spread↑. cap1: 3.1% · cap2: 1.2%, wait ≤3 · cap5: 0.7%, wait 5 · cap∞: 0.8% but starvation (wait 37) → AGE_CAP = 5 adopted (wait 5 rounds ≈ 10 ms of paused decoding — a per-request token-gap [PAUSE], invisible to batch-level TBT and bounded at exactly cap+1 rounds ≈ 12.2 ms worst; a pure tail-bound knob; spread 0.7%).":
+      "<b>AGE_CAP 트레이드오프 (sweep).</b> cap↑ → steering 자유도↑ → spread↓ 하지만 latency↑; cap↓ → FIFO에 가까움 → 공정·저지연이지만 spread↑. <code class=\"inline\">cap1: 3.1%</code> · <code class=\"inline\">cap2: 1.2%, wait ≤3</code> · <code class=\"inline\">cap5: 0.7%, wait 5</code> · <code class=\"inline\">cap∞: 0.8% but starvation (wait 37)</code> → <b>AGE_CAP = 5 채택</b> (wait 5 라운드 ≈ 디코딩 일시정지 10 ms — 요청별 토큰 간격 [PAUSE]로 배치 단위 TBT에는 보이지 않으며 최악이 정확히 cap+1 라운드 ≈ 12.2 ms로 bound; 순수 tail-bound 노브; spread 0.7%).",
     "SUPERSEDED Earlier drafts adjusted admission per iteration from measured GPU/PIM idle fractions + a hysteresis deadband. That feedback model is replaced by this pool model: the scheduler hits fixed targets via steering rather than reacting to measured idle (deadband σ was unmeasurable on a self-authored framework). See ARCHITECTURE.md §6.4.":
       "<span class=\"callout-title\">대체됨</span> 초기 초안은 측정된 GPU/PIM idle 비율 + 히스테리시스 deadband로 iteration마다 어드미션을 조정했다. 그 피드백 모델은 이 풀 모델로 대체된다: 스케줄러는 측정된 idle에 반응하는 대신 steering으로 <i>고정 목표</i>를 맞힌다(deadband σ는 자체 제작 프레임워크에서 측정 불가였다). <code class=\"inline\">ARCHITECTURE.md §6.4</code> 참조."
   });
@@ -2844,44 +2851,60 @@ pre.code-block .var { color: #f9a8d4; }
     /* ---- section: Cluster Scheduler (C) ---- */
     "§ 7 — CLUSTER ROUTING": "§ 7 — 클러스터 라우팅",
     "Cluster Scheduler (C) — Per-Node 100K Centering": "클러스터 스케줄러 (C) — 노드별 100K 센터링",
-    "The balanced operating point exists only when a node's in-flight pool is centered at mean ~100K — only then does the local steering (§4) hit (decode 62 ∧ Σkv 6.15M at prefill 128). At server scale (hundreds–thousands of nodes) the global arrival mean drifts above 100K, so a cluster-level scheduler C routes requests to seat each node at that operating point, with a global age-cap for inter-node FIFO fairness and an on-node 3-tier multi-turn KV cache.":
-      "균형 동작점은 노드의 in-flight 풀이 <b>평균 ~100K</b>에 센터링됐을 때만 존재한다 &mdash; 그때만 국소 steering(§4)이 맞는다(prefill 128에서 decode <b>62</b> ∧ Σkv <b>6.15M</b>). 서버 규모(수백~수천 노드)에서는 전역 도착 평균이 100K 위로 떠오르므로, 클러스터 수준 스케줄러 <b>C</b>가 요청을 라우팅해 각 노드를 그 동작점에 앉힌다 &mdash; 노드 간 FIFO 공정성을 위한 전역 age-cap과 노드 내 3-tier multi-turn KV cache를 함께 둔다.",
+    "The balanced operating point exists only when a node's in-flight pool is centered at mean ~100K — only then does the local steering (§4) hit (decode 62 ∧ Σkv 6.15M at prefill 128). At server scale (hundreds–thousands of nodes) the global arrival mean drifts above 100K, so a cluster-level scheduler C routes requests to seat each node at that operating point, with a global age-cap for inter-node FIFO fairness and an on-node 3-tier multi-turn KV cache with holding-node affinity (cached returns routed back to their KV).":
+      "균형 동작점은 노드의 in-flight 풀이 <b>평균 ~100K</b>에 센터링됐을 때만 존재한다 &mdash; 그때만 국소 steering(§4)이 맞는다(prefill 128에서 decode <b>62</b> ∧ Σkv <b>6.15M</b>). 서버 규모(수백~수천 노드)에서는 전역 도착 평균이 100K 위로 떠오르므로, 클러스터 수준 스케줄러 <b>C</b>가 요청을 라우팅해 각 노드를 그 동작점에 앉힌다 &mdash; 노드 간 FIFO 공정성을 위한 전역 age-cap과, 보유 노드 어피니티(캐시된 복귀를 자기 KV로 되돌려 라우팅)를 갖춘 노드 내 3-tier multi-turn KV cache를 함께 둔다.",
     "Why it exists": "왜 필요한가",
-    "Without centering, each node's pool tracks the global arrival mean and drifts high: a node then fits fewer decoders, so a batch falls below count 62 while Σkv rises above 6.15M — both control targets break together and idle blows up. C keeps every node centered at 100K (measured poolMean 117K) so the per-node steering can compose the operating point.":
-      "센터링이 없으면 각 노드의 풀은 전역 도착 평균을 따라가 높게 떠오른다: 그러면 노드가 담는 디코더가 줄어 batch가 <b>count 62 아래로 떨어지는 동시에 Σkv는 6.15M 위로 오른다</b> &mdash; 두 제어 목표가 함께 깨지고 idle이 폭증한다. <b>C</b>는 모든 노드를 100K에 센터링해(측정값 <code class=\"inline\">poolMean 117K</code>) 노드별 steering이 동작점을 구성할 수 있게 한다.",
-    "Design = node mechanism + (1) global age-cap + (2) 3-tier KV cache":
-      "설계 = 노드 메커니즘 + (1) 전역 age-cap + (2) 3-tier KV cache",
-    "C is the node mechanism — resident surplus + per-iteration steering re-selection + per-completion healing — plus two cluster-level additions:":
-      "C는 노드 메커니즘 &mdash; <b>상주 잉여</b> + <b>iteration별 steering 재선택</b> + <b>완료별 힐링</b> &mdash; 에 두 가지 클러스터 수준 추가를 더한 것이다:",
+    "Without centering, each node's pool tracks the global arrival mean and drifts high: a node then fits fewer decoders, so a batch falls below count 62 while Σkv rises above 6.15M — both control targets break together and idle blows up. C keeps every node centered at 100K (measured poolMean 116K) so the per-node steering can compose the operating point.":
+      "센터링이 없으면 각 노드의 풀은 전역 도착 평균을 따라가 높게 떠오른다: 그러면 노드가 담는 디코더가 줄어 batch가 <b>count 62 아래로 떨어지는 동시에 Σkv는 6.15M 위로 오른다</b> &mdash; 두 제어 목표가 함께 깨지고 idle이 폭증한다. <b>C</b>는 모든 노드를 100K에 센터링해(측정값 <code class=\"inline\">poolMean 116K</code>) 노드별 steering이 동작점을 구성할 수 있게 한다.",
+    "Design = node mechanism + (1) global age-cap + (2) 3-tier KV cache + (3) cache affinity":
+      "설계 = 노드 메커니즘 + (1) 전역 age-cap + (2) 3-tier KV cache + (3) 캐시 어피니티",
+    "C is the node mechanism — resident surplus + per-iteration steering re-selection + per-completion healing — plus three cluster-level additions. The surplus re-selection is a general-purpose perturbation absorber — it digests age-cap forced injections and affinity mismatches alike — which is what let cache affinity land with zero new steering machinery:":
+      "C는 노드 메커니즘 &mdash; <b>상주 잉여</b> + <b>iteration별 steering 재선택</b> + <b>완료별 힐링</b> &mdash; 에 세 가지 클러스터 수준 추가를 더한 것이다. 잉여 재선택은 <b>범용 섭동 흡수기</b>다 &mdash; age-cap 강제 주입과 어피니티 mismatch를 똑같이 소화한다 &mdash; 이 덕분에 캐시 어피니티가 새 steering 기구 없이 안착했다:",
     "(1) Global age-cap (inter-node FIFO fairness). A node requests ideal = hole; the global queue returns a near-fit, but any request older than global_age_cap is force-routed regardless of fit. Bounded wait, no starvation across nodes.":
       "<b>(1) 전역 age-cap (노드 간 FIFO 공정성).</b> 노드는 <code class=\"inline\">ideal = hole</code>을 요청하고, 전역 큐는 근접한 것을 돌려준다. 다만 <code class=\"inline\">global_age_cap</code>보다 오래된 요청은 적합도와 무관하게 <b>강제 라우팅</b>된다. 대기가 유한하고 노드 간 기아가 없다.",
-    "(2) On-node multi-turn 3-tier KV cache. HBM hit / SSD reload / recompute. When a conversation's length > 16000 and residual HBM fits, its KV is cached in HBM; evict_age idle turns demote it (SSD at offload_bw), gone_age turns trigger recompute.":
-      "<b>(2) 노드 내 multi-turn 3-tier KV cache.</b> <b>HBM hit / SSD reload / recompute.</b> 대화의 <code class=\"inline\">length &gt; 16000</code>이고 잔여 HBM이 맞으면 그 KV를 HBM에 캐싱한다. <code class=\"inline\">evict_age</code>만큼 유휴 턴이 지나면 강등되고(<code class=\"inline\">offload_bw</code>로 SSD에), <code class=\"inline\">gone_age</code> 턴이 지나면 recompute를 트리거한다.",
+    "(2) On-node multi-turn 3-tier KV cache. HBM hit / SSD reload / recompute. When a conversation's length > 16000 and residual HBM fits, its KV is cached in HBM; evict_age idle turns demote it (SSD at offload_bw), gone_age turns trigger recompute. Dynamic cache budget: pool-KV inflation from multi-turn (measured ~0.24 TB ≈ 23% of the cache budget) is debited from the node's cache budget each round — an HBM-byte closed loop (static accounting overstated HBM-hit by ~9%p).":
+      "<b>(2) 노드 내 multi-turn 3-tier KV cache.</b> <b>HBM hit / SSD reload / recompute.</b> 대화의 <code class=\"inline\">length &gt; 16000</code>이고 잔여 HBM이 맞으면 그 KV를 HBM에 캐싱한다. <code class=\"inline\">evict_age</code>만큼 유휴 턴이 지나면 강등되고(<code class=\"inline\">offload_bw</code>로 SSD에), <code class=\"inline\">gone_age</code> 턴이 지나면 recompute를 트리거한다. <b>동적 캐시 예산:</b> 멀티턴이 일으키는 풀-KV 인플레이션(측정 ~0.24 TB ≈ 캐시 예산의 23%)을 매 라운드 노드 캐시 예산에서 차감한다 &mdash; HBM 바이트 폐루프(정적 회계는 HBM-hit를 ~9%p 과대평가했다).",
+    "(3) Cache affinity + spill cap. A multi-turn return whose KV is HBM-cached queues at the holding node; on a hole, 1st priority = the oldest affinity waiter (admitted regardless of length / cap_room), 2nd = the usual pull_slot (global aged-forced, else ideal = hole nearest). Physical (holding-node) hits: 1.7% → 99.7%. Waiters get their own bound aff_spill = 200 — separate from global_age_cap 25, because a cached return's waiting is rewarded (~2 ms/round is ~10× cheaper than a 160–780-round SSD reload). Sweeping 25→200 improved both physical hits (67→99.7%) and Σdev (1.57→1.38%): spilled requests became forced off-fit injections — a worse perturbation than affinity's near like-for-like admits (former residents grown ≤12K; eligibility ≥16K filters high-growth shorts); residuals are absorbed by the existing surplus re-selection + node age-cap machinery. Measured spill: 4 of 13,483 affinity candidates (0.03%) — under the single global cap 25 it was 31% (4,317); the dedicated-cap separation cut it ~1,000×.":
+      "<b>(3) 캐시 어피니티 + spill cap.</b> KV가 HBM에 캐싱된 멀티턴 복귀는 보유 노드 전용 대기열에 줄을 선다. hole이 생기면 1순위 = 최고령 어피니티 대기자(길이·cap_room 무관 admit), 2순위 = 평소의 <code class=\"inline\">pull_slot</code>(글로벌 aged 강제, 아니면 ideal=hole 최근접). 물리(보유 노드) hit: <b>1.7% → 99.7%</b>. 대기자에게는 별도 상한 <code class=\"inline\">aff_spill = 200</code>을 둔다 &mdash; <code class=\"inline\">global_age_cap 25</code>와 분리. 캐시 보유 복귀의 대기에는 보상이 있기 때문이다(라운드당 ~2 ms는 160&ndash;780라운드짜리 SSD reload보다 ~10배 싸다). 25→200 sweep은 물리 hit(67→99.7%)와 Σdev(1.57→1.38%)를 <i>동시에</i> 개선했다: spill된 요청은 강제 off-fit 주입이 되는데, 이는 어피니티의 거의 like-for-like admit(과거 상주분이 ≤12K 성장; eligibility ≥16K가 고성장 short를 거름)보다 더 나쁜 섭동이다. 잔여 섭동은 기존 잉여 재선택 + 노드 age-cap 기구가 흡수한다. 실측 spill: <b>어피니티 후보 13,483건 중 4건(0.03%)</b> &mdash; 글로벌 cap 25를 그대로 쓰던 설계에선 31%(4,317건)였고, 전용 cap 분리가 이를 ~1,000배 줄였다.",
     "C config (locked)": "C 설정 (고정)",
     "parameter": "파라미터",
     "value": "값",
     "role": "역할",
     "resident surplus per node → decode_pool 149": "노드당 상주 잉여 → <code>decode_pool</code> <b>149</b>",
+    "resident prefill pool — depth-diversity floor 50 + surplus margin 10 (prefill-side surplus; over-provisioning risks age-cap forcing)":
+      "상주 프리필 풀 — depth-diversity 하한 50 + 잉여 마진 10 (프리필 측 잉여; 과대 시 age-cap 강제 위험)",
+    "idle turns before the SSD entry expires → recompute (fixed assumption)":
+      "SSD 엔트리 소멸 → recompute 전 유휴 턴 수 (고정 가정)",
     "inter-node FIFO cap — oldest-beyond-cap force-routed": "노드 간 FIFO 상한 &mdash; cap 초과 최고령 요청 강제 라우팅",
     "HBM-cache threshold (mid · long): length > 16000": "HBM 캐시 임계값 (mid · long): <code>length &gt; 16000</code>",
     "idle turns before HBM → SSD demotion": "HBM → SSD 강등 전 유휴 턴 수",
     "conservative PIM-exposure penalty weight (β-robust)": "보수적 PIM-노출 페널티 가중치 (β-robust)",
-    "SSD reload bandwidth ≈ 10 GB/s": "SSD reload 대역폭 ≈ 10 GB/s",
+    "SSD reload bandwidth ≈ 50 GB/s NVMe array (assumption label; old 2e7 sat below the recompute break-even ≈ 2.1e7, mathematically disabling the SSD tier)":
+      "SSD reload 대역폭 ≈ 50 GB/s NVMe 어레이 (가정 라벨; 옛 2e7은 recompute 손익분기 ≈ 2.1e7 아래라 SSD 티어가 수학적으로 무력했다)",
     "on-node steering fairness cap": "노드 내 steering 공정성 상한",
+    "HBM-cached returns queue at the holding node — 1st-priority admit on a hole":
+      "HBM 캐시 보유 복귀는 보유 노드 대기열에 — hole 발생 시 1순위 admit",
+    "affinity-wait bound (separate from the global cap) — beyond it, spill to the global queue":
+      "어피니티 대기 상한 (글로벌 cap과 분리) — 초과 시 글로벌 큐로 spill",
+    "multi-turn pool-KV inflation debited from the cache budget each round (HBM-byte closed loop)":
+      "멀티턴 풀-KV 인플레이션을 매 라운드 캐시 예산에서 차감 (HBM 바이트 폐루프)",
     "C KPI (measured)": "C KPI (측정)",
     "TBT mean": "TBT 평균",
     "TTFT mean": "TTFT 평균",
     "TTFT-met": "TTFT 충족",
     "PIM-exposed": "PIM 노출",
-    "worst 16.9%": "최악 16.9%",
+    "worst 22.6%": "최악 22.6%",
     "within SLO": "SLO 이내",
-    "rounds · forced 1626": "라운드 · forced 1626",
+    "physical (holding-node) 99.7%": "물리(보유 노드) 99.7%",
+    "rounds · forced 3704": "라운드 · forced 3704",
     "centered ~100K": "~100K 센터링",
+    "worst token gap": "최악 토큰 간격",
+    "rounds (= node age-cap+1) ≈ 12.2 ms · paused-token share 3.4%": "라운드 (= 노드 age-cap+1) ≈ 12.2 ms · paused 토큰 비율 3.4%",
     "Contention · dependency TBT model": "Contention · 의존성 TBT 모델",
     "Per-layer TBT folds the GPU·PIM dependency and the bus-contention penalty into one recurrence, summed over 80 layers:":
       "레이어당 TBT는 GPU·PIM 의존성과 버스 contention 페널티를 하나의 점화식으로 묶어 <b>80개 레이어</b>에 걸쳐 합산한다:",
-    "Contention-free ⟺ t_pim ≤ t_gpu_a — the PIM decode read hides entirely in the GPU-A shadow, so the penalty term vanishes. β = 0.5 is the conservative assumption label; C is β-robust (goodput stays fixed across the full β range). The operating point sits on the PIM-hiding edge (derive balances t_pim ≈ t_gpu_a), so exposure is frequent (73.5%) but each exposure costs only ~1% of the ~25.5 µs per-layer budget (≈ 0.25 µs/layer) — yielding TBT mean 2056 µs against the ~2.0 ms (80×25.5µs) budget.":
-      "<b>Contention-free</b> ⟺ <code class=\"inline\">t_pim ≤ t_gpu_a</code> &mdash; PIM decode read가 GPU-A 그림자 안에 완전히 숨어 페널티 항이 사라진다. <code class=\"inline\">β = 0.5</code>는 <b>보수적</b> 가정 라벨이다. C는 <b>β-robust</b>다(β 전 구간에서 goodput 고정). 동작점은 <b>PIM-hiding 경계</b>에 놓이므로(derive가 <code class=\"inline\">t_pim ≈ t_gpu_a</code>를 맞춤) 노출은 잦지만(<b>73.5%</b>) 한 번의 노출 비용은 레이어당 <b>~25.5 µs</b> 예산의 <b>~1%</b>(≈ 0.25 µs/layer)에 불과하다 &mdash; 그 결과 ~2.0 ms(80×25.5µs) 예산 대비 TBT 평균 <b>2056 µs</b>를 얻는다.",
+    "Contention-free ⟺ t_pim ≤ t_gpu_a — the PIM decode read hides entirely in the GPU-A shadow, so the penalty term vanishes. β = 0.5 is the conservative assumption label; C is β-robust (goodput stays fixed across the full β range). The operating point sits on the PIM-hiding edge (derive balances t_pim ≈ t_gpu_a), so exposure is frequent (74.4%) but each exposure costs only ~1% of the ~25.5 µs per-layer budget (≈ 0.26 µs/layer) — yielding TBT mean 2058 µs against the ~2.0 ms (80×25.5µs) budget.":
+      "<b>Contention-free</b> ⟺ <code class=\"inline\">t_pim ≤ t_gpu_a</code> &mdash; PIM decode read가 GPU-A 그림자 안에 완전히 숨어 페널티 항이 사라진다. <code class=\"inline\">β = 0.5</code>는 <b>보수적</b> 가정 라벨이다. C는 <b>β-robust</b>다(β 전 구간에서 goodput 고정). 동작점은 <b>PIM-hiding 경계</b>에 놓이므로(derive가 <code class=\"inline\">t_pim ≈ t_gpu_a</code>를 맞춤) 노출은 잦지만(<b>74.4%</b>) 한 번의 노출 비용은 레이어당 <b>~25.5 µs</b> 예산의 <b>~1%</b>(≈ 0.26 µs/layer)에 불과하다 &mdash; 그 결과 ~2.0 ms(80×25.5µs) 예산 대비 TBT 평균 <b>2058 µs</b>를 얻는다.",
     "OPERATING POINT Invariant across this section: Llama-3 70B + DGX B200, prefill 128 → decode 62, Σ KV 6.15M, balanced ctx ~100K, ~25.5 µs/layer → TBT ~2.0 ms over 80 layers.":
       "<span class=\"callout-title\">동작점</span> 이 절 전반의 불변: <b>Llama-3 70B + DGX B200</b>, prefill <b>128</b> → decode <b>62</b>, Σ KV <b>6.15M</b>, balanced ctx <b>~100K</b>, ~25.5 µs/layer → 80개 레이어에서 TBT ~2.0 ms."
   });
@@ -2933,7 +2956,7 @@ pre.code-block .var { color: #f9a8d4; }
       "정상상태에서 두 lane 모두 <b>가득 찬다</b>: GPU가 μ-batch <b>M+i</b>의 QKV를 도는 동안 PIM은 μ-batch <b>M+i&minus;1</b>의 decode-attn을 돌며, 양쪽에 idle 간격이 없다. 채널 분리(KV-cache 채널 vs weight-streaming 채널)가 HBM 버스 contention을 없앤다. μ-batch당 cycle이 <code>t_proj + t_attn</code>에서 <code>max(t_proj, t_attn)</code>으로 줄어들고 &mdash; 길게 staggered된 스트림에서는 둘 중 느린 쪽이 정상상태 cadence가 된다.",
 
     "Inter-Instance A↔B Pipeline": "인스턴스 간 A↔B 파이프라인",
-    "2-active compose · composition 100% · Σdev 0.38%": "2-active 구성 · composition 100% · Σdev 0.38%",
+    "2-active compose · composition ≈99.5% · Σdev ≈1.2%": "2-active 구성 · composition ≈99.5% · Σdev ≈1.2%",
     "In steady state, Instance A processes μ-batch M (attention + projection) while Instance B processes μ-batch M-1 (FFN) — the two instances handle different μ-batches at the same wall-clock instant. The per-layer effective time drops from t_A + t_B to max(t_A, t_B). The pool-model sim composes μ-batches to the operating point where the three per-cycle times match to <1%, confirming both instances actively contribute (§6.8).":
       "정상상태에서 Instance A가 μ-batch <b>M</b>(attention + projection)을 처리하는 동안 Instance B는 μ-batch <b>M-1</b>(FFN)을 처리한다 &mdash; 두 인스턴스가 같은 wall-clock 순간에 <i>서로 다른</i> μ-batch를 다룬다. 레이어당 유효 시간이 <code>t_A + t_B</code>에서 <code>max(t_A, t_B)</code>로 줄어든다. 풀 모델 sim은 세 per-cycle 시간이 <code>&lt;1%</code>로 일치하는 <b>동작점으로 μ-batch를 구성</b>하며, 두 인스턴스가 모두 능동적으로 기여함을 확인한다(§6.8).",
 
@@ -3041,8 +3064,8 @@ pre.code-block .var { color: #f9a8d4; }
     /* ---- section 7: Results (part 2) ---- */
     "Runtime validation — 2 active μ-batch (integrated lifecycle)":
       "런타임 검증 &mdash; 2 active μ-batch (통합 lifecycle)",
-    "One integrated sim (../puls-engine/sim/lifecycle.cpp) runs cold-start → steering · prefill→decode transition · per-completion healing · age-cap 5 on a wide synthetic pool. A node runs 2 active μ-batches; when one finishes its forward pass it is re-composed from (returned members + surplus) — no 3rd batch is force-composed. Deployed prefill 128. Statistics are over the last 500 of 1000 rounds × 16 nodes = 8,000 node-rounds (16,000 decode · 8,000 prefill batches).":
-      "하나의 통합 sim(<code class=\"inline\">../puls-engine/sim/lifecycle.cpp</code>)이 넓은 합성 풀에서 cold-start → steering · prefill→decode 전이 · 완료별 힐링 · age-cap 5를 실행한다. 노드는 <b>2개의 active μ-batch</b>를 돌리며, 하나가 forward pass를 끝내면 <b>(반환된 멤버 + 잉여)로 재구성</b>된다 &mdash; <i>3번째 batch를 강제 구성하지 않는다</i>. 배포 prefill 128. 통계는 <b>1000 라운드 중 마지막 500 × 16 노드 = 8,000 node-round</b>(16,000 decode · 8,000 prefill batch) 기준이다.",
+    "One integrated sim (../puls-engine/sim/lifecycle.cpp) runs cold-start → steering · prefill→decode transition · per-completion healing · age-cap 5 on a wide synthetic pool. A node runs 2 active μ-batches; when one finishes its forward pass it is re-composed from (returned members + surplus) — no 3rd batch is force-composed. Deployed prefill 128. Statistics: puls_lifecycle 4000 64 5 2000 — last 3,500 of 4,000 rounds × 64 nodes (re-verified 2026-06: decode 99.87% / Σdev 1.233%, prefill 100% / Σdev 0.114%).":
+      "하나의 통합 sim(<code class=\"inline\">../puls-engine/sim/lifecycle.cpp</code>)이 넓은 합성 풀에서 cold-start → steering · prefill→decode 전이 · 완료별 힐링 · age-cap 5를 실행한다. 노드는 <b>2개의 active μ-batch</b>를 돌리며, 하나가 forward pass를 끝내면 <b>(반환된 멤버 + 잉여)로 재구성</b>된다 &mdash; <i>3번째 batch를 강제 구성하지 않는다</i>. 배포 prefill 128. 통계: <code class=\"inline\">puls_lifecycle 4000 64 5 2000</code> &mdash; <b>4,000 라운드 중 마지막 3,500 × 64 노드</b> (2026-06 재검증: decode 99.87% / Σdev 1.233%, prefill 100% / Σdev 0.114%).",
     "composition — operating-point hit (with dependency · age-cap)":
       "<b>composition &mdash; 동작점 도달 (의존성 · age-cap 포함)</b>",
     "operating-point target": "동작점 목표",
