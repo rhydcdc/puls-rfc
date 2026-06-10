@@ -68,7 +68,10 @@ int main() {
     // JEDEC 산출: 16단·64스택 = 32ch×16Gb/8 × 64 = 64GB×64 = 4096GB = 4.096 TB (문서 4.40 은 오기).
     CHECK_REL(h16.hbm_capacity_tb, 4.096, 0.005, "16단 = 4.096 TB (64stack × 64GB, JEDEC 32ch×16Gb)");
     CHECK_REL(h12.hbm_capacity_tb, 3.072, 0.005, "12단 = 3.072 TB (×12/16)");
-    CHECK(h16.hbm_fits && h12.hbm_fits, "70B@128 (3.02TB, 잉여25) fits both 12/16단");
+    // E8 재도출: prefill_pool 60→80 (2-active 2×128) 로 instance_a 3.02→~3.20 TB —
+    // 12단(3.072 TB) 경계를 넘어 배포 16단만 적합. die-stack 변수가 실제 판정에 작용하는 사례.
+    CHECK(h16.hbm_fits, "70B@128 (잉여25, prefill_pool 80) fits 16단");
+    CHECK(!h12.hbm_fits, "70B@128 (prefill_pool 80, ~3.20TB) no longer fits 12단 (3.072TB)");
     // 경계: 12단(3.072)과 16단(4.096) 사이 점유면 16단만 적합 — die-stack 변수가 판정에 작용.
     if (b16.instance_a_tb > 3.072 && b16.instance_a_tb < 4.096) {
         CHECK(b16.hbm_fits && !b12.hbm_fits, "boundary load fits 16단 but not 12단 (변수 작용)");

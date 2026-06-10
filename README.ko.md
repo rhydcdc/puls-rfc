@@ -13,9 +13,10 @@
 상세 본문 — [`ARCHITECTURE.md`](ARCHITECTURE.md) (substrate, instance disaggregation, scheduler integration, adaptive admission, layer flow, prior art 비교 통합).
 
 > **업데이트 일지.**
-> - **1차 업그레이드 — 스케줄러 로직 일반화.** 모델·HW 변수화 `derive` + 단일 CONTRACT 아래 `runtime` / `sim` / `validation` 분리 ([`puls-engine`](puls-engine/CONTRACT.md), 196 checks). 동작점은 hand-set 이 아니라 *도출*된다.
+> - **1차 업그레이드 — 스케줄러 로직 일반화.** 모델·HW 변수화 `derive` + 단일 CONTRACT 아래 `runtime` / `sim` / `validation` 분리 ([`puls-engine`](puls-engine/CONTRACT.md), 197 checks). 동작점은 hand-set 이 아니라 *도출*된다.
 > - **2차 업그레이드 — 글로벌 스케줄러 + 인스턴스 종속성 모델.** **글로벌 age-cap**(노드 간 FIFO 공정성 → 강제 라우팅)과 **on-node 멀티턴 KV 캐시**를 추가하고, TBT 에 **인스턴스 내/간 종속성**을 모델링(Instance A→B 종속성 + PIM↔GPU-A HBM 경합). 승리한 클러스터 설계는 **C**, config 와 수치는 [클러스터 스케줄러 (C)](#cluster-scheduler-c).
 > - **3차 업그레이드 — 물리적 캐시 어피니티 + 정직한 회계.** 멀티턴 복귀를 이제 KV 를 HBM 에 물리적으로 보유한 노드로 라우팅하고(어피니티 대기열, hole 발생 시 1순위; 글로벌 age-cap 25 와 별도의 spill cap 200 — 캐시된 복귀에게 기다림은 보상이 있다), 캐시 예산은 멀티턴 풀-KV 팽창분(실측 ~0.24 TB)만큼 동적으로 차감하며, SSD reload 상수를 현실적 NVMe-array 값으로 정정(2e7 → 1e8 B/round; 옛 값은 recompute 손익분기 2.1e7 보다 5% 낮아 tier 2 가 수학적으로 무용했음), per-request 토큰 간격 KPI([PAUSE])로 배치 레벨 TBT 의 일시정지 비용 사각을 메운다. 물리적 캐시 명중 1.7% → 99.7%. 수치는 [클러스터 스케줄러 (C)](#cluster-scheduler-c).
+> - **4차 업그레이드 — 2-active prefill 일관성 + prefill_pool 재도출.** 두 active μ-batch 가 각각 128 prefill 토큰을 싣는다(라운드당 256, request-disjoint — chunk k+1 은 chunk k 의 KV 가 필요); lifecycle sim 의 라운드당 1회 prefill 회계를 2×128 로 정정하고, prefill_pool 을 60→80 으로 재도출(batch-1 그리디가 ideal 근방 depth 를 선점해 batch-2 의 잔여 depth 커버리지가 빈곤해짐: 60 → batch2 96.3%/1.84%; 80 = knee 99.06%/0.54%). Prefill throughput 2배(transition ×1.9). Instance A 3.02→3.20 TB (16-high 전용), 캐시 예산 −0.18 TB → hbmHit 91.1→87.9%, TTFT +1.5% — 이전에 미계상이던 prefill 의 정직한 청구서. 수치 전반 갱신.
 
 ## 목차
 
@@ -123,7 +124,7 @@ PULS 는 **특정 타겟 워크로드에 한정되지 않는다.** 배치 구성
 - **Steering 은 풀의 평균 길이를 보지 않는다** — 짧은·긴 요청을 **조합**해 동작점 네 타깃(배포 128: decode 개수 62 ∧ Σkv 6.15M, prefill 128 토큰 ∧ depth-work 12.8M; OPERATING_POINT §4.1)만 맞춘다.
 - 따라서 **decode 와 prefill 이 풀에 풍부한 어떤 분산-서버-스케일 워크로드든** — 길이 분포가 짧든 길든 혼합이든 bimodal 이든 — 동작점에 수렴한다.
 - (균형 ctx ~100K 는 KV 캡 유도용 중간값일 뿐, 워크로드 강제값 아님.)
-- **동작점(idle≈0) 도달 조건** = 풀에 decode·prefill 이 *풍부* (고동시성 분산 서빙의 대량 상주 decode 풀 + 지속 prefill). 실서버 정상상태가 정확히 이 영역. [Runtime Validation](#runtime-validation) 에서 **2 active μ-batch + 종속성·age-cap** 를 한 sim 에 넣고 동작점에 구성, **디코드 ≈99.5% 명중·Σdev ≈1.2% / 프리필 100%·Σdev ≈0.1%** 로 실증.
+- **동작점(idle≈0) 도달 조건** = 풀에 decode·prefill 이 *풍부* (고동시성 분산 서빙의 대량 상주 decode 풀 + 지속 prefill). 실서버 정상상태가 정확히 이 영역. [Runtime Validation](#runtime-validation) 에서 **2 active μ-batch + 종속성·age-cap** 를 한 sim 에 넣고 동작점에 구성, **디코드 99.92% 명중·Σdev 1.28% / 프리필 ≈99.5%·Σdev 0.32%** 로 실증.
 - **풀이 얕으면**(저부하·짧은 decode 만) PIM 또는 GPU-A 가 노는 건 *물리적 정상*(고칠 대상 아님) — 동작점은 풀이 풍부할 때의 균형점이다.
 
 ## 가속 Source 요약
@@ -169,7 +170,7 @@ Llama-3 70B + DGX B200 + HBM4 substrate 위 4 가속 source (Aux1·Aux2·F3·F5)
 |---|---|---|
 | Aux1 | Mixed batching 가중치 재사용 | **2.0×** (closed-form), 1.97× (Colab T4 측정) |
 | Aux2 | KV bus traffic 감소 | **4.95× speedup, 79.8% 감소** |
-| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep); 통합 lifecycle sim 이 **2 active μ-batch 를 동작점에 구성, 디코드 ≈99.5%·Σdev ≈1.2% / 프리필 100%·Σdev ≈0.1% (balance 발현)** — [Runtime Validation](#runtime-validation) |
+| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep); 통합 lifecycle sim 이 **2 active μ-batch 를 동작점에 구성, 디코드 99.92%·Σdev 1.28% / 프리필 ≈99.5%·Σdev 0.32% (balance 발현)** — [Runtime Validation](#runtime-validation) |
 | F5 | Channel-independent vs lock-step | **5.15× speedup** (KV variance dominant) |
 
 ### Aggregate Speedup
@@ -190,21 +191,21 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (F5 포함)**.
 - **모델 — 2 active μ-batch (3 아님).**
   - 한 노드는 2 μ-batch 만 동시 active(F2/F3 overlap).
   - 한 배치의 forward pass 가 끝나면 그 멤버가 풀로 돌아오고 **(반환분 + 상주 잉여)에서 다시 1 배치 재선택**(메모리 할당 0) — *3번째 배치를 강제 구성하지 않는다.*
-  - 완료 요청은 per-completion 힐링으로 같은 크기 보충, prefill 완료는 decode 로 전이, 공정성 age-cap = 5. 배포 prefill 128.
+  - 완료 요청은 per-completion 힐링으로 같은 크기 보충, prefill 완료는 decode 로 전이, 공정성 age-cap = 5. 배포 prefill 2×128 (두 active batch 모두, request-disjoint — chunk k+1 은 chunk k 의 KV 필요).
 
 **composition — 동작점 명중 ([puls-engine/sim/lifecycle.cpp](puls-engine/sim/lifecycle.cpp), 종속성·age-cap 포함; 재현: `puls_lifecycle 4000 64 5 2000`):**
 
 | 2 active μ-batch (완료시 재구성) | 동작점 타깃 | 명중 | Σdev |
 |---|---|---|---|
-| **decode** | 62 ∧ Σkv 6.15M | **≈99.5%** | **≈1.2%** |
-| **prefill** | 128 토큰 ∧ depth-work 12.8M | **100%** | **≈0.1%** |
+| **decode** | 62 ∧ Σkv 6.15M | **99.92%** | **1.280%** |
+| **prefill b1 / b2** | 128 토큰 ∧ depth-work 12.8M (2-active 2×128, request-disjoint) | **100% / 99.06%** | **0.107% / 0.537%** |
 
 > **(2026-06 sim 충실화 정정)** 이전 디코드 100%/Σdev 0.38% 는 lifecycle sim 의 힐링
 > 버그(센터링 admit `ideal≈ctx_balance` → 풀 all-mid 붕괴, 긴 요청 0% → composition trivial)에서
 > 나온 값이었다. canonical 힐링(per-completion `ideal=hole`, like-for-like) + 엣지 게이팅 +
 > prompt-무관 현실 decode 길이 + best-of-2000 무한풀 근사로 정정하면, 분포 보존(≈20/70/10)된
-> 다양 풀에서 디코드 ≈99.5%/Σdev≈1.2% (age_cap 5) — §3 sweep 의 cap5 spread(0.7%)와 정합.
-> 프리필 100%/Σdev≈0.1%.
+> 다양 풀에서 디코드 99.92%/Σdev 1.28% (age_cap 5) — §3 sweep 의 cap5 spread(0.7%)와 정합.
+> 프리필(2-active 2×128) 합산 ≈99.5%/Σdev 0.32% (b1 100%/0.107% · b2 99.06%/0.537%).
 
 해석:
 
@@ -250,20 +251,22 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (F5 포함)**.
 
 | config (잠금) | 값 | | KPI (C, 실측) | 값 |
 |---|---|---|---|---|
-| decode_surplus | **25** (decode_pool 149) | | Σdev (avg / worst) | **1.38% / 22.6%** |
-| global_age_cap | **25** | | TBT (mean / p99) | **2058 / 2194 µs** |
-| aff_spill | **200** | | TTFT (mean / p99) | **0.76M / 8.77M µs** |
-| affinity / dyncache | **on** | | SLO goodput | **3.80M tok/s** |
-| eligibility | **16000** (mid · long) | | TTFT-met | **97.2%** |
-| evict_age | 200 | | cache HBM-hit | **91.1% (물리적 99.7%)** |
-| contention β | 0.5 (보수적; C 는 β-robust) | | max wait | **24 rounds** |
+| decode_surplus | **25** (decode_pool 149) | | Σdev (avg / worst) | **1.42% / 22.6%** |
+| global_age_cap | **25** | | TBT (mean / p99) | **2059 / 2223 µs** |
+| aff_spill | **200** | | TTFT (mean / p99) | **0.78M / 8.96M µs** |
+| affinity / dyncache | **on** | | SLO goodput | **3.79M tok/s** |
+| eligibility | **16000** (mid · long) | | TTFT-met | **97.0%** |
+| evict_age | 200 | | cache HBM-hit | **87.9% (물리적 99.7%)** |
+| contention β | 0.5 (보수적; C 는 β-robust) | | max wait | **26 rounds** |
 | offload_bw | 1e8 (SSD ≈ 50 GB/s NVMe array) | | worst token gap | **6 rounds** (= 노드 age-cap+1) |
 | node_age_cap | 5 | | | |
 
 - **[PAUSE] KPI — per-request 토큰 간격.** 배치 레벨 TBT 에는 보이지 않는다 (노드-cap 스윕 전체에서 TBT p99 동일); 노드 age-cap 이 최악 간격을 정확히 cap+1 라운드로 상한 (cap 5 → 12.2 ms, 일시정지 토큰 3.4%, 평균 간격 1.12) — 순수 tail-bound knob.
 
+- **캐시 예산 1.075 → 0.891 TB** — prefill_pool 80 (2-active 2×128) 이 Instance A 의 KV 예약을 3.02 → 3.20 TB 로 올림 (12-high 3.072 TB 에 더 이상 안 들어감, 배포는 16-high 전용); pool 60 대비 실측 청구서: hbmHit −3.2%p, TTFT +1.5%, goodput −0.3%.
+
 - **C 는 두 대안을 모든 실 KPI 에서 능가한다** — 노드-로컬 baseline A(글로벌 age-cap 없음 → TTFT 0.94M · `max_wait` 4551, 무상한 starvation, 길이 편향; 캐시 off)와 순수 pre-positioning B(잉여 없음 → Σdev 20.1%, PIM exposed 82.5%, goodput 2.15M tok/s).
-- **현실적 SSD 상수에서 A 는 상당히 회복하므로**(TTFT 1.75M → 0.94M), C 의 남은 우위는 상한 있는 대기(24 vs 4551)·composition·물리적으로 실재하는 캐시 tier 에 있다 — 더 작지만 더 방어 가능한 우위.
+- **현실적 SSD 상수에서 A 는 상당히 회복하므로**(TTFT 1.75M → 0.94M), C 의 남은 우위는 상한 있는 대기(26 vs 4551)·composition·물리적으로 실재하는 캐시 tier 에 있다 — 더 작지만 더 방어 가능한 우위.
 - **도출된 동작점은 그대로**(62 · 6.15M · ~100K · prefill 128) — 잉여 / age-cap / 캐시 / β 는 그 *위에서* 스윕하는 클러스터-레이어 knob 이지 동작점 변경이 아니다.
 - 전체 A/B/C 비교·스윕·경합 분석은 [`ARCHITECTURE.md`](ARCHITECTURE.md) §7.6.
 
@@ -290,11 +293,11 @@ PULS 의 핵심 스케줄러 정책 ([`ARCHITECTURE.md`](ARCHITECTURE.md) §6) �
 - [`README.md`](README.md) — 본 문서 (entry point)
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — 아키텍처 본문 (motivation, design principles, substrate, instance disaggregation, scheduler integration, 풀 모델 admission + 2-active 구성 검증 §6.8, layer flow, prior art 비교)
 - [`OPERATING_POINT.md`](OPERATING_POINT.md) — Phase-2 동작점 & 배치 구성 canonical spec (풀 모델, steering 타깃, 동작점 구성 근거)
-- [`puls-engine/`](puls-engine/CONTRACT.md) — 모델·HW 일반화 C++ 스케줄러 (derive · steering · node/global scheduler · lifecycle sim, 196 checks)
+- [`puls-engine/`](puls-engine/CONTRACT.md) — 모델·HW 일반화 C++ 스케줄러 (derive · steering · node/global scheduler · lifecycle sim, 197 checks)
 - [`docs/scheduler_policy.html`](docs/scheduler_policy.html) — interactive reading guide (ARCHITECTURE.md §6 동반)
 - [`LICENSE`](LICENSE) — Apache 2.0
 
-빌드·검증: `cd puls-engine && bash build.sh` → 196 checks.
+빌드·검증: `cd puls-engine && bash build.sh` → 197 checks.
 
 ## License
 

@@ -1,8 +1,9 @@
 // PULS-ENGINE — 통합 lifecycle 시뮬레이터. CONTRACT.md §2 (sim = WorkloadSource / 분포 B) / §3-②.
 //
 // 목적: 한 노드 내부의 *통합* lifecycle — 프리필→디코드 종속성 + age-cap + per-completion
-//   ideal=hole 힐링 + 엣지 게이팅 — 이 동작점 composition 을 디코드 ≈99.5% / Σdev ≈1.7%
-//   (배포, age_cap 5) · 프리필 100% / ≈0.1% 로 유지함을 재현한다.
+//   ideal=hole 힐링 + 엣지 게이팅 — 이 동작점 composition 을 디코드 ≈99.9% / Σdev ≈1.3%
+//   · 프리필(2-active 2×128) ≈99.5% / ≈0.3% (b1 100%/0.11 · b2 99.1%/0.54) 로 유지함을
+//   재현한다. (`puls_lifecycle 4000 64 5 2000`, prefill_pool 80 — E8 재도출)
 //
 // 근거 의도: implementation/analysis/cluster_lifecycle.cpp (admitDecodeCentered / composeDecodeBatch
 //   2회 used 공유 / composePrefill / main 루프의 프리필 진행·전이(ready)·디코드 advance·완료 retire·
@@ -215,6 +216,7 @@ int main(int argc, char** argv) {
 
     // 누적 측정.
     double accDecHit = 0, accDecDev = 0, accPfHit = 0, accPfDev = 0;
+    double accPf1Hit = 0, accPf1Dev = 0, accPf2Hit = 0, accPf2Dev = 0;  // E8: 배치별 분리
     double accDecMean = 0, accDecPool = 0, accReady = 0, accPfPool = 0;
     double accAgedDec = 0, accAgedPf = 0;  // aged(wait≥age_cap) 비율 — 디코드 vs 프리필 비교.
     double accDecForced = 0, accDecSel = 0;  // 배치당 강제 개수 / 선택 개수(=62면 count 충족).
@@ -228,6 +230,7 @@ int main(int argc, char** argv) {
 
     for (int it = 0; it < ITERS; ++it) {
         double rDecHit = 0, rDecDev = 0, rPfHit = 0, rPfDev = 0;
+        double rPf1Hit = 0, rPf1Dev = 0, rPf2Hit = 0, rPf2Dev = 0;  // E8
         double rDecMean = 0, rDecPool = 0, rReady = 0, rPfPool = 0;
         double rResid[3] = {0, 0, 0};
         double rAgedDec = 0, rAgedPf = 0;
@@ -244,28 +247,50 @@ int main(int argc, char** argv) {
             { int a = 0; for (const auto& q : pf) if (q.wait >= op.age_cap) ++a;
               rAgedPf += pf.empty() ? 0 : (double)a / pf.size(); }
 
-            // ── ① 프리필 steering (core: steer_prefill_chunks) ──
-            std::vector<PrefillReq> preqs;
-            preqs.reserve(pf.size());
-            for (const auto& q : pf) preqs.push_back(PrefillReq{q.prompt, q.processed, q.wait});
-            std::vector<int> chunk = steer_prefill_chunks(preqs, op);
-            // depth-합 work = Σ over 배정 토큰의 depth(processed+1..processed+chunk).
-            double W = 0;
-            int T = 0;
-            for (int i = 0; i < (int)pf.size(); ++i) {
-                if (chunk[i] > 0) {
-                    int p0 = pf[i].processed;
-                    W += (double)chunk[i] * p0 + (double)chunk[i] * (chunk[i] + 1) / 2.0;
-                    T += chunk[i];
+            // ── ① 프리필 steering ×2 (2-active 정합 — E8): 두 활성 μ-batch 가 각각 128
+            //    프리필 토큰을 실으므로 라운드당 2회(총 256). 같은 요청의 청크 k+1 은 청크 k 의
+            //    KV 가 써져야 하므로 두 동시 배치는 *요청 단위 disjoint* — 디코드 used 공유와
+            //    동형. 배치1 이 배정한 요청은 배치2 에서 processed=prompt 로 가장해 자연 배제. ──
+            auto pf_steer_once = [&](const std::vector<char>& mask, std::vector<int>& chunk_out,
+                                     double& dev_out, bool& hit_out) {
+                std::vector<PrefillReq> preqs;
+                preqs.reserve(pf.size());
+                for (int i = 0; i < (int)pf.size(); ++i) {
+                    if (mask[i]) preqs.push_back(PrefillReq{pf[i].prompt, pf[i].prompt, 0});
+                    else         preqs.push_back(PrefillReq{pf[i].prompt, pf[i].processed, pf[i].wait});
                 }
-            }
-            double pfdev = std::fabs(W - (double)op.prefill_kv_work_target)
-                         / (double)op.prefill_kv_work_target;
-            bool pfhit = (T == op.prefill_tokens) && (pfdev <= op.idle_band);
+                chunk_out = steer_prefill_chunks(preqs, op);
+                // depth-합 work = Σ over 배정 토큰의 depth(processed+1..processed+chunk).
+                double W = 0;
+                int T = 0;
+                for (int i = 0; i < (int)pf.size(); ++i) {
+                    if (chunk_out[i] > 0) {
+                        int p0 = pf[i].processed;
+                        W += (double)chunk_out[i] * p0 + (double)chunk_out[i] * (chunk_out[i] + 1) / 2.0;
+                        T += chunk_out[i];
+                    }
+                }
+                dev_out = std::fabs(W - (double)op.prefill_kv_work_target)
+                        / (double)op.prefill_kv_work_target;
+                hit_out = (T == op.prefill_tokens) && (dev_out <= op.idle_band);
+            };
+            std::vector<char> pfmask(pf.size(), 0);
+            std::vector<int> chunk1, chunk2;
+            double pfdev1 = 1, pfdev2 = 1;
+            bool pfhit1 = false, pfhit2 = false;
+            pf_steer_once(pfmask, chunk1, pfdev1, pfhit1);
+            for (int i = 0; i < (int)pf.size(); ++i)
+                if (chunk1[i] > 0) pfmask[i] = 1;  // 배치1 소유 요청 → 배치2 배제(disjoint)
+            pf_steer_once(pfmask, chunk2, pfdev2, pfhit2);
+            const double pfdev = (pfdev1 + pfdev2) / 2.0;
+            const double pfhit = ((pfhit1 ? 1.0 : 0.0) + (pfhit2 ? 1.0 : 0.0)) / 2.0;
+            rPf1Hit += pfhit1 ? 1.0 : 0.0; rPf1Dev += pfdev1;
+            rPf2Hit += pfhit2 ? 1.0 : 0.0; rPf2Dev += pfdev2;
 
-            // 진행 + age 갱신 + 전이(종속성): processed+=chunk; processed≥prompt → ready.
+            // 진행 + age 갱신 + 전이(종속성): processed += chunk1+chunk2; processed≥prompt → ready.
             for (int i = 0; i < (int)pf.size(); ++i) {
-                if (chunk[i] > 0) { pf[i].processed += chunk[i]; pf[i].wait = 0; }
+                const int c = chunk1[i] + chunk2[i];
+                if (c > 0) { pf[i].processed += c; pf[i].wait = 0; }
                 else ++pf[i].wait;
             }
             {
@@ -389,7 +414,7 @@ int main(int argc, char** argv) {
             // 라운드 측정 누적.
             rDecHit += dh;
             rDecDev += dcdev;
-            rPfHit += pfhit ? 1.0 : 0.0;
+            rPfHit += pfhit;
             rPfDev += pfdev;
             rDecMean += dmean;
             rDecPool += dec.size();
@@ -402,6 +427,10 @@ int main(int argc, char** argv) {
             accDecDev += rDecDev / Z;
             accPfHit += rPfHit / Z;
             accPfDev += rPfDev / Z;
+            accPf1Hit += rPf1Hit / Z;
+            accPf1Dev += rPf1Dev / Z;
+            accPf2Hit += rPf2Hit / Z;
+            accPf2Dev += rPf2Dev / Z;
             accDecMean += rDecMean / Z;
             accDecPool += rDecPool / Z;
             accReady += rReady / Z;
@@ -432,9 +461,12 @@ int main(int argc, char** argv) {
     std::printf("[steady-state, 마지막 %d 라운드 × %d 노드]\n", ITERS - WARM, Z);
     std::printf("디코드: 명중 %6.2f%%  Σ편차 %6.3f%%  (live-KV 센터)  풀평균kv %.0f  풀크기 %.1f\n",
                 100.0 * accDecHit / N, 100.0 * accDecDev / N, accDecMean / N, accDecPool / N);
-    std::printf("프리필: 명중 %6.2f%%  Σ편차 %6.3f%%  (depth-work 타깃 %.2fM)  풀크기 %.1f\n",
+    std::printf("프리필: 명중 %6.2f%%  Σ편차 %6.3f%%  (depth-work 타깃 %.2fM)  풀크기 %.1f  "
+                "[2-active: b1 %.2f%%/%.3f%% · b2 %.2f%%/%.3f%%]\n",
                 100.0 * accPfHit / N, 100.0 * accPfDev / N,
-                op.prefill_kv_work_target / 1e6, accPfPool / N);
+                op.prefill_kv_work_target / 1e6, accPfPool / N,
+                100.0 * accPf1Hit / N, 100.0 * accPf1Dev / N,
+                100.0 * accPf2Hit / N, 100.0 * accPf2Dev / N);
     std::printf("종속성: 전이(프리필→디코드) %lld 회, 디코드 완료 %lld 회, ready 대기 평균 %.2f\n",
                 transitions, completions, accReady / N);
     std::printf("drift: 디코드명중 early %.2f%% vs late %.2f%% | 디코드Σdev early %.3f%% vs late %.3f%% "
@@ -447,11 +479,14 @@ int main(int argc, char** argv) {
     std::printf("class 상주분포(post-warm 평균) short/mid/long: %.1f%% / %.1f%% / %.1f%%  (분포B 유입 = 20/70/10)\n",
                 100.0 * resid_cls[0] / N, 100.0 * resid_cls[1] / N, 100.0 * resid_cls[2] / N);
     std::printf("\n[SUMMARY] decode_pool=%d age_cap=%d Z=%d bestK=%d | edge=%.2f%% cutoff=%d | "
-                "DECODE hit=%.2f%% Sdev=%.3f%% mean=%.0f | PREFILL hit=%.2f%% Sdev=%.3f%% | "
+                "DECODE hit=%.2f%% Sdev=%.3f%% mean=%.0f | PREFILL hit=%.2f%% Sdev=%.3f%% "
+                "(b1 %.2f/%.3f b2 %.2f/%.3f) | "
                 "aged d/p=%.1f/%.1f%% | decsel/forced=%.1f/%.1f | resid s/m/l=%.1f/%.1f/%.1f%% | trans=%lld comp=%lld\n",
                 op.decode_pool, op.age_cap, Z, best_of_k, 100.0 * edge_frac, edge_cutoff,
                 100.0 * accDecHit / N, 100.0 * accDecDev / N, accDecMean / N,
                 100.0 * accPfHit / N, 100.0 * accPfDev / N,
+                100.0 * accPf1Hit / N, 100.0 * accPf1Dev / N,
+                100.0 * accPf2Hit / N, 100.0 * accPf2Dev / N,
                 100.0 * accAgedDec / N, 100.0 * accAgedPf / N,
                 accDecSel / N, accDecForced / N,
                 100.0 * resid_cls[0] / N, 100.0 * resid_cls[1] / N, 100.0 * resid_cls[2] / N,

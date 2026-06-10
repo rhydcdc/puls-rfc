@@ -4,23 +4,23 @@
 projection+prefill-attn / FFN=인스턴스 B)의 시간을 맞춰 인스턴스 간 idle 최소화.
 수치는 op-time 직접 산출(PIMExecutor·compute_ffn/gpu_op_time_s, **TP=8** 반영).
 
-> **검증 코드 (PULS 독립, composition 명중만) — puls-engine 두 sim 분담 (196 checks):**
+> **검증 코드 (PULS 독립, composition 명중만) — puls-engine 두 sim 분담 (197 checks):**
 > - [puls-engine/core/global_scheduler.cpp](puls-engine/core/global_scheduler.cpp) — **콜드스타트 분배**:
 >   엣지게이트(긴 것 shed) + interleave-greedy 로 256 노드를 평균 100K 로 채우고, 남은 풀로
 >   **2 disjoint 배치(on2)**가 (count, Σkv) 명중 가능함을 증명.
 > - [puls-engine/sim/lifecycle.cpp](puls-engine/sim/lifecycle.cpp) — **단일 노드 생애**:
 >   콜드스타트 후 steering·전이(프리필→디코드)·per-completion 힐링·age-cap 통합, 디코드(62∧6.15M)·
->   프리필(128∧12.8M) composition 유지를 증명(배포 128, 디코드 **≈99.5% 명중**·프리필 **100%**).
+>   프리필(128∧12.8M, 2-active) composition 유지를 증명(배포 128, 디코드 **99.9% 명중**·프리필 **≈99.5%**).
 >
-> **★ 분산이 이미 작다** — Σdev 디코드 **≈1.2%**·프리필 **≈0.1%** (실현 idle ~0).
+> **★ 분산이 이미 작다** — Σdev 디코드 **≈1.3%**·프리필 **≈0.3%** (실현 idle ~0).
 > *이 편차 크기*가 동작점의 실질 지표 (on2 미달분도 힐링이 메움).
 
 > **일반화 완료 (2026-06).**
-> - 본 문서의 수치(배포 prefill 128 → decode 62·6.15M·ctx≈100K, Instance A ≈3.02 TB 등)는
+> - 본 문서의 수치(배포 prefill 128 → decode 62·6.15M·ctx≈100K, Instance A ≈3.20 TB 등)는
 >   **Llama-3 70B + B200 + HBM4 16단** 기준의 *구체 예시(canonical instantiation)*다.
 > - 이 동작점을 만드는 *방법*(세 자원 균형 도출 + steering·cold-start·healing·age-cap)은
 >   모델·GPU 무관하게 일반화되어 C++ 스케줄러 [`puls-engine/`](puls-engine/CONTRACT.md)로
->   구현·검증됐으며(196 checks), 임의의 모델·GPU 스펙에 대해 **HBM 용량 한도 내에서 동작점을
+>   구현·검증됐으며(197 checks), 임의의 모델·GPU 스펙에 대해 **HBM 용량 한도 내에서 동작점을
 >   산출**한다.
 > - 고정 = HBM4·SP-PIM·KV FP8; 변수 = 모델 스펙·GPU 스펙·prefill·die-stack·가중치 정밀도.
 
@@ -39,7 +39,7 @@ projection+prefill-attn / FFN=인스턴스 B)의 시간을 맞춰 인스턴스 �
 | ⑤ | **decode KV 합 (제어 타깃)** | 12.3M | **6.15M** | 인스턴스 A (PIM) |
 | + | prefill KV-work (제어 타깃) | 25.6M (= 256×depth) | **12.8M** | GPU-A |
 | + | 균형 ctx | ~100K (라마70B+B200 고유, §4·§4.1) | ~100K (prefill 불변·모델/GPU 종속) | — |
-| + | aggregate KV (decode) | 30M → 4.92 TB — 64스택 **초과** | **14.9M decode + 프리필 in-flight = Instance A 합 3.02 TB**, **적합** §4.1 | — |
+| + | aggregate KV (decode) | 30M → 4.92 TB — 64스택 **초과** | **14.9M decode + 프리필 in-flight ≈4.5M = Instance A 합 3.20 TB**, **적합** §4.1 | — |
 
 > - **제어 타깃 = (개수 123, decode-KV 12.3M)** 둘 — steering 이 이 점에 수렴(§3). prefill 은
 >   (256 토큰, depth-합 25.6M).
@@ -112,7 +112,7 @@ window=3 순차 (2 active F2/F3 overlap + 1 전이 여유).
     (보존). ⚠ 이건 age-cap 의 **공정성 *결과*** 이지 분포를 *타깃* 하는 게 아니다 — 배치 구성은
     여전히 avg/분포 안 보고 두 타깃만 맞춘다(길이분산 무관). steering 단독은 ideal-크기만
     cherry-pick 해 off-size 를 starve 시키므로, age-cap 이 그걸 보정해 누락 0 을 보장.
-    + 매 배치 균형(통합 test 실측 Σdev 0.33%; canonical sim 은 ≈1.2%, §4.1) + 대기
+    + 매 배치 균형(통합 test 실측 Σdev 0.33%; canonical sim 은 ≈1.3%, §4.1) + 대기
     ≤ AGE_CAP+1 = 6 batch(cap5 실측 max_wait 6; 옛 "≤3" 은 cap2 시절 표기).
 - **AGE_CAP 트레이드오프 (sweep)**: cap↑ → steering 자유도↑ → spread↓, 단 대기(레이턴시)↑.
   cap↓ → FIFO化 → 공정/저지연이나 spread↑.
@@ -180,12 +180,13 @@ Instance A 는 QKV/O proj(~24GB)만.
 | | prefill 256 | **prefill 128 (배포)** |
 |---|---|---|
 | decode 풀 (×100K) | 30M tok | **14.9M** (풀 149) |
-| prefill in-flight (×~56K) | 8.4M tok | **3.4M** (풀 60) |
-| Instance A 합 | 38.4M → **6.32 TB** | **18.3M → 3.02 TB** |
-| 64 스택(4.096TB) | **초과** ✗ | **적합** ✓ (잉여 ~1.0 TB) |
+| prefill in-flight (×~56K) | 8.4M tok | **~4.5M** (풀 80) |
+| Instance A 합 | 38.4M → **6.32 TB** | **19.4M → 3.20 TB** |
+| 64 스택(4.096TB) | **초과** ✗ | **적합** ✓ (잉여 ~0.89 TB = 캐시 예산) |
 
-- → **prefill 256 은 64 공식 스택에 안 들어가고**(decode 30M 만 4.92TB > 4.096TB), **prefill
-  128(70B)은 3.02 TB 로 들어가며 ~1.0 TB 남는다.**
+- → **prefill 256 은 64 공식 스택에 안 들어가고**(decode 30M 만 4.92TB > 4.096TB; 256 열의
+  in-flight 8.4M 은 옛 풀 추정이나 단독 초과라 재도출 불요), **prefill 128(70B)은 3.20 TB 로
+  들어가며 ~0.89 TB 남는다(캐시 예산). 12단(3.072 TB)은 미적합 — 배포는 16단 전용.**
 - 더 큰 모델은 KV/tok 이 커져 4.096TB 를 더 소비하며, 균형 ctx 도 모델별로 재도출된다 —
   **'ctx 100K 불변'은 라마70B 한정 근사이고, 모델별 재도출이 일반화의 정답**(puls-engine 산출)이다.
 - **어느 규모(예: 405B 급) 이상은 단일 노드(64 스택)에 안 들어가며, 그 경우 노드 간 분산
@@ -196,25 +197,31 @@ Instance A 는 QKV/O proj(~24GB)만.
 
 | 풀 | 크기 | 구성 | 명중 | Σdev |
 |---|---|---|---|---|
-| 디코드 | **149** | 124 (= 2 μ-batch × 62) + **잉여 25** | ≈99.5% | ≈1.2% |
-| 프리필 | **60** | 50 (depth-diversity 하한) + **마진 10** | 100% | ≈0.1% |
+| 디코드 | **149** | 124 (= 2 μ-batch × 62) + **잉여 25** | 99.92% | 1.28% |
+| 프리필 | **80** | 2-active b2 잔여-커버리지 knee (아래) | ≈99.5% (b1 100 · b2 99.06) | 0.32% |
 
 > **(2026-06 sim 충실화 정정)**
 > - 이전 디코드 100%/Σdev 0.38% 는 lifecycle sim 의 힐링 버그(센터링 admit `ideal≈ctx_balance`
 >   → 풀 all-mid 붕괴, 긴 요청 0% → composition trivial)에서 나온 값이었다.
 > - canonical 힐링(per-completion `ideal=hole`, like-for-like) + 엣지 게이팅 + prompt-무관 현실
 >   decode 길이 + best-of-2000 무한풀 근사로 정정하면, 분포 보존(≈20/70/10)된 다양 풀에서
->   디코드 ≈99.5%/Σdev≈1.2% (age_cap 5) — §3 sweep 의 cap5 spread(0.7%)와 정합.
->   프리필 100%/Σdev≈0.1%.
-> - 재현: `puls_lifecycle 4000 64 5 2000` → 디코드 99.87%/1.233%, 프리필 100%/0.114%.
+>   디코드 ≈99.9%/Σdev≈1.3% (age_cap 5) — §3 sweep 의 cap5 spread(0.7%)와 정합.
+>   프리필은 2-active 정합(아래 프리필 80 항목) 후 합 ≈99.5%/0.32%.
+> - 재현: `puls_lifecycle 4000 64 5 2000` → 디코드 99.92%/1.280%, 프리필 합 ≈99.5%/0.32%
+>   (b1 100%/0.107 · b2 99.06%/0.537), 전이 1286 (2-active 회계, 옛 670 의 ~1.9×).
 
 - **잉여 25 (디코드)**: hit 은 잉여 0에서도 100%; 잉여는 재구성(62+잉여→62) cherry-pick 자유도로
   *Σdev(idle 마진)* 를 조이는 knob — 캐시 ON 시 U-knee 가 더 깊어 **25 부근에서 plateau**.
   대형 모델 적재 위해 최소화하되 성능 확보 = 25.
-- **마진 10 (프리필)**: 프리필 풀은 advance(~12/round)+잉여가 아니라 *0→prompt 깊이 파이프라인*.
-  depth-diversity 하한 ~50(40이면 99.5%), 마진 10 = 60. 프리필은 잉여 *과대* 가 위험(age-cap
-  flood, ARCH §7 참조)이지 과소가 아니라, 하한 근처가 메모리 최소이자 안전.
-- **age-cap = 5**: 정의상 wait ≤ 5 batch 보장(공정성), 그 composition 비용이 ~0(위 디코드 ≈99.5% 명중)
+- **프리필 80 (2-active 재도출 — 옛 "하한 ~50 + 마진 10 = 60" 대체)**: 풀은 advance+잉여가
+  아니라 *0→prompt 깊이 파이프라인*. ① 두 활성 μ-batch 가 **각각 128** 프리필 토큰(라운드당
+  256), **요청-disjoint** — 청크 k+1 은 청크 k 의 KV 가 필요(디코드 used 공유와 동형).
+  ② 배치1 그리디는 ~12-15개 요청만 소모하지만 ideal 근처 깊이를 선점(cherry-picking) →
+  **배치2 의 잔여 깊이 커버리지가 새 하한을 결정**. ③ 60 은 b2 96.3%/1.84% 미달; **80 = knee**
+  (b2 99.06%/0.537%, KPI 무감 구간). ④ 100 기각 — 조성 이득은 측정 불가(캐시 1차 vs 조성
+  2차)인데 캐시 손실은 실측됨: ⑤ hbmHit −3.2%p·TTFT +1.5%. 프리필은 잉여 *과대* 가 위험
+  (age-cap flood, ARCH §7 참조)이지 과소가 아니라, knee 가 메모리·캐시 최적이자 안전.
+- **age-cap = 5**: 정의상 wait ≤ 5 batch 보장(공정성), 그 composition 비용이 ~0(위 디코드 99.9% 명중)
   임을 라이프사이클서 실측. §3 sweep 도 cap5 = spread knee(0.7%) — 옛 node-scheduler 2 는
   레이턴시 보수적 선택이었고, 대기 5 ≈ 10ms 는 tail-bound(최악 토큰 간격 ≤ cap+1 라운드, [PAUSE]
   실측 §3)로 정당화 → spread·tail-bound 균형으로 이제 **5 로 통일**.
@@ -222,7 +229,7 @@ Instance A 는 QKV/O proj(~24GB)만.
 **검증 = [puls-engine/sim/lifecycle.cpp](puls-engine/sim/lifecycle.cpp)**
 - 콜드스타트(KV 센터링)→프리필 steering→프리필→디코드 종속성 전이→디코드 steering→
   per-completion 힐링→age-cap 을 한 sim 에 통합.
-- **종속성·age-cap 넣고도 디코드(62 ∧ 6.15M) ≈99.5%·프리필(128 ∧ 12.8M) 100% 명중**.
+- **종속성·age-cap 넣고도 디코드(62 ∧ 6.15M) 99.9%·프리필(128 ∧ 12.8M, 2-active) ≈99.5% 명중**.
 - 로직(steering·greedy·healing·age-cap·KV센터링)은 불변, 동작점 상수 6개만 절반 스케일.
 
 > **MFU caveat (deferred calibration).**
@@ -260,7 +267,7 @@ Instance A 는 QKV/O proj(~24GB)만.
 > **\*** 128 의 spread 는 sweep B 재측정이 아니라 *프리필 무관*(§4: prefill 약분돼 사라짐 →
 > 균형 ctx·spread 가 prefill 에 비의존)이라 256 과 동형으로 둔 값. 128 동작점의 *composition*
 > 은 [puls-engine/sim/lifecycle.cpp](puls-engine/sim/lifecycle.cpp) 통합 sim(§4.1)이
-> 종속성·age-cap 포함 **디코드(62∧6.15M) ≈99.5%·프리필(128∧12.8M) 100% 명중**(Σdev ≈1.2%/≈0.1%)으로 검증.
+> 종속성·age-cap 포함 **디코드(62∧6.15M) 99.9%·프리필(128∧12.8M, 2-active) ≈99.5% 명중**(Σdev 1.28%/0.32%)으로 검증.
 
 → 균형 ctx 가 prefill 무관 100K 고정(=하드웨어 상수). prefill 은 X·배치규모만 스케일.
 (옛 REPORT 의 "512만 균형, 1024+ 실패"는 decode-KV 를 25M 에 고정한 채 prefill 만 올린 측정
@@ -287,5 +294,5 @@ Instance A 는 QKV/O proj(~24GB)만.
 **한 줄 요약**: prefill **128(배포)** → FFN **190토큰** → **decode (개수 62 AND KV합 6.15M) 동시
 타깃** (도출 기준 256 은 379·123·12.3M, 모두 2배). 스케줄러는 KV 길이를 알고 **로컬 그리디
 steering**(매 step 필요한 길이에 가장 가까운 디코더 선택)으로 그 두 타깃에 수렴 — 변종 풀
-spread~1%·통합 lifecycle 디코드 ≈99.5% 검증(§4.1, age-cap 5). ctx 100K 는 하드웨어 상수, prefill 은 스케일
+spread~1%·통합 lifecycle 디코드 99.9% 검증(§4.1, age-cap 5). ctx 100K 는 하드웨어 상수, prefill 은 스케일
 knob(**128 배포** = HBM4 64 스택 적합 / 256 MFU 안전판).
