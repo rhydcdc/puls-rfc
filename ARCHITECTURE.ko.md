@@ -6,7 +6,7 @@
 - 정량 source decomposition (Aux1·Aux2·F3·F5) — [`README.md`](README.md#results) 참조
 - F1·F2 ablation + 절대 metric (TTFT / TPOT / throughput) — 후속 calibration 으로 연기 / silicon 부재로 out of scope
 
-> **일반화 완료 (2026-06).** 본 문서 수치(배포 prefill 128 → decode 62·6.15M·ctx≈100K, Instance A ≈2.77 TB)는 **Llama-3 70B + B200 + HBM4 16단** 기준 *구체 예시*다. 동작점을 만드는 *방법*(세 자원 균형 도출 + steering·cold-start·healing·age-cap)은 모델·GPU 무관 일반화되어 C++ 스케줄러 [`puls-engine/`](puls-engine/CONTRACT.md)로 구현·검증(196 checks)됐으며, 임의 모델·GPU 스펙에 대해 **HBM 용량 한도 내 동작점을 산출**한다. 고정 = HBM4·SP-PIM·KV FP8; 변수 = 모델·GPU 스펙·prefill·die-stack·가중치 정밀도.
+> **일반화 완료 (2026-06).** 본 문서 수치(배포 prefill 128 → decode 62·6.15M·ctx≈100K, Instance A ≈3.20 TB)는 **Llama-3 70B + B200 + HBM4 16단** 기준 *구체 예시*다. 동작점을 만드는 *방법*(세 자원 균형 도출 + steering·cold-start·healing·age-cap)은 모델·GPU 무관 일반화되어 C++ 스케줄러 [`puls-engine/`](puls-engine/CONTRACT.md)로 구현·검증(197 checks)됐으며, 임의 모델·GPU 스펙에 대해 **HBM 용량 한도 내 동작점을 산출**한다. 고정 = HBM4·SP-PIM·KV FP8; 변수 = 모델·GPU 스펙·prefill·die-stack·가중치 정밀도.
 
 ## Table of Contents
 
@@ -425,6 +425,8 @@ on event(kernel K of μ-batch X completes):
 1. **Admission = 풀 보충만.** `request_queue → in-flight (PREFILL)`, aggregate KV budget(`can_admit`) 게이트만. decode/prefill 타깃은 보지 않는다. `prompt_len = 0`(decode-only)이거나 prefill 이 이미 끝난 요청은 즉시 DECODE 전이.
 2. **decode-set steering.** in-flight **DECODE 풀**에서 두 타깃을 동시 명중 — **개수 62 ∧ Σkv 6.15M** (배포 128; 도출 기준 256 은 123·12.3M) — 하도록 로컬 그리디 steering + age-cap 으로 선택. 순수 *선택*(KV admit · 큐 조작 없음; KV 는 풀 진입 시 예약). 미선택은 age(`wait++`), 선택은 리셋(`wait = 0`).
 3. **prefill steering.** in-flight **PREFILL 풀**에서 **128 토큰**(고정 FFN-batch knob, 아래 ①)을 멤버들에 분배해 PREFILL_ATTN depth-합이 **12.8M** 되게, 동일한 per-token 로컬 그리디 + age-cap. 0 토큰 받은 멤버는 *풀에 잔류*(빈 chunk 로 넣지 않음 — 넣으면 μ-batch 가 부풀어 decode 고갈) — decode 와 별개 축.
+   - **2-active prefill 일관성** — 활성 μ-batch *각각*이 자기 128 prefill 토큰을 싣는다(라운드 합 256), 독립 steering; 두 prefill 집합은 **요청-disjoint** — chunk k+1 은 chunk k 의 KV 가 필요하므로 한 요청은 동시에 한 in-flight μ-batch 에서만 prefill (decode 의 shared-used 배제와 동형).
+   - **prefill_pool 80** — 60 에서 재도출: batch-1 의 greedy 가 이상적 depth 를 cherry-pick 해 batch-2 의 잔여 depth coverage 가 빈약해진다; 80 이 knee (수치는 §6.8).
 
 **이 세 관심사는 매 iteration 재실행된다 — per-iteration 재구성.**
 
@@ -458,7 +460,8 @@ on event(kernel K of μ-batch X completes):
     else: ideal=(target_kv−S)/(target_count−n) 에 가장 가까운 디코더 admit   # steering
   나머지 대기: wait += 1
   → (62, 6.15M) 수렴; n 단조 증가 → ≤62 step.
-prefill: 128 토큰을 depth-합 12.8M 되게 동일 steering + age-cap 분배.
+prefill: 활성 μ-batch 별로 128 토큰을 depth-합 12.8M 되게 동일 steering + age-cap 분배
+  (2×128/라운드, 요청-disjoint).
 2 active μ-batch — 완료시 (반환분 + 잉여)로 재구성(capacity 3 = 2 active + 1 전이 여유).
 ```
 
@@ -483,7 +486,7 @@ prefill: 128 토큰을 depth-합 12.8M 되게 동일 steering + age-cap 분배.
 
 - **균형 아닌 스케일 knob** — prefill 은 균형 ctx 가 아니라 *스케일 knob* X — 작을수록 산출주기·HBM 절반씩 줄고 TTFT / throughput 불변(X 가 prefill 에 선형이라 청크·cycle 상쇄), 단 FFN batch 가 MFU knee 위여야.
 - **절반 사다리** — 512→256→**128**: 산출주기 X 101→51→**25.5 µs**, HBM aggregate(decode) 60M→30M→**15M** = 9.8→4.92→**2.46 TB**(FP8 160KiB/tok).
-- **용량 적합** — **128 만 64 공식 스택(4.096 TB)에 적합**(256·512 초과 — OPERATING_POINT §4.1).
+- **용량 적합** — **128 만 64 공식 스택(4.096 TB)에 적합**(256·512 초과 — OPERATING_POINT §4.1). 2-active prefill 의 in-flight KV(풀 80)까지 Instance A 합계 **3.20 TB** — 12단(3.072 TB)을 초과하므로 배포점은 **16단 전용**; die-stack 변수가 이제 실제로 binding.
 - **유일 risk = FFN GEMM MFU 포화** — wave-quant 추정상 batch ~128 포화, 128 배포의 batch = 62 + 128 = **190(> knee, 48% margin)** 이라 포화하나 256(379)보다 여유 적음; 모델 MFU = 0.6 고정이라 knee 미관측(silicon 부재).
 - **결정** — **배포 128, MFU 실측서 190 부족 시 256 복귀**(512 batch 759 더 안전, vLLM 수렴).
 
@@ -535,21 +538,24 @@ PULS 스케줄러의 balanced steady state 에서 **2 active μ-batch + 전이 t
 **다배치 구성 — 2 active μ-batch (배포 모델).**
 
 - **Window** — 2 active + 1 전이 여유(capacity 3). 한 batch 의 forward pass 가 끝나면 **(반환분 + 잉여)로 *재구성*만 하지, 3번째를 강제 구성하지 않는다.**
-- **구성 검증** — 통합 lifecycle([lifecycle.cpp](puls-engine/sim/lifecycle.cpp))이 prefill→decode 종속성·age-cap = 5 포함 배포 128 에서 **디코드(62 ∧ Σkv 6.15M) ≈99.5% 명중 · Σdev ≈1.2% / 프리필(128 ∧ depth-work 12.8M) 100% 명중 · Σdev ≈0.1%**, **age-cap 꼬리 없음**을 검증(로직은 스케일 불변, prefill 256↔128 동형). 재현: `puls_lifecycle 4000 64 5 2000` → 디코드 99.87% / Σdev 1.233% · 프리필 100% / Σdev 0.114%.
-- **공개 검증** — `puls-engine`(`sim/lifecycle.cpp`·`validation/test_*.cpp`, 196 checks).
+- **2-active prefill 일관성** — 활성 μ-batch 둘 다 각자 128 prefill 토큰을 싣고(라운드 합 256), **요청-disjoint**(chunk k+1 은 chunk k 의 KV 필요 — decode 의 shared-used 배제와 동형); lifecycle sim 을 라운드당 1회 prefill 에서 2×128 disjoint 로 정정(prefill→decode 전이 1286, 옛 670 의 ~1.9×).
+- **prefill_pool 재도출 60 → 80** — batch-1 의 greedy 가 ~12–15 요청을 소비하며 이상적 depth 를 cherry-pick 해 batch-2 의 잔여 depth coverage 가 빈약해진다(60: b2 96.3% / Σdev 1.84%). **80 이 knee**(b2 99.06% / 0.537%)이며 KPI-둔감 밴드 안; 100 기각(측정 불가한 구성 이득 대비 측정 가능한 캐시 손실).
+- **구성 검증** — 통합 lifecycle([lifecycle.cpp](puls-engine/sim/lifecycle.cpp))이 prefill→decode 종속성·age-cap = 5 포함 배포 128 에서 **디코드(62 ∧ Σkv 6.15M) 99.92% 명중 · Σdev 1.28% / 프리필(2×128 ∧ 각 depth-work 12.8M) 합산 ≈99.5% 명중 · Σdev 0.32%**, **age-cap 꼬리 없음**을 검증(로직은 스케일 불변, prefill 256↔128 동형). 재현: `puls_lifecycle 4000 64 5 2000` → 디코드 99.92% / Σdev 1.280% · 프리필 b1 100% / 0.107% · b2 99.06% / 0.537%.
+- **공개 검증** — `puls-engine`(`sim/lifecycle.cpp`·`validation/test_*.cpp`, 197 checks).
 
 > **(2026-06 sim 충실화 정정)** 이전 디코드 100%/Σdev 0.38% 는 lifecycle sim 의 힐링
 > 버그(센터링 admit `ideal≈ctx_balance` → 풀 all-mid 붕괴, 긴 요청 0% → composition trivial)에서
 > 나온 값이었다. canonical 힐링(per-completion `ideal=hole`, like-for-like) + 엣지 게이팅 +
 > prompt-무관 현실 decode 길이 + best-of-2000 무한풀 근사로 정정하면, 분포 보존(≈20/70/10)된
 > 다양 풀에서 디코드 ≈99.5%/Σdev≈1.2% (age_cap 5) — §6.4 / OPERATING_POINT §3 sweep 의
-> cap5 spread(0.7%)와 정합. 프리필 100%/Σdev≈0.1%.
+> cap5 spread(0.7%)와 정합. 프리필 100%/Σdev≈0.1%. (이후 2-active 2×128 disjoint prefill 로
+> 재실측 — 현행 canonical 은 위.)
 
 ## 7. 클러스터 스케일: 노드 풀 100K 센터링 라우팅
 
 §6 의 동작점(배포 128: 개수 62 ∧ Σkv 6.15M; 도출 256 은 123·12.3M)은 한 노드의 in-flight 풀이 **~100K 로 센터된 변종 풀**일 때 steering 이 명중한다(§6.4). 단일 노드는 admission 이 그 풀을 유지하지만, **서버스케일 클러스터**(노드 수백–수천)에선 글로벌 도착 평균이 100K 보다 높아 노드별 풀이 100K 위로 drift 한다. 이 절은 그 drift 를 막아 각 노드를 동작점에 앉히는 **클러스터 레이어 라우팅**을 다룬다.
 
-> **스케일 표기.** 본 §7 은 **배포 128 동작점** (도출 기준 256 은 모든 값 2배 — OPERATING_POINT §1). 노드 풀 **149 = 124 + 잉여 25** · 프리필 60(OPERATING_POINT §4.1). 측정 = [global_scheduler.cpp](puls-engine/core/global_scheduler.cpp) `PREFILL=128 NODE_MAX=134`. **edge% 의 gate-shed 성분은 게이트 임계(100K+E) 의존이라 prefill-invariant**(총 edge 는 cap/풀 leftover 까지 더해 256 2.68% · 128 2.17%); on2·Σ편차 는 배치 62(256 의 123 절반)라 분산이 커 256 보다 헐렁(§6.8). 콜드스타트 후 배포 lifecycle 디코드 composition ≈99.5%(§6.8)로 마감.
+> **스케일 표기.** 본 §7 은 **배포 128 동작점** (도출 기준 256 은 모든 값 2배 — OPERATING_POINT §1). 노드 풀 **149 = 124 + 잉여 25** · 프리필 80(OPERATING_POINT §4.1). 측정 = [global_scheduler.cpp](puls-engine/core/global_scheduler.cpp) `PREFILL=128 NODE_MAX=134`. **edge% 의 gate-shed 성분은 게이트 임계(100K+E) 의존이라 prefill-invariant**(총 edge 는 cap/풀 leftover 까지 더해 256 2.68% · 128 2.17%); on2·Σ편차 는 배치 62(256 의 123 절반)라 분산이 커 256 보다 헐렁(§6.8). 콜드스타트 후 배포 lifecycle 디코드 composition 99.92%(§6.8)로 마감.
 
 > **PULS 코어와 독립.** 이 라우팅은 §6 의 배치 구성 알고리즘을 바꾸지 않는다 — 노드에 *어떤 요청을 보내는가* 만 정하는 위층이다. sim 은 PULS 와 독립이며 배치 구성 명중(개수·Σkv)만 보고 op-time 은 보지 않는다. 실 트래픽 부재로 가정 분포 **B**(short 20% [1–16K] / mid 70% [16–256K] / long 10% [256K–1M], 평균 ≈ 116K) 사용 — README 정직 disclosure 와 동일 선상.
 
@@ -585,7 +591,7 @@ batch A forward pass 끝남
 
 즉 노드 풀은 **149 디코더가 평균 100K** 로 상주하고, steering 이 매 iteration 그중 62 를 *골라* 배치를 만든다. 그래서 클러스터 라우팅의 노드별 타깃은 **count 124–134, 평균 ≈ 100K**(count 밴드는 global-scheduler sim 의 `NODE_MAX = 134` — 캐시 이전 잉여-10 설계; 배포 잉여 25 는 상주 풀을 149 로 올림, §7.6) — 이게 충족되면 steering 이 6.15M 짜리 배치 2 개를 disjoint 하게 뽑고, 재선택(87 → 62)도 성립한다.
 
-> **149-평균이 아니라 62-배치가 동작점.** 노드 149-평균 100K 는 *용량/개수* 보장(캡 15M 안에 124–134 fit)이지 배치 구성을 직접 보장하진 않는다. 62-배치가 6.15M 명중하는 건 steering composer + 풀 다양성의 몫(§6.4 길이분산 무관). **배포 동작점 디코드 Σ편차 ≈ 1.2%** (통합 lifecycle 의 per-completion ideal=hole composer, §6.8). 이는 global scheduler 의 *standalone* toxic-fit composer(puls-engine sim, 62-배치 평균 ~98,827·Σ편차 ~1.84% — 분포 보존)와 정합 — 충실화된 배포 healing 이 같은 다양 풀을 보존하기 때문. **≈1.2%** 가 동작점값(디코드 ≈99.5% 명중).
+> **149-평균이 아니라 62-배치가 동작점.** 노드 149-평균 100K 는 *용량/개수* 보장(캡 15M 안에 124–134 fit)이지 배치 구성을 직접 보장하진 않는다. 62-배치가 6.15M 명중하는 건 steering composer + 풀 다양성의 몫(§6.4 길이분산 무관). **배포 동작점 디코드 Σ편차 1.28%** (통합 lifecycle 의 per-completion ideal=hole composer, §6.8). 이는 global scheduler 의 *standalone* toxic-fit composer(puls-engine sim, 62-배치 평균 ~98,827·Σ편차 ~1.84% — 분포 보존)와 정합 — 충실화된 배포 healing 이 같은 다양 풀을 보존하기 때문. **1.28%** 가 동작점값(디코드 99.92% 명중).
 
 ### 7.3 Cold-start: 엣지 게이팅 + interleave greedy
 
@@ -644,7 +650,7 @@ ideal = (target_footprint − sum) / 남은 slot
 
 - **트레이드오프 방향** — E ↓ → 센터링 빡빡하나 엣지 ↑; E ↑ → 엣지 ↓ but 평균 drift → count floor 미달.
 - **채택** — **E = 1K 채택** — edge 2.17% 로 거의 완벽 센터링.
-- **on2 해석** — cold-start 의 on2 < 100% 는 composition 실패가 아니라 일부 노드의 *count floor 미스*(~105 < 124)이며, 힐링이 메운다(62-배치라 256 의 ~98%보다 on2 다소 낮음 — §6.8; 그래도 배포 lifecycle 은 디코드 ≈99.5%).
+- **on2 해석** — cold-start 의 on2 < 100% 는 composition 실패가 아니라 일부 노드의 *count floor 미스*(~105 < 124)이며, 힐링이 메운다(62-배치라 256 의 ~98%보다 on2 다소 낮음 — §6.8; 그래도 배포 lifecycle 은 디코드 99.92%).
 
 **Healing 안정성** (per-completion, 완료확률 p, 마지막 150 라운드 평균):
 
@@ -656,8 +662,8 @@ ideal = (target_footprint − sum) / 남은 slot
 
 - **Drift 0** — 힐링 진입 후 **drift 0**(warmup 직후 ≈ 마지막 라운드).
 - **상태 보존** — per-completion 은 **cold-start 의 상태(다양·평균 100K)를 그대로 유지** — 노드 *평균*이 100K 에서 ±4.7\~5.3K(`|평균−100K|`, 센터링 품질), on2 ~93%, count ~133 정상(완료 자리만 채워 124–134 운용).
-- **어느 Σ편차가 어느 것인가** — 표의 `62-배치 Σ편차 1.84%` 는 **global scheduler 의 standalone composer(puls-engine sim)**(분포 보존) 값이고, **배포 동작점 디코드 Σdev ≈ 1.2%** — 통합 lifecycle 의 per-completion ideal=hole composer(§6.8)이며 둘 다 다양 풀을 보존해 정합.
-- **on2 해석** — on2 가 256(~98%)보다 낮은 것도 62-배치 분산(§6.8)이며, 배포 lifecycle 은 healing+steering 으로 **디코드 ≈99.5% 명중·Σdev ≈1.2%**.
+- **어느 Σ편차가 어느 것인가** — 표의 `62-배치 Σ편차 1.84%` 는 **global scheduler 의 standalone composer(puls-engine sim)**(분포 보존) 값이고, **배포 동작점 디코드 Σdev 1.28%** — 통합 lifecycle 의 per-completion ideal=hole composer(§6.8)이며 둘 다 다양 풀을 보존해 정합.
+- **on2 해석** — on2 가 256(~98%)보다 낮은 것도 62-배치 분산(§6.8)이며, 배포 lifecycle 은 healing+steering 으로 **디코드 99.92% 명중·Σdev 1.28%**.
 
 **toxic-fit 검증 — 긴 요청(≥256K) 보존** (E = 1K, p = 3%, 300 라운드):
 
@@ -668,9 +674,9 @@ ideal = (target_footprint − sum) / 남은 slot
 
 - **batched 는 실패** — batched 는 긴 요청을 완전히 굶겨(8.04% → 0.01%) 분포를 ~100K 로 좁히고(그래서 dev 8·on2 100% 로 *과도하게* 깨끗) 긴 요청을 엣지로 쏠리게 한다.
 - **per-completion 은 성립** — **per-completion 은 긴 요청을 보존**(8.23% → 7.36%, pull-긴요청 7.67% = 도착률대로 소비)해 toxic-fit 을 실현 → 엣지가 cold-start 비율 유지.
-- **결론** — **초반 ~2.2% 엣지 비용만 감수하면, 그 뒤로는 greedy cold-start + per-completion healing 으로 PIM 을 각 노드 평균 100K 동작점에서 무한정 운용**한다. 공개 검증은 `puls-engine`(`sim/lifecycle.cpp`·`validation/test_*.cpp`, 196 checks).
+- **결론** — **초반 ~2.2% 엣지 비용만 감수하면, 그 뒤로는 greedy cold-start + per-completion healing 으로 PIM 을 각 노드 평균 100K 동작점에서 무한정 운용**한다. 공개 검증은 `puls-engine`(`sim/lifecycle.cpp`·`validation/test_*.cpp`, 197 checks).
 
-> **honest disclosure.** sim 가정: (a) 분포 B 는 가정값(실 트래픽 부재), (b) 무한 풀은 best-of-K 샘플로 모사, (c) churn 은 완료확률 p 의 추상화(실 decode-step 누적 아님), (d) steady-state 엣지는 직접 추적 대신 pull-긴요청률(≈ 도착률)로 간접 확인, (e) **본 global-scheduler sim(puls-engine)은 디코드 풀 센터링·on2 만** 본다(프리필→디코드 종속성·프리필 dual-target 미반영). 그 종속성·프리필(128 토큰 ∧ depth-work 12.8M)·**age-cap = 5** 를 다 넣은 통합 검증은 [lifecycle.cpp](puls-engine/sim/lifecycle.cpp)(§6.8)이 **디코드 ≈99.5% · 프리필 100% 명중**(sim 충실화 정정 이후, §6.8)으로 마감한다 — global scheduler(분배·on2) + lifecycle(노드 생애)의 두-sim 분담. cold-start E-스윕엔 age-cap 영향이 작아 global-scheduler sim 에선 생략(§6.4 sweep).
+> **honest disclosure.** sim 가정: (a) 분포 B 는 가정값(실 트래픽 부재), (b) 무한 풀은 best-of-K 샘플로 모사, (c) churn 은 완료확률 p 의 추상화(실 decode-step 누적 아님), (d) steady-state 엣지는 직접 추적 대신 pull-긴요청률(≈ 도착률)로 간접 확인, (e) **본 global-scheduler sim(puls-engine)은 디코드 풀 센터링·on2 만** 본다(프리필→디코드 종속성·프리필 dual-target 미반영). 그 종속성·프리필(2×128 토큰 ∧ 각 depth-work 12.8M, 요청-disjoint)·**age-cap = 5** 를 다 넣은 통합 검증은 [lifecycle.cpp](puls-engine/sim/lifecycle.cpp)(§6.8)이 **디코드 99.92% · 프리필 ≈99.5% 명중**(sim 충실화 정정 이후, §6.8)으로 마감한다 — global scheduler(분배·on2) + lifecycle(노드 생애)의 두-sim 분담. cold-start E-스윕엔 age-cap 영향이 작아 global-scheduler sim 에선 생략(§6.4 sweep).
 
 ### 7.6 클러스터 스케줄러 C: 글로벌 age-cap + 멀티턴 캐시 + 종속·경합 TBT
 
@@ -681,7 +687,7 @@ ideal = (target_footprint − sum) / 남은 slot
 | 조각 | 하는 일 | 구현 |
 |---|---|---|
 | **글로벌 age-cap** | 노드는 `ideal = hole`(완료 요청의 크기, like-for-like, §7.4)을 계산한다. 글로벌 큐는 그 크기에 가장 가까운 요청을 돌려준다 — *단*, cap 을 넘겨 대기한 요청이 있으면 **가장 오래된 것**(off-fit)을 강제 라우팅한다. 노드 간 대기를 묶는다(bound); cap 이 작으면 → 돌려받는 요청이 빨리 처리되고 → 그 KV 가 아직 캐시의 evict 윈도우 안에 있다. | `pull_slot` |
-| **노드 멀티턴 KV 캐시** | 3-tier: **HBM hit**(상주, 비용 0) → **SSD reload**(오프로드, 비용 ∝ 길이 ÷ `offload_bw`) → **recompute**(소멸). 완료 요청은 `length > eligibility`(mid · long — 분포 B 의 short/mid 경계)**이고** 디코드 풀이 쓰고 남은 HBM 에 들어갈 때만 HBM 캐시된다. `evict_age` idle → HBM→SSD 강등; `gone_age` → recompute. 캐시 예산은 멀티턴 풀-KV 인플레이션(설계 footprint 를 넘는 라이브 풀 KV, 실측 ~0.24 TB ≈ 예산의 23% — 옛 정적 회계는 hbmHit 를 ~9%p 과대평가)만큼 **동적으로 차감**되고, HBM-상주 엔트리가 있는 복귀는 보유 노드로 **affinity-라우팅**된다. | 3-tier `cache` |
+| **노드 멀티턴 KV 캐시** | 3-tier: **HBM hit**(상주, 비용 0) → **SSD reload**(오프로드, 비용 ∝ 길이 ÷ `offload_bw`) → **recompute**(소멸). 완료 요청은 `length > eligibility`(mid · long — 분포 B 의 short/mid 경계)**이고** 디코드 풀이 쓰고 남은 HBM 에 들어갈 때만 HBM 캐시된다. `evict_age` idle → HBM→SSD 강등; `gone_age` → recompute. 캐시 예산은 멀티턴 풀-KV 인플레이션(설계 footprint 를 넘는 라이브 풀 KV, 실측 0.242 TB ≈ 0.891 TB 예산의 27% — 옛 정적 회계는 hbmHit 를 ~9%p 과대평가)만큼 **동적으로 차감**되고, HBM-상주 엔트리가 있는 복귀는 보유 노드로 **affinity-라우팅**된다. | 3-tier `cache` |
 
 **역할 분담 — 왜 셋 다인가.** 잉여 → 구성(Σdev); 글로벌 age-cap → 레이턴시 / 공정성 *그리고* 캐시 활성화(대기를 묶음 ⇒ 돌아오는 세션이 `evict_age` 안에 처리됨 ⇒ HBM hit); 캐시 → TTFT. 셋은 결합돼 있다: age-cap 의 강제 off-fit 주입은 Σdev 를 올리지만 **잉여가 그것을 흡수**한다(재선택이 여전히 62 · 6.15M 명중). 셋 중 하나라도 빼면 C 는 baseline 쪽으로 회귀한다. 잉여 재선택은 이렇게 Σkv 구성만이 아니라 **모든** 배치 교란(age-cap 강제 주입, affinity 미스매치)의 흡수기를 겸한다.
 
@@ -708,27 +714,27 @@ instance_a = max(t_pim, t_gpu_a) + β · max(0, t_pim − t_gpu_a)
 - **PIM↔GPU-A HBM 경합** — `t_pim ≤ t_gpu_a` 일 때만 경합-free(PIM 이 GPU-A 의 그늘에 숨음). 위반 시(PIM *노출*), 노출 조각이 다음 μ-batch 의 QKV back-fill 과 공유 HBM 위에서 겹친다 → `β · exposure` 페널티. `β = 0` 이면 옛 `max(3) × L` 복귀; β 는 **가정 라벨**(silicon 부재)이며 아래에서 sweep.
 - **동작점은 PIM-hiding 가장자리에 앉는다.** `derive` 가 `t_pim ≈ t_gpu_a` 로 균형 잡으므로 PIM 은 *자주 그러나 아슬아슬하게* 노출된다: C 의 경우 μ-batch 의 74.4% 가 노출되지만, 25.5 µs 레이어당 균형 중 **expo 21 µs / μbatch = 0.26 µs / layer ≈ 1%** 뿐이다. 그 1%(× β)는 아래 TBT 수치에 이미 반영돼 있다.
 
-**잉여 ↔ 캐시 HBM 트레이드오프.** 잉여는 디코드 풀의 working set 을 키우고, 캐시는 그 나머지에 산다. **잉여 25(풀 149)가 이제 표준 동작점이며, 그 이유가 U-knee(캐시 ON)다** — 잉여 10 / 풀 134 는 캐시 이전 값이었다. 잉여 25 에선 캐시를 굶기지 않으면서 재선택 자유도↑(Σdev↓). 잉여를 더 올리면 캐시가 줄고(잉여 100 → HBM-hit 0), 글로벌 age-cap 을 ~25 아래로 내리면 forcing 이 폭발한다(cap 5 → forced 11758 vs 3704, 잉여가 더는 off-fit 을 흡수 못 함). **(잉여 25, age-cap 25)** 가 두 knee 가 교차하는 지점이다.
+**잉여 ↔ 캐시 HBM 트레이드오프.** 잉여는 디코드 풀의 working set 을 키우고, 캐시는 그 나머지에 산다. **잉여 25(풀 149)가 이제 표준 동작점이며, 그 이유가 U-knee(캐시 ON)다** — 잉여 10 / 풀 134 는 캐시 이전 값이었다. 잉여 25 에선 캐시를 굶기지 않으면서 재선택 자유도↑(Σdev↓). 캐시 예산 자체는 **0.891 TB**(이전 1.075): 2-active prefill 의 in-flight KV(풀 80 × ~56K tok ≈ +0.18 TB)가 이제 풀 footprint 에 차감된다. 잉여를 더 올리면 캐시가 줄고(잉여 100 → HBM-hit 0), 글로벌 age-cap 을 ~25 아래로 내리면 forcing 이 폭발한다(cap 5 → forced 11758 vs 4029, 잉여가 더는 off-fit 을 흡수 못 함). **(잉여 25, age-cap 25)** 가 두 knee 가 교차하는 지점이다.
 
 **A / B / C 대조** (8000 iters · Z = 64 · offload_bw 1e8; A = node-local baseline, 글로벌 age-cap 없음, 캐시 off · B = 순수 pre-positioning, 잉여 없음 · C = 채택):
 
 | metric | A (baseline) | B (prepo) | **C (adopted)** |
 |---|---|---|---|
-| Σdev avg / worst | 1.42% / 16.5% | 20.1% / 94.1% | **1.38% / 22.6%** |
-| TBT mean / p99 (µs) | 2061 / 2226 | 2598 / 3889 | **2058 / 2194** |
-| TTFT mean / p99 (µs) | 0.94M / 8.9M | 0.89M / 9.0M | **0.76M / 8.8M** |
-| SLO goodput (tok/s) | 3.78M | 2.15M | **3.80M** |
-| TTFT-met % | 97.1 | 96.9 | **97.2** |
-| cache HBM-hit % | 0 (off) | 91.1 | **91.1 (physical 99.7)** |
+| Σdev avg / worst | 1.42% / 16.5% | 20.1% / 94.1% | **1.42% / 22.6%** |
+| TBT mean / p99 (µs) | 2061 / 2226 | 2598 / 3889 | **2059 / 2223** |
+| TTFT mean / p99 (µs) | 0.94M / 8.9M | 0.89M / 9.0M | **0.78M / 8.96M** |
+| SLO goodput (tok/s) | 3.78M | 2.15M | **3.79M** |
+| TTFT-met % | 97.1 | 96.9 | **97.0** |
+| cache HBM-hit % | 0 (off) | 91.1 | **87.9 (physical 99.7)** |
 | PIM-exposed % | 76.2 | 82.5 | 74.4 |
-| max wait (rounds) | 4551 (starve) | 70 | **24** |
-| forced / poolMean | 0 / 117K | 26223 / 117K | 3704 / 116K |
+| max wait (rounds) | 4551 (starve) | 70 | **26** |
+| forced / poolMean | 0 / 117K | 26223 / 117K | 4029 / 116K |
 
-*A 는 본래 잉여 10(업그레이드 이전 노드 설계)으로 돌았으나, 글로벌 age-cap + 캐시 기여를 분리하기 위해 통일된 잉여 25 에서 측정한 값이다.*
+*A 는 본래 잉여 10(업그레이드 이전 노드 설계)으로 돌았으나, 글로벌 age-cap + 캐시 기여를 분리하기 위해 통일된 잉여 25 에서 측정한 값이다. 주변 sweep(spill · β · eligibility)들은 2× prefill 회계 이전(프리필 풀 60: hbmHit 91.1 · Σdev 1.38%) 기록이며, 그 결론 — knee 위치·β-robust·직교성 — 은 풀 80 canonical 열에 그대로 이월된다.*
 
-C 는 모든 실 KPI 에서 1 위 또는 동률이다. `poolMean` 116K 와 `forced` 3704 는 높아 보이지만 무해하다 — 잉여의 재선택이 여전히 낮은 62 를 골라(Σdev 1.38%), 이것이 바로 `poolMean` 과 Σdev 가 decouple 하는 이유다. B 가 TBT 에서 지는 건 잘못 구성된 배치가 PIM 을 더 자주·훨씬 넓게 노출시키기 때문이며(82.5%, expo 381 µs vs C 의 21), 거기서 β 가 문다.
+C 는 모든 실 KPI 에서 1 위 또는 동률이다(TTFT-met 97.0 은 A 보다 0.1%p 낮음 — 풀 80 vs 60 의 실측 청구서: hbmHit −3.2%p · TTFT +1.5% · goodput −0.3%, 이전에 미계상이던 2× prefill 의 정직한 비용). **hbmHit 91.1 → 87.9 는 정정된 회계이지 회귀가 아니다** — 물리 hit 는 99.7% 그대로. `poolMean` 116K 와 `forced` 4029 는 높아 보이지만 무해하다 — 잉여의 재선택이 여전히 낮은 62 를 골라(Σdev 1.42%), 이것이 바로 `poolMean` 과 Σdev 가 decouple 하는 이유다. B 가 TBT 에서 지는 건 잘못 구성된 배치가 PIM 을 더 자주·훨씬 넓게 노출시키기 때문이며(82.5%, expo 381 µs vs C 의 21), 거기서 β 가 문다.
 
-**정직 노트 — 현실적 SSD 는 격차를 줄인다.** `offload_bw` 를 2e7→1e8 로 정정하면(아래 가정 라벨) baseline A 가 크게 회복한다(TTFT 1.75M→0.94M, TTFT-met 97.1%). 따라서 C 의 우위는 묶인 대기(max wait 24 vs A 의 4551 — unbounded, 길이-편향 starvation), 구성, 그리고 물리적으로 실재하는 캐시에 얹힌다 — 옛 2e7 상수 아래보다 작지만 더 방어 가능하다.
+**정직 노트 — 현실적 SSD 는 격차를 줄인다.** `offload_bw` 를 2e7→1e8 로 정정하면(아래 가정 라벨) baseline A 가 크게 회복한다(TTFT 1.75M→0.94M, TTFT-met 97.1%). 따라서 C 의 우위는 묶인 대기(max wait 26 vs A 의 4551 — unbounded, 길이-편향 starvation), 구성, 그리고 물리적으로 실재하는 캐시에 얹힌다 — 옛 2e7 상수 아래보다 작지만 더 방어 가능하다.
 
 **β sweep — C 는 β-robust, B 만 민감:**
 
@@ -755,7 +761,7 @@ C 의 goodput 은 모든 β 에서 평평하고 TBT 는 +21 µs(β 0→1)만 움
 - **가정 라벨(sweep 되거나 고정, silicon-도출 아님):** `β`, `offload_bw`, `think_gap`, SLO 임계값들, `max_tokens` 분포. `offload_bw` 는 2e7→1e8 로 정정: 옛 값은 recompute 손익분기 2.1e7 B/round(= prefill 128 tok/round × 163,840 B/tok)보다 5% 낮아 SSD 티어가 수학적으로 지배당했다; 1e8 ≈ 50 GB/s NVMe 어레이 — 여전히 sweep 되는 가정 라벨. 절대 TBT / TTFT 는 Llama70B + B200 `derive` 의존으로 남는다.
 - **동작점 불변.** 잉여 / 글로벌-age-cap / eligibility / β 는 도출된 동작점(62 · 6.15M · ~100K · prefill 128) *위에서* sweep 되는 클러스터-계층 knob 이지 그 동작점의 변경이 아니다.
 
-재현: `csched 8000 64 16000 200 25 300 0.5 1e8 5 25` (기본값 affinity = on · dyncache = on · aff_spill = 200; 새 knob argv[11] = affinity, argv[12] = dyncache, argv[13] = aff_spill) ([puls-engine/sim/csched.cpp](puls-engine/sim/csched.cpp) driver C · [puls-engine/scheduler/](puls-engine/scheduler/) queue · cache · [puls-engine/sim/kpi.h](puls-engine/sim/kpi.h) 경합 TBT). 이 클러스터-계층 조각들은 `puls-engine`(노드 메커니즘·런타임 경로·196-check 검증을 소유)으로 흡수됐다.
+재현: `csched 8000 64 16000 200 25 300 0.5 1e8 5 25` (기본값 affinity = on · dyncache = on · aff_spill = 200; 새 knob argv[11] = affinity, argv[12] = dyncache, argv[13] = aff_spill) ([puls-engine/sim/csched.cpp](puls-engine/sim/csched.cpp) driver C · [puls-engine/scheduler/](puls-engine/scheduler/) queue · cache · [puls-engine/sim/kpi.h](puls-engine/sim/kpi.h) 경합 TBT). 이 클러스터-계층 조각들은 `puls-engine`(노드 메커니즘·런타임 경로·197-check 검증을 소유)으로 흡수됐다.
 
 ---
 

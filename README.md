@@ -13,9 +13,10 @@ This repo is the public RFC (Request for Comments) of an in-progress prototype. 
 Full body — [`ARCHITECTURE.md`](ARCHITECTURE.md) (substrate, instance disaggregation, scheduler integration, adaptive admission, layer flow, prior art comparison, all integrated).
 
 > **Update log.**
-> - **Upgrade 1 — scheduler logic generalized.** Model/HW-variabilized `derive` + a `runtime` / `sim` / `validation` split under a single CONTRACT ([`puls-engine`](puls-engine/CONTRACT.md), 196 checks). The operating point is derived, not hand-set.
+> - **Upgrade 1 — scheduler logic generalized.** Model/HW-variabilized `derive` + a `runtime` / `sim` / `validation` split under a single CONTRACT ([`puls-engine`](puls-engine/CONTRACT.md), 197 checks). The operating point is derived, not hand-set.
 > - **Upgrade 2 — global scheduler + instance-dependency model.** Added a **global age-cap** (cross-node FIFO fairness → forced routing) and an **on-node multi-turn KV cache**, and modeled the **intra-/inter-instance dependency** in TBT (Instance A→B dependency + PIM↔GPU-A HBM contention). The winning cluster design is **C**; its config and numbers are in [Cluster Scheduler (C)](#cluster-scheduler-c).
 > - **Upgrade 3 — physical cache affinity + honest accounting.** Multi-turn returns are now routed to the node that physically holds their KV in HBM (affinity queue, 1st priority on hole; separate spill cap 200 vs global age-cap 25 — waiting has a reward for cached returns), the cache budget is dynamically debited by multi-turn pool-KV inflation (~0.24 TB measured), the SSD reload constant is corrected to a realistic NVMe-array value (2e7 → 1e8 B/round; the old value sat 5% below the recompute break-even 2.1e7, making tier 2 mathematically useless), and a per-request token-gap KPI ([PAUSE]) closes the pause-cost blind spot of batch-level TBT. Physical cache hits 1.7% → 99.7%. Numbers in [Cluster Scheduler (C)](#cluster-scheduler-c).
+> - **Upgrade 4 — 2-active prefill consistency + prefill_pool re-derivation.** Both active μ-batches carry 128 prefill tokens (256/round, request-disjoint — chunk k+1 needs chunk k's KV); the lifecycle sim's once-per-round prefill accounting is fixed to 2×128, and prefill_pool is re-derived 60→80 (batch-1's greedy cherry-picks near-ideal depths, starving batch-2's residual depth coverage: 60 → batch2 96.3%/1.84%; 80 = knee 99.06%/0.54%). Prefill throughput doubles (transitions ×1.9). Instance A 3.02→3.20 TB (16-high only), cache budget −0.18 TB → hbmHit 91.1→87.9%, TTFT +1.5% — the honest bill for previously unaccounted prefill. Numbers updated throughout.
 
 ## Table of Contents
 
@@ -123,7 +124,7 @@ PULS is **not confined to a specific target workload**, because batch compositio
 - **Steering never looks at the pool's mean length** — it combines short and long requests to hit only the four operating-point targets (deployed 128: decode count 62 ∧ Σkv 6.15M, prefill 128 tokens ∧ depth-work 12.8M; OPERATING_POINT §4.1).
 - Hence **any distributed-server-scale workload with decode and prefill abundant in the pool** — short, long, mixed, or bimodal length distribution alike — converges to the operating point.
 - (The balance ctx ~100K is merely the midpoint used to *derive* the KV cap, not a value imposed on the workload.)
-- **Condition for reaching the operating point (idle ≈ 0)** = decode and prefill are *abundant* in the pool (the large standing decode population + continuous prefill of high-concurrency distributed serving). Real-server steady state is exactly this regime. Demonstrated by an integrated sim with **2 active μ-batch + dependency · age-cap** composing to the operating point at **decode ≈99.5% · Σdev ≈1.2% / prefill 100% · Σdev ≈0.1%** — see [Runtime Validation](#runtime-validation).
+- **Condition for reaching the operating point (idle ≈ 0)** = decode and prefill are *abundant* in the pool (the large standing decode population + continuous prefill of high-concurrency distributed serving). Real-server steady state is exactly this regime. Demonstrated by an integrated sim with **2 active μ-batch + dependency · age-cap** composing to the operating point at **decode 99.92% · Σdev 1.28% / prefill ≈99.5% · Σdev 0.32%** — see [Runtime Validation](#runtime-validation).
 - **When the pool is thin** (low load, short-decode only), PIM or GPU-A idling is *physically normal* (not something to fix) — the operating point is the balance point that holds when the pool is abundant.
 
 ## Acceleration Sources Summary
@@ -169,7 +170,7 @@ Calibrated projection of the four acceleration sources (Aux1·Aux2·F3·F5) on L
 |---|---|---|
 | Aux1 | Mixed batching weight reuse | **2.0×** (closed-form), 1.97× (Colab T4 measured) |
 | Aux2 | KV bus traffic reduction | **4.95× speedup, 79.8% reduction** |
-| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep); the integrated lifecycle sim composes **2 active μ-batches to the operating point, decode ≈99.5% · Σdev ≈1.2% / prefill 100% · Σdev ≈0.1% (balance manifest)** — see [Runtime Validation](#runtime-validation) |
+| F3 | Inter-instance pipeline ratio | 0.92–0.99 (closed-form ctx sweep); the integrated lifecycle sim composes **2 active μ-batches to the operating point, decode 99.92% · Σdev 1.28% / prefill ≈99.5% · Σdev 0.32% (balance manifest)** — see [Runtime Validation](#runtime-validation) |
 | F5 | Channel-independent vs lock-step | **5.15× speedup** (KV variance dominant) |
 
 ### Aggregate Speedup
@@ -190,16 +191,16 @@ Net speedup: **3.57× (closed-form, weight + bus)** → **4–5× (including F5)
 - **Model — 2 active μ-batch (not 3).**
   - A node runs only 2 μ-batches concurrently (F2/F3 overlap).
   - When one batch's forward pass ends, its members return to the pool and **a new batch is re-selected from (the returned members + the standing surplus)** (zero memory allocation) — *no third batch is force-composed.*
-  - Completed requests are refilled like-for-like by per-completion healing, completed prefills transition to decode, age-cap = 5 for fairness. Deployed prefill 128.
+  - Completed requests are refilled like-for-like by per-completion healing, completed prefills transition to decode, age-cap = 5 for fairness. Deployed prefill 2×128 (both active batches, request-disjoint — chunk k+1 needs chunk k's KV).
 
 **composition — operating-point hit ([puls-engine/sim/lifecycle.cpp](puls-engine/sim/lifecycle.cpp), with dependency · age-cap; repro: `puls_lifecycle 4000 64 5 2000`):**
 
 | 2 active μ-batch (re-composed on completion) | operating-point target | hit | Σdev |
 |---|---|---|---|
-| **decode** | 62 ∧ Σkv 6.15M | **≈99.5%** | **≈1.2%** |
-| **prefill** | 128 tokens ∧ depth-work 12.8M | **100%** | **≈0.1%** |
+| **decode** | 62 ∧ Σkv 6.15M | **99.92%** | **1.280%** |
+| **prefill b1 / b2** | 128 tokens ∧ depth-work 12.8M (2-active 2×128, request-disjoint) | **100% / 99.06%** | **0.107% / 0.537%** |
 
-> **(2026-06 sim-faithfulness correction)** The earlier decode 100% / Σdev 0.38% came from a healing bug in the lifecycle sim (centering admit `ideal≈ctx_balance` collapsed the pool to all-mid, starving long requests to 0% → composition trivially perfect). With the canonical healing (per-completion `ideal=hole`, like-for-like) + edge gating + prompt-independent realistic decode lengths + best-of-2000 infinite-pool emulation, on a distribution-preserving (≈20/70/10) diverse pool the deployment point (count 62, age_cap 5) gives decode ≈99.5% / Σdev ≈1.2% — consistent with the §3 age-cap sweep's cap5 spread (0.7%). Prefill stays 100% / Σdev ≈0.1%.
+> **(2026-06 sim-faithfulness correction)** The earlier decode 100% / Σdev 0.38% came from a healing bug in the lifecycle sim (centering admit `ideal≈ctx_balance` collapsed the pool to all-mid, starving long requests to 0% → composition trivially perfect). With the canonical healing (per-completion `ideal=hole`, like-for-like) + edge gating + prompt-independent realistic decode lengths + best-of-2000 infinite-pool emulation, on a distribution-preserving (≈20/70/10) diverse pool the deployment point (count 62, age_cap 5) gives decode 99.92% / Σdev 1.28% — consistent with the §3 age-cap sweep's cap5 spread (0.7%). Prefill (2-active 2×128) combined ≈99.5% / Σdev 0.32% (b1 100%/0.107% · b2 99.06%/0.537%).
 
 Interpretation:
 
@@ -243,20 +244,22 @@ Measured at the deployed operating point ([puls-engine/sim/csched.cpp](puls-engi
 
 | config (locked) | value | | KPI (C, measured) | value |
 |---|---|---|---|---|
-| decode_surplus | **25** (decode_pool 149) | | Σdev (avg / worst) | **1.38% / 22.6%** |
-| global_age_cap | **25** | | TBT (mean / p99) | **2058 / 2194 µs** |
-| aff_spill | **200** | | TTFT (mean / p99) | **0.76M / 8.77M µs** |
-| affinity / dyncache | **on** | | SLO goodput | **3.80M tok/s** |
-| eligibility | **16000** (mid · long) | | TTFT-met | **97.2%** |
-| evict_age | 200 | | cache HBM-hit | **91.1% (physical 99.7%)** |
-| contention β | 0.5 (conservative; C is β-robust) | | max wait | **24 rounds** |
+| decode_surplus | **25** (decode_pool 149) | | Σdev (avg / worst) | **1.42% / 22.6%** |
+| global_age_cap | **25** | | TBT (mean / p99) | **2059 / 2223 µs** |
+| aff_spill | **200** | | TTFT (mean / p99) | **0.78M / 8.96M µs** |
+| affinity / dyncache | **on** | | SLO goodput | **3.79M tok/s** |
+| eligibility | **16000** (mid · long) | | TTFT-met | **97.0%** |
+| evict_age | 200 | | cache HBM-hit | **87.9% (physical 99.7%)** |
+| contention β | 0.5 (conservative; C is β-robust) | | max wait | **26 rounds** |
 | offload_bw | 1e8 (SSD ≈ 50 GB/s NVMe array) | | worst token gap | **6 rounds** (= node age-cap+1) |
 | node_age_cap | 5 | | | |
 
 - **[PAUSE] KPI — per-request token gap.** Invisible to batch-level TBT (TBT p99 identical across the node-cap sweep); the node age-cap bounds the worst gap at exactly cap+1 rounds (cap 5 → 12.2 ms, 3.4% of tokens paused, mean gap 1.12) — a pure tail-bound knob.
 
+- **Cache budget 1.075 → 0.891 TB** — prefill_pool 80 (2-active 2×128) lifts Instance A's KV reservation 3.02 → 3.20 TB (no longer fits 12-high 3.072 TB, deployed 16-high only); measured bill vs pool 60: hbmHit −3.2%p, TTFT +1.5%, goodput −0.3%.
+
 - **C beats both alternatives on every real KPI** — the node-local baseline A (no global age-cap → TTFT 0.94M · `max_wait` 4551, unbounded starvation, length-biased; cache off) and pure pre-positioning B (no surplus → Σdev 20.1%, PIM exposed 82.5%, goodput 2.15M tok/s).
-- **With the realistic SSD constant A recovers substantially** (TTFT 1.75M → 0.94M), so C's remaining edge rests on bounded waiting (24 vs 4551), composition, and the physically-real cache tier — smaller but more defensible.
+- **With the realistic SSD constant A recovers substantially** (TTFT 1.75M → 0.94M), so C's remaining edge rests on bounded waiting (26 vs 4551), composition, and the physically-real cache tier — smaller but more defensible.
 - The **derived operating point is unchanged** (62 · 6.15M · ~100K · prefill 128) — surplus / age-cap / cache / β are cluster-layer knobs swept *on top of* it, not changes to it.
 - Full A/B/C comparison, sweeps, and the contention analysis: [`ARCHITECTURE.md`](ARCHITECTURE.md) §7.6.
 
@@ -283,11 +286,11 @@ The core scheduler policy of PULS ([`ARCHITECTURE.md`](ARCHITECTURE.md) §6) is 
 - [`README.md`](README.md) — this document (entry point)
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — architecture body (motivation, design principles, substrate, instance disaggregation, scheduler integration, pool-model admission + 2-active composition validation §6.8, layer flow, prior-art comparison)
 - [`OPERATING_POINT.md`](OPERATING_POINT.md) — canonical Phase-2 operating-point & batch-composition spec (pool model, steering targets, operating-point basis)
-- [`puls-engine/`](puls-engine/CONTRACT.md) — model/HW-generalized C++ scheduler (derive · steering · node/global scheduler · lifecycle sim, 196 checks)
+- [`puls-engine/`](puls-engine/CONTRACT.md) — model/HW-generalized C++ scheduler (derive · steering · node/global scheduler · lifecycle sim, 197 checks)
 - [`docs/scheduler_policy.html`](docs/scheduler_policy.html) — interactive reading guide (companion to ARCHITECTURE.md §6)
 - [`LICENSE`](LICENSE) — Apache 2.0
 
-Build & validate: `cd puls-engine && bash build.sh` → 196 checks.
+Build & validate: `cd puls-engine && bash build.sh` → 197 checks.
 
 ## License
 
