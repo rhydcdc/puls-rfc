@@ -1,5 +1,7 @@
 # Local-only working area (not for public exposure)
 _local/
+# 다음 대화 핸드오프 프롬프트 (로컬 전용)
+_handoff/
 # ideas/ — 로컬 아이디어·프로토타입·실험 작업장. 프로토타입(C 설계)은 puls-engine 에
 #   전부 흡수됐으므로(어피니티·spill cap·동적 캐시·2-active 프리필) 다시 비공개로 환원.
 ideas/
